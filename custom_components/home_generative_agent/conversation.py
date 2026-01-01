@@ -22,16 +22,39 @@ from voluptuous_openapi import convert
 
 from .agent.graph import workflow
 from .agent.tools import (
+    add,
     add_automation,
+    add_days,
     alarm_control,
     confirm_sensitive_action,
+    current_time,
+    date_diff,
+    define,
+    divide,
+    example_usage,
+    find_nearby_places,
     get_and_analyze_camera_image,
     get_entity_history,
+    get_wikipedia_page,
+    is_leap_year,
+    multiply,
+    next_weekday,
+    parse_human_date,
+    percentage_diff,
+    round_number,
+    search_wikipedia,
+    subtract,
+    subtract_days,
+    synonyms,
+    time_since,
     upsert_memory,
+    week_number,
 )
 from .const import (
     CONF_CRITICAL_ACTION_PIN_ENABLED,
+    CONF_GOOGLE_PLACES_ENABLED,
     CONF_PROMPT,
+    CONF_WIKIPEDIA_ENABLED,
     CRITICAL_ACTION_PROMPT,
     DOMAIN,
     LANGCHAIN_LOGGING_LEVEL,
@@ -204,7 +227,33 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             "get_entity_history": get_entity_history,
             "confirm_sensitive_action": confirm_sensitive_action,
             "alarm_control": alarm_control,
+            "current_time": current_time,
+            "time_since": time_since,
+            "add_days": add_days,
+            "subtract_days": subtract_days,
+            "date_diff": date_diff,
+            "next_weekday": next_weekday,
+            "is_leap_year": is_leap_year,
+            "week_number": week_number,
+            "parse_human_date": parse_human_date,
+            "add": add,
+            "subtract": subtract,
+            "multiply": multiply,
+            "divide": divide,
+            "percentage_diff": percentage_diff,
+            "round_number": round_number,
+            "define": define,
+            "example_usage": example_usage,
+            "synonyms": synonyms,
         }
+        
+        if options.get(CONF_GOOGLE_PLACES_ENABLED, False):
+            langchain_tools["find_nearby_places"] = find_nearby_places
+            
+        if options.get(CONF_WIKIPEDIA_ENABLED, False):
+            langchain_tools["search_wikipedia"] = search_wikipedia
+            langchain_tools["get_wikipedia_page"] = get_wikipedia_page
+
         tools.extend(langchain_tools.values())
 
         # Conversation ID
@@ -299,6 +348,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                 "ha_llm_api": llm_api or None,
                 "hass": hass,
                 "pending_actions": runtime_data.pending_actions,
+                "mem0_client": runtime_data.mem0_client,
             },
             "recursion_limit": 10,
         }

@@ -32,13 +32,19 @@ from homeassistant.helpers.target import (
 )
 from homeassistant.util import dt as dt_util
 from langchain_core.runnables import ConfigurableField
-from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
+from langchain_google_genai import (
+    ChatGoogleGenerativeAI,
+    GoogleGenerativeAIEmbeddings,
+    HarmBlockThreshold,
+    HarmCategory,
+)
 from langchain_ollama import ChatOllama, OllamaEmbeddings
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.store.postgres import AsyncPostgresStore
 from langgraph.store.postgres.base import PostgresIndexConfig
+
 from psycopg.rows import DictRow, dict_row
 from psycopg_pool import AsyncConnectionPool, PoolTimeout
 
@@ -67,6 +73,8 @@ from .const import (
     CONF_GEMINI_EMBEDDING_MODEL,
     CONF_GEMINI_SUMMARIZATION_MODEL,
     CONF_GEMINI_VLM,
+    CONF_MEM0_ENABLED,
+    CONF_MEM0_SERVER_URL,
     CONF_OLLAMA_CHAT_CONTEXT_SIZE,
     CONF_OLLAMA_CHAT_KEEPALIVE,
     CONF_OLLAMA_CHAT_MODEL,
@@ -141,6 +149,7 @@ from .const import (
     SUMMARIZATION_MODEL_PREDICT,
     SUMMARIZATION_MODEL_REPEAT_PENALTY,
     SUMMARIZATION_MODEL_TOP_P,
+    RECOMMENDED_MEM0_SERVER_URL,
     VIDEO_ANALYZER_SNAPSHOT_ROOT,
     VLM_MIRO_STAT,
     VLM_NUM_PREDICT,
@@ -538,6 +547,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             gemini_provider = ChatGoogleGenerativeAI(
                 api_key=gemini_key,
                 model=RECOMMENDED_GEMINI_CHAT_MODEL,
+                safety_settings={
+                    HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_ONLY_HIGH,
+                    HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_ONLY_HIGH,
+                    HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_ONLY_HIGH,
+                    HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_ONLY_HIGH,
+                },
             ).configurable_fields(
                 model=ConfigurableField(id="model"),
                 temperature=ConfigurableField(id="temperature"),
@@ -620,6 +635,27 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     }
 
     db_uri = build_database_uri_from_entry(entry)
+    mem0_client = None
+    db_subentry = next(
+        (s for s in entry.subentries.values() if s.subentry_type == SUBENTRY_TYPE_DATABASE),
+        None,
+    )
+    if db_subentry and db_subentry.data.get(CONF_MEM0_ENABLED):
+        # Use our wrapper client which handles SSE connection via langchain-mcp-adapters
+        from .core.mem0_client import Mem0Client
+        mem0_client = Mem0Client(
+            db_subentry.data.get(CONF_MEM0_SERVER_URL, RECOMMENDED_MEM0_SERVER_URL),
+            hass
+        )
+        # Connect to the MCP server
+        await mem0_client.connect()
+        
+        # Register shutdown handler
+        async def _shutdown_mem0(_event: Any) -> None:
+            await mem0_client.close()
+            
+        from homeassistant.const import EVENT_HOMEASSISTANT_STOP
+        hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, _shutdown_mem0)
 
     if db_uri is not None:
         pool: AsyncConnectionPool[AsyncConnection[DictRow]] | None = (
@@ -893,6 +929,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         face_api_url=face_api_url,
         person_gallery=person_gallery,
         pending_actions={},
+        mem0_client=mem0_client,
     )
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)

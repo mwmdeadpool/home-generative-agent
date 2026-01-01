@@ -9,12 +9,15 @@ import logging
 import math
 import re
 from collections.abc import Mapping
-from datetime import datetime, timedelta
+import calendar
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, cast
+from zoneinfo import ZoneInfo
 
 import aiofiles
 import async_timeout
+import dateparser
 import homeassistant.util.dt as dt_util
 import voluptuous as vol
 import yaml
@@ -35,6 +38,7 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import llm
 from homeassistant.helpers.recorder import get_instance as get_recorder_instance
 from homeassistant.helpers.recorder import session_scope as recorder_session_scope
+from homeassistant.helpers.httpx_client import get_async_client  # Added import
 from homeassistant.util import ulid
 from langchain_core.messages import AnyMessage, HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig  # noqa: TC002
@@ -48,7 +52,9 @@ from ..const import (  # noqa: TID252
     AUTOMATION_TOOL_EVENT_REGISTERED,
     CONF_CRITICAL_ACTION_PIN_HASH,
     CONF_CRITICAL_ACTION_PIN_SALT,
+    CONF_GOOGLE_PLACES_API_KEY,
     CONF_NOTIFY_SERVICE,
+    CONF_WIKIPEDIA_ENABLED,
     CRITICAL_PIN_MAX_LEN,
     CRITICAL_PIN_MIN_LEN,
     HISTORY_TOOL_CONTEXT_LIMIT,
@@ -410,7 +416,6 @@ async def upsert_memory(  # noqa: D417
     memory_id: str = "",
     # Hide these arguments from the model.
     config: Annotated[RunnableConfig, InjectedToolArg()],
-    store: Annotated[BaseStore, InjectedStore()],
 ) -> str:
     """
     INSERT or UPDATE a memory about users in the database.
@@ -432,6 +437,18 @@ async def upsert_memory(  # noqa: D417
     """
     if "configurable" not in config:
         return "Configuration not found. Please check your setup."
+
+    mem0_client = config["configurable"].get("mem0_client")
+    if mem0_client:
+        await mem0_client.tools.save_memory(
+            text=f"Content: {content}\nContext: {context}"
+        )
+        return "Stored memory in mem0."
+
+    # Fallback to postgres store
+    store = config["configurable"].get("store")
+    if not store:
+        return "No memory store configured."
 
     mem_id = memory_id or ulid.ulid_now()
 
@@ -1109,3 +1126,601 @@ async def get_current_device_state(  # noqa: D417
         state_dict[name] = state
 
     return state_dict
+
+
+# ----- Time and Date Tools -----
+
+
+@tool(parse_docstring=True)
+def current_time(  # noqa: D417
+    timezone: str = "Etc/UTC",
+) -> str:
+    """
+    Get the current time in the specified timezone.
+
+    Args:
+        timezone: A valid IANA timezone string, e.g., 'Etc/UTC', 'Asia/Bangkok'.
+            Defaults to 'Etc/UTC'.
+
+    """
+    try:
+        now = datetime.now(ZoneInfo(timezone))
+        return now.isoformat()
+    except Exception as err:
+        return f"Error getting time: {err}"
+
+
+@tool(parse_docstring=True)
+def time_since(  # noqa: D417
+    past_date: str,
+) -> str:
+    """
+    Get human-readable time since a given datetime.
+
+    Args:
+        past_date: A past datetime in ISO 8601 format, e.g. '2024-01-01T00:00:00Z'.
+
+    """
+    try:
+        past = datetime.fromisoformat(past_date.replace("Z", "+00:00"))
+        # Ensure we compare timezone-aware datetimes
+        if past.tzinfo is None:
+            past = past.replace(tzinfo=dt_util.UTC)
+        
+        now = dt_util.utcnow()
+        delta = now - past
+        return f"{delta.days} days, {delta.seconds // 3600} hours ago"
+    except Exception as err:
+        return f"Error calculating time since: {err}"
+
+
+@tool(parse_docstring=True)
+def add_days(  # noqa: D417
+    days: int,
+) -> str:
+    """
+    Get a future date by adding days to today.
+
+    Args:
+        days: Number of days to add to the current date.
+
+    """
+    try:
+        future = datetime.now().date() + timedelta(days=days)
+        return future.isoformat()
+    except Exception as err:
+        return f"Error adding days: {err}"
+
+
+@tool(parse_docstring=True)
+def subtract_days(  # noqa: D417
+    days: int,
+) -> str:
+    """
+    Get a past date by subtracting days from today.
+
+    Args:
+        days: Number of days to subtract from the current date.
+
+    """
+    try:
+        past = datetime.now().date() - timedelta(days=days)
+        return past.isoformat()
+    except Exception as err:
+        return f"Error subtracting days: {err}"
+
+
+@tool(parse_docstring=True)
+def date_diff(  # noqa: D417
+    start: str,
+    end: str,
+) -> str:
+    """
+    Calculate the number of days between two dates.
+
+    Args:
+        start: Start date in ISO format, e.g., '2024-01-01'.
+        end: End date in ISO format, e.g., '2025-01-01'.
+
+    """
+    try:
+        start_date = datetime.fromisoformat(start).date()
+        end_date = datetime.fromisoformat(end).date()
+        diff = (end_date - start_date).days
+        return f"{diff} days"
+    except Exception as err:
+        return f"Error calculating date diff: {err}"
+
+
+@tool(parse_docstring=True)
+def next_weekday(  # noqa: D417
+    weekday: str,
+) -> str:
+    """
+    Get the date of the next given weekday.
+
+    Args:
+        weekday: The name of the weekday (e.g., 'Monday', 'Friday').
+
+    """
+    weekdays = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+    w = weekday.lower()
+    if w not in weekdays:
+        return "Invalid weekday name."
+    today = date.today()
+    today_idx = today.weekday()
+    target_idx = weekdays.index(w)
+    days_ahead = (target_idx - today_idx + 7) % 7
+    if days_ahead == 0:
+        days_ahead = 7
+    return (today + timedelta(days=days_ahead)).isoformat()
+
+
+@tool(parse_docstring=True)
+def is_leap_year(  # noqa: D417
+    year: int,
+) -> bool:
+    """
+    Check if a year is a leap year.
+
+    Args:
+        year: The year to check.
+
+    """
+    return calendar.isleap(year)
+
+
+@tool(parse_docstring=True)
+def week_number(  # noqa: D417
+    date_str: str,
+) -> int | str:
+    """
+    Get the ISO week number of the given date.
+
+    Args:
+        date_str: Date in ISO format (e.g., '2025-05-15').
+
+    """
+    try:
+        return datetime.fromisoformat(date_str).isocalendar().week
+    except Exception as err:
+        return f"Error getting week number: {err}"
+
+
+@tool(parse_docstring=True)
+def parse_human_date(  # noqa: D417
+    description: str,
+) -> str:
+    """
+    Parse a human-readable date expression.
+
+    Args:
+        description: A natural language description of a date, e.g. 'next Friday'.
+
+    """
+    try:
+        parsed = dateparser.parse(description)
+        if not parsed:
+            return "Could not parse the date description."
+        return parsed.date().isoformat()
+    except Exception as err:
+        return f"Error parsing date: {err}"
+
+
+# ----- Math Tools -----
+
+
+@tool(parse_docstring=True)
+def add(  # noqa: D417
+    a: float,
+    b: float,
+) -> float:
+    """
+    Add two numbers.
+
+    Args:
+        a: The first number.
+        b: The second number.
+
+    """
+    return a + b
+
+
+@tool(parse_docstring=True)
+def subtract(  # noqa: D417
+    a: float,
+    b: float,
+) -> float:
+    """
+    Subtract b from a.
+
+    Args:
+        a: The number to subtract from.
+        b: The number to subtract.
+
+    """
+    return a - b
+
+
+@tool(parse_docstring=True)
+def multiply(  # noqa: D417
+    a: float,
+    b: float,
+) -> float:
+    """
+    Multiply two numbers.
+
+    Args:
+        a: The first factor.
+        b: The second factor.
+
+    """
+    return a * b
+
+
+@tool(parse_docstring=True)
+def divide(  # noqa: D417
+    a: float,
+    b: float,
+) -> float | str:
+    """
+    Divide a by b.
+
+    Args:
+        a: The numerator.
+        b: The denominator (must not be 0).
+
+    """
+    if b == 0:
+        return "Error: Cannot divide by zero."
+    return a / b
+
+
+@tool(parse_docstring=True)
+def percentage_diff(  # noqa: D417
+    original: float,
+    new: float,
+) -> dict[str, Any] | str:
+    """
+    Calculate the percentage difference between two values.
+
+    Args:
+        original: Original value.
+        new: New value.
+
+    """
+    if original == 0:
+        return "Error: Original value cannot be zero."
+    percent = ((new - original) / abs(original)) * 100
+    return {
+        "percentage_change": round(percent, 2),
+        "direction": "increase" if percent > 0 else "decrease" if percent < 0 else "no change"
+    }
+
+
+@tool(parse_docstring=True)
+def round_number(  # noqa: D417
+    value: float,
+    places: int = 0,
+) -> dict[str, Any]:
+    """
+    Round a number to a given number of decimal places.
+
+    Args:
+        value: Value to round.
+        places: Number of decimal places.
+
+    """
+    return {
+        "rounded_value": round(value, places),
+        "decimal_places": places
+    }
+
+
+# ----- Dictionary Tools -----
+
+API_BASE = "https://api.dictionaryapi.dev/api/v2/entries/en/"
+
+
+@tool(parse_docstring=True)
+async def define(  # noqa: D417
+    word: str,
+    *,
+    config: Annotated[RunnableConfig, InjectedToolArg()],
+) -> dict[str, Any]:
+    """
+    Get the definition(s) of an English word.
+
+    Args:
+        word: The word to define.
+
+    """
+    if "configurable" not in config:
+        return {"error": "Configuration not found"}
+    hass = config["configurable"]["hass"]
+    client = get_async_client(hass)
+
+    try:
+        response = await client.get(f"{API_BASE}{word}")
+        data = response.json()
+        if isinstance(data, dict) and data.get("title") == "No Definitions Found":
+            return {"error": f"No definitions found for '{word}'"}
+        
+        # data is a list of entries
+        if not isinstance(data, list):
+             return {"error": "Unexpected API response format"}
+
+        meanings = []
+        for entry in data:
+            for meaning in entry.get("meanings", []):
+                meanings.append({
+                    "part_of_speech": meaning.get("partOfSpeech"),
+                    "definitions": [d.get("definition") for d in meaning.get("definitions", [])]
+                })
+        return {"word": word, "meanings": meanings}
+    except Exception as err:
+        return {"error": f"Error fetching definition: {err}"}
+
+
+@tool(parse_docstring=True)
+async def example_usage(  # noqa: D417
+    word: str,
+    *,
+    config: Annotated[RunnableConfig, InjectedToolArg()],
+) -> list[str] | dict[str, str]:
+    """
+    Get example usage of a word, if available.
+
+    Args:
+        word: The word to look up examples for.
+
+    """
+    if "configurable" not in config:
+        return {"error": "Configuration not found"}
+    hass = config["configurable"]["hass"]
+    client = get_async_client(hass)
+    
+    try:
+        response = await client.get(f"{API_BASE}{word}")
+        data = response.json()
+        if isinstance(data, dict) and data.get("title") == "No Definitions Found":
+            return []
+        
+        if not isinstance(data, list):
+             return {"error": "Unexpected API response format"}
+
+        examples = []
+        for entry in data:
+            for meaning in entry.get("meanings", []):
+                for definition in meaning.get("definitions", []):
+                    ex = definition.get("example")
+                    if ex:
+                        examples.append(ex)
+        return examples
+    except Exception as err:
+        return {"error": f"Error fetching examples: {err}"}
+
+
+@tool(parse_docstring=True)
+async def synonyms(  # noqa: D417
+    word: str,
+    *,
+    config: Annotated[RunnableConfig, InjectedToolArg()],
+) -> list[str] | dict[str, str]:
+    """
+    Get synonyms for a word, if available.
+
+    Args:
+        word: The word to find synonyms for.
+
+    """
+    if "configurable" not in config:
+        return {"error": "Configuration not found"}
+    hass = config["configurable"]["hass"]
+    client = get_async_client(hass)
+
+    try:
+        response = await client.get(f"{API_BASE}{word}")
+        data = response.json()
+        if isinstance(data, dict) and data.get("title") == "No Definitions Found":
+            return []
+        
+        if not isinstance(data, list):
+             return {"error": "Unexpected API response format"}
+
+        synonyms_set = set()
+        for entry in data:
+            for meaning in entry.get("meanings", []):
+                for definition in meaning.get("definitions", []):
+                    for syn in definition.get("synonyms", []):
+                        synonyms_set.add(syn)
+        return list(synonyms_set)
+    except Exception as err:
+        return {"error": f"Error fetching synonyms: {err}"}
+
+
+# ----- Google Places Tool -----
+
+GOOGLE_PLACES_TEXT_SEARCH_URL = "https://maps.googleapis.com/maps/api/place/textsearch/json"
+
+
+@tool(parse_docstring=True)
+async def find_nearby_places(  # noqa: D417
+    query: str,
+    max_results: int = 5,
+    *,
+    config: Annotated[RunnableConfig, InjectedToolArg()],
+) -> list[dict[str, Any]] | dict[str, Any]:
+    """
+    Find nearby places using Google Places API.
+
+    Useful for finding locations, addresses, or place details.
+
+    Args:
+        query: What to search for (e.g., 'Publix', 'gas station', 'pharmacy', 'CVS').
+        max_results: Max results to return (default: 5, max: 20).
+
+    """
+    if "configurable" not in config:
+        return {"error": "Configuration not found"}
+    
+    options = config["configurable"].get("options", {})
+    api_key = options.get(CONF_GOOGLE_PLACES_API_KEY)
+    
+    if not api_key:
+        return {"error": "Google Places API Key is not configured."}
+
+    hass = config["configurable"]["hass"]
+    client = get_async_client(hass)
+    
+    params = {
+        "query": query,
+        "key": api_key,
+    }
+
+    try:
+        response = await client.get(GOOGLE_PLACES_TEXT_SEARCH_URL, params=params)
+        data = response.json()
+        
+        if data.get("status") != "OK":
+             error_msg = data.get("error_message", data.get("status"))
+             if data.get("status") == "ZERO_RESULTS":
+                 return []
+             return {"error": f"Google Places API Error: {error_msg}"}
+
+        results = data.get("results", [])
+        output = []
+        
+        limit = min(max_results, 20)
+        
+        for place in results[:limit]:
+            # Simplify output for LLM consumption
+            item = {
+                "name": place.get("name"),
+                "address": place.get("formatted_address"),
+                "rating": place.get("rating"),
+                "user_ratings_total": place.get("user_ratings_total"),
+                "place_id": place.get("place_id"),
+                "types": place.get("types", []),
+            }
+            if place.get("opening_hours") and place["opening_hours"].get("open_now") is not None:
+                 item["open_now"] = place["opening_hours"]["open_now"]
+            
+            output.append(item)
+            
+        return output
+
+    except Exception as err:
+        return {"error": f"Error searching places: {err}"}
+
+
+# ----- Wikipedia Tools -----
+
+WIKIPEDIA_API_URL = "https://en.wikipedia.org/w/api.php"
+
+
+@tool(parse_docstring=True)
+async def search_wikipedia(  # noqa: D417
+    query: str,
+    limit: int = 10,
+    *,
+    config: Annotated[RunnableConfig, InjectedToolArg()],
+) -> list[dict[str, Any]] | dict[str, Any]:
+    """
+    Search Wikipedia for articles matching a query.
+
+    Args:
+        query: The search term.
+        limit: Max results (default: 10, max: 20).
+
+    """
+    if "configurable" not in config:
+        return {"error": "Configuration not found"}
+    hass = config["configurable"]["hass"]
+    client = get_async_client(hass)
+
+    params = {
+        "action": "query",
+        "format": "json",
+        "list": "search",
+        "utf8": 1,
+        "srsearch": query,
+        "srlimit": min(limit, 20),
+    }
+
+    try:
+        response = await client.get(WIKIPEDIA_API_URL, params=params)
+        data = response.json()
+        
+        if "error" in data:
+            return {"error": data["error"].get("info", "Unknown API error")}
+
+        search_results = data.get("query", {}).get("search", [])
+        
+        output = []
+        for item in search_results:
+            output.append({
+                "title": item.get("title"),
+                "snippet": item.get("snippet", "").replace('<span class="searchmatch">', '').replace('</span>', ''),
+                "pageid": item.get("pageid"),
+            })
+            
+        return output
+    except Exception as err:
+        return {"error": f"Error searching Wikipedia: {err}"}
+
+
+@tool(parse_docstring=True)
+async def get_wikipedia_page(  # noqa: D417
+    title: str,
+    *,
+    config: Annotated[RunnableConfig, InjectedToolArg()],
+) -> dict[str, Any]:
+    """
+    Get the summary and content of a Wikipedia article.
+
+    Args:
+        title: The title of the article.
+
+    """
+    if "configurable" not in config:
+        return {"error": "Configuration not found"}
+    hass = config["configurable"]["hass"]
+    client = get_async_client(hass)
+
+    params = {
+        "action": "query",
+        "format": "json",
+        "prop": "extracts|pageimages|info",
+        "exintro": 1,
+        "explaintext": 1,
+        "inprop": "url",
+        "titles": title,
+        "pithumbsize": 500
+    }
+
+    try:
+        response = await client.get(WIKIPEDIA_API_URL, params=params)
+        data = response.json()
+        
+        if "error" in data:
+            return {"error": data["error"].get("info", "Unknown API error")}
+
+        pages = data.get("query", {}).get("pages", {})
+        if not pages:
+             return {"error": "Page not found."}
+        
+        # 'pages' is a dict keyed by pageid, but we typically just want the first one found
+        page = next(iter(pages.values()))
+        
+        if "missing" in page:
+            return {"error": f"Page '{title}' does not exist."}
+
+        return {
+            "title": page.get("title"),
+            "summary": page.get("extract"),
+            "url": page.get("fullurl"),
+            "image": page.get("thumbnail", {}).get("source")
+        }
+    except Exception as err:
+        return {"error": f"Error getting Wikipedia page: {err}"}

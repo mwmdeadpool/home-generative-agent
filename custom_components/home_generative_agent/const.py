@@ -54,6 +54,11 @@ RECOMMENDED_DB_PARAMS = [{"key": "sslmode", "value": "disable"}]
 
 CONF_DB_BOOTSTRAPPED = "db_bootstrapped"
 
+# ---- Mem0 server ----
+CONF_MEM0_ENABLED = "mem0_enabled"
+CONF_MEM0_SERVER_URL = "mem0_server_url"
+RECOMMENDED_MEM0_SERVER_URL = "http://192.168.10.30:8673/sse"
+
 # ---- Notify service (for mobile push notifications) ----
 CONF_NOTIFY_SERVICE = "notify_service"
 LLM_HASS_API_NONE = "none"
@@ -137,6 +142,15 @@ CONF_FEATURE_MODEL_REASONING = "reasoning"
 CONF_FEATURE_MODEL_KEEPALIVE = "keepalive_s"
 CONF_FEATURE_MODEL_CONTEXT_SIZE = "context_size"
 
+# --- Google Places ---
+CONF_GOOGLE_PLACES_ENABLED = "google_places_enabled"
+CONF_GOOGLE_PLACES_API_KEY = "google_places_api_key"
+RECOMMENDED_GOOGLE_PLACES_ENABLED = False
+
+# --- Wikipedia ---
+CONF_WIKIPEDIA_ENABLED = "wikipedia_enabled"
+RECOMMENDED_WIKIPEDIA_ENABLED = False
+
 # --- Gemini API key (used in config_flow/__init__.py) ---
 CONF_GEMINI_API_KEY = "gemini_api_key"
 
@@ -148,7 +162,7 @@ CHAT_MODEL_OPENAI_SUPPORTED = Literal[
     "gpt-5", "gpt-5-mini", "gpt-5-nano", "gpt-4o", "gpt-4.1", "o4-mini"
 ]
 CHAT_MODEL_GEMINI_SUPPORTED = Literal[
-    "gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite"
+    "gemini-3-flash", "gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite"
 ]
 
 CONF_CHAT_MODEL_PROVIDER = "chat_model_provider"
@@ -194,7 +208,7 @@ VLM_TOP_P = 1.0
 VLM_OLLAMA_SUPPORTED = Literal["qwen2.5vl:7b", "qwen3-vl:8b"]
 VLM_OPENAI_SUPPORTED = Literal["gpt-5-nano", "gpt-4.1", "gpt-4.1-nano"]
 VLM_GEMINI_SUPPORTED = Literal[
-    "gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite"
+    "gemini-3-flash", "gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite"
 ]
 
 CONF_VLM_PROVIDER = "vlm_provider"
@@ -278,7 +292,7 @@ SUMMARIZATION_MODEL_TOP_P = 1.0
 SUMMARIZATION_MODEL_OLLAMA_SUPPORTED = Literal["qwen3:1.7b", "qwen3:8b"]
 SUMMARIZATION_MODEL_OPENAI_SUPPORTED = Literal["gpt-5-nano", "gpt-4.1", "gpt-4.1-nano"]
 SUMMARIZATION_MODEL_GEMINI_SUPPORTED = Literal[
-    "gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite"
+    "gemini-3-flash", "gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite"
 ]
 
 CONF_SUMMARIZATION_MODEL_PROVIDER = "summarization_provider"

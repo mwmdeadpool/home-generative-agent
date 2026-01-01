@@ -444,12 +444,30 @@ def reasoning_field(
     return {"reasoning": value} if supported else {}
 
 
-def extract_final(raw: str, max_chars: int | None = None) -> str:
+def extract_final(raw: str | list[str | dict[str, Any]], max_chars: int | None = None) -> str:
     """Return plain text with <think> blocks removed."""
     if not raw:
         return ""
+        
+    if isinstance(raw, list):
+        # Handle list content (common with some LangChain providers like Anthropic/Google)
+        # We assume it's a list of strings or dicts with 'text' or 'type':'text'
+        text_parts = []
+        for item in raw:
+            if isinstance(item, str):
+                text_parts.append(item)
+            elif isinstance(item, dict):
+                # Try to find text content
+                if item.get("type") == "text":
+                    text_parts.append(item.get("text", ""))
+                elif "text" in item:
+                    text_parts.append(item["text"])
+        s = "".join(text_parts)
+    else:
+        s = str(raw)
+
     # Remove any leaked reasoning
-    s = _THINK_BLOCK.sub("", raw)
+    s = _THINK_BLOCK.sub("", s)
     # Collapse whitespace
     s = re.sub(r"\s+", " ", s).strip()
     # Char-limit (if specified)

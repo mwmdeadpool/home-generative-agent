@@ -45,6 +45,7 @@ from ..const import (  # noqa: TID252
     VIDEO_ANALYZER_TIME_OFFSET,
     VIDEO_ANALYZER_TRIGGER_ON_MOTION,
 )
+from .mem0_client import Mem0Client
 from .utils import (
     discover_mobile_notify_service,
     dispatch_on_loop,
@@ -447,6 +448,12 @@ class VideoAnalyzer:
         raise ValueError(msg)
 
     async def _is_anomaly(self, camera_name: str, msg: str, first_path: str) -> bool:
+        if isinstance(self.entry.runtime_data.store, Mem0Client):
+            LOGGER.warning(
+                "Anomaly detection is not supported with mem0. Assuming anomaly."
+            )
+            return True
+
         async with async_timeout.timeout(10):
             search_results = await self.entry.runtime_data.store.asearch(
                 ("video_analysis", camera_name), query=msg, limit=10
@@ -743,13 +750,19 @@ class VideoAnalyzer:
 
     async def _store_results(self, camera_id: str, batch: list[Path], msg: str) -> None:
         """Store the analysis results in the vector DB."""
-        camera_name = camera_id.split(".")[-1]
-        async with async_timeout.timeout(10):
-            await self.entry.runtime_data.store.aput(
-                namespace=("video_analysis", camera_name),
-                key=batch[0].name,
-                value={"content": msg, "snapshots": [str(p) for p in batch]},
-            )
+        if isinstance(self.entry.runtime_data.store, Mem0Client):
+            async with async_timeout.timeout(10):
+                await self.entry.runtime_data.store.save_memory(
+                    f"Camera: {camera_id}\nSummary: {msg}\nSnapshots: {[str(p) for p in batch]}"
+                )
+        else:
+            camera_name = camera_id.split(".")[-1]
+            async with async_timeout.timeout(10):
+                await self.entry.runtime_data.store.aput(
+                    namespace=("video_analysis", camera_name),
+                    key=batch[0].name,
+                    value={"content": msg, "snapshots": [str(p) for p in batch]},
+                )
 
     async def _process_snapshot_queue(self, camera_id: str) -> None:
         """Flush any queued snapshots for a camera as one ordered batch."""

@@ -581,6 +581,7 @@ async def _call_model(
     hass = config["configurable"]["hass"]
     opts = config["configurable"]["options"]
     chat_model_options = config["configurable"].get("chat_model_options", {})
+    mem0_client = config["configurable"].get("mem0_client")
 
     # Retrieve memories (semantic if last message is from user).
     last_message = state["messages"][-1]
@@ -590,7 +591,11 @@ async def _call_model(
         if last_message_from_user
         else None
     )
-    mems = await store.asearch((user_id, "memories"), query=query_prompt, limit=10)
+    mems = []
+    if mem0_client and query_prompt:
+        mems = await mem0_client.tools.search_memories(query=query_prompt, limit=10)
+    elif query_prompt:
+        mems = await store.asearch((user_id, "memories"), query=query_prompt, limit=10)
 
     # Recent camera activity.
     camera_activity = await _retrieve_camera_activity(hass, store)
@@ -598,7 +603,10 @@ async def _call_model(
     # Build system message.
     system_message = config["configurable"]["prompt"]
     if mems:
-        formatted_mems = "\n".join(f"[{mem.key}]: {mem.value}" for mem in mems)
+        if mem0_client:
+            formatted_mems = "\n".join(str(mem) for mem in mems)
+        else:
+            formatted_mems = "\n".join(f"[{mem.key}]: {mem.value}" for mem in mems)
         system_message += f"\n<memories>\n{formatted_mems}\n</memories>"
     if camera_activity:
         ca = "\n".join(str(a) for a in camera_activity)

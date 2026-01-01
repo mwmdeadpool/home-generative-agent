@@ -42,6 +42,8 @@ from ..const import (  # noqa: TID252
     CONF_FEATURE_MODEL_NAME,
     CONF_FEATURE_MODEL_REASONING,
     CONF_FEATURE_MODEL_TEMPERATURE,
+    CONF_MEM0_ENABLED,
+    CONF_MEM0_SERVER_URL,
     FEATURE_CATEGORY_MAP,
     FEATURE_DEFS,
     KEEPALIVE_MAX_SECONDS,
@@ -53,6 +55,7 @@ from ..const import (  # noqa: TID252
     RECOMMENDED_DB_PASSWORD,
     RECOMMENDED_DB_PORT,
     RECOMMENDED_DB_USERNAME,
+    RECOMMENDED_MEM0_SERVER_URL,
     RECOMMENDED_OLLAMA_CHAT_KEEPALIVE,
     RECOMMENDED_OLLAMA_CONTEXT_SIZE,
     RECOMMENDED_OLLAMA_REASONING,
@@ -66,6 +69,7 @@ from ..core.db_utils import build_postgres_uri  # noqa: TID252
 from ..core.utils import (  # noqa: TID252
     CannotConnectError,
     InvalidAuthError,
+    ensure_http_url,
     list_ollama_models,
     validate_db_uri,
 )
@@ -756,6 +760,110 @@ class FeatureSubentryFlow(ConfigSubentryFlow):
             self.hass.config_entries.async_update_subentry(  # type: ignore[attr-defined]
                 entry, current_subentry, data=user_input, title="Database"
             )
+        
+        return await self.async_step_mem0_enable()
+
+    async def async_step_mem0_enable(
+        self, user_input: dict[str, Any] | None = None
+    ) -> SubentryFlowResult:
+        """Handle the mem0 enable step."""
+        entry = self._get_entry()
+        current_subentry = next(
+            (
+                v
+                for v in entry.subentries.values()
+                if v.subentry_type == SUBENTRY_TYPE_DATABASE
+            ),
+            None,
+        )
+        options = dict(current_subentry.data) if current_subentry else {}
+
+        if user_input is None:
+            schema = vol.Schema(
+                {
+                    vol.Optional(
+                        CONF_MEM0_ENABLED,
+                        default=options.get(CONF_MEM0_ENABLED, False),
+                    ): BooleanSelector(),
+                }
+            )
+            return self.async_show_form(step_id="mem0_enable", data_schema=schema)
+
+        options.update(user_input)
+
+        if user_input.get(CONF_MEM0_ENABLED):
+            self._mem0_options = options
+            return await self.async_step_mem0_url()
+        else:
+            options.pop(CONF_MEM0_SERVER_URL, None)
+            self.hass.config_entries.async_update_subentry(
+                entry, current_subentry, data=options, title="Database"
+            )
+            self._schedule_reload()
+
+            if not _provider_options(entry, "chat"):
+                return await self.async_step_instructions()
+            return self.async_abort(reason="setup_complete")
+
+    async def async_step_mem0_url(
+        self, user_input: dict[str, Any] | None = None
+    ) -> SubentryFlowResult:
+        """Handle the mem0 url step."""
+        entry = self._get_entry()
+        current_subentry = next(
+            (
+                v
+                for v in entry.subentries.values()
+                if v.subentry_type == SUBENTRY_TYPE_DATABASE
+            ),
+            None,
+        )
+        
+        # Retrieve the options we saved in the previous step
+        options = getattr(self, "_mem0_options", None)
+        if options is None:
+            # Fallback if state is lost (shouldn't happen in normal flow)
+            options = dict(current_subentry.data) if current_subentry else {}
+
+        if user_input is None:
+            schema = vol.Schema(
+                {
+                    vol.Required(
+                        CONF_MEM0_SERVER_URL,
+                        default=options.get(CONF_MEM0_SERVER_URL) or RECOMMENDED_MEM0_SERVER_URL,
+                    ): TextSelector(TextSelectorConfig(type=TextSelectorType.URL)),
+                }
+            )
+            return self.async_show_form(step_id="mem0_url", data_schema=schema)
+
+        options.update(user_input)
+
+        raw_url = user_input.get(CONF_MEM0_SERVER_URL)
+        # We assume validation is desired here.
+        # Simple URL check first.
+        try:
+             options[CONF_MEM0_SERVER_URL] = ensure_http_url(raw_url or "")
+        except ValueError:
+             return self.async_show_form(
+                step_id="mem0_url",
+                data_schema=vol.Schema(
+                    {
+                        vol.Required(
+                            CONF_MEM0_SERVER_URL,
+                            default=raw_url,
+                        ): TextSelector(TextSelectorConfig(type=TextSelectorType.URL)),
+                    }
+                ),
+                errors={"base": "invalid_url"},
+            )
+            
+        # Optional: Validate connection to Mem0
+        # If we want to strictly validate it works, we could do it here.
+        # For now, let's just fix the flow mechanics.
+
+        self.hass.config_entries.async_update_subentry(
+            entry, current_subentry, data=options, title="Database"
+        )
         self._schedule_reload()
 
         if not _provider_options(entry, "chat"):
