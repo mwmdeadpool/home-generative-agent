@@ -85,8 +85,8 @@ _QUEUE_MAXSIZE: Final[int] = 50  # per-camera backlog cap
 _FRAME_DEADLINE_SEC: Final[int] = 600  # skip frames older than this
 _SUMMARY_TIMEOUT_SEC: Final[int] = 60  # was 35
 _FACE_TIMEOUT_SEC: Final[int] = 10  # was 10 (keep)
-_VISION_TIMEOUT_SEC: Final[int] = 90  # was 30
-_GLOBAL_VISION_CONCURRENCY: Final[int] = 3  # tune per hardware
+_VISION_TIMEOUT_SEC: Final[int] = 120  # was 30
+_GLOBAL_VISION_CONCURRENCY: Final[int] = 1  # reduce to 1 to prevent Ollama crashes
 
 # --- Uniqueness gate tuning ---
 _UNIQUENESS_ENABLED: Final[bool] = False
@@ -230,7 +230,11 @@ class VideoAnalyzer:
         if camera_id not in self._snapshot_queues:
             queue: asyncio.Queue[Path] = asyncio.Queue(maxsize=_QUEUE_MAXSIZE)
             self._snapshot_queues[camera_id] = queue
-            task = self.hass.async_create_task(self._snapshot_worker(camera_id))
+            # Use background task to avoid blocking startup/bootstrap
+            task = self.hass.async_create_background_task(
+                self._snapshot_worker(camera_id),
+                name=f"hga_snapshot_worker_{camera_id}",
+            )
             self._active_queue_tasks[camera_id] = task
         return self._snapshot_queues[camera_id]
 
@@ -437,7 +441,7 @@ class VideoAnalyzer:
             HumanMessage(content=prompt),
         ]
         model = self.entry.runtime_data.summarization_model
-        summary = await model.ainvoke(messages)
+        summary = await model.ainvoke(messages, config={"timeout": 55})
         LOGGER.debug("Raw video analyzer summary: %s", summary)
 
         text = extract_final(getattr(summary, "content", "") or "")
@@ -666,6 +670,25 @@ class VideoAnalyzer:
                 self._m_inc(camera_id, "timeouts")
                 self._log_snapshot_error(camera_id, path, exc)
                 return {}
+            except (httpx.RemoteProtocolError, httpx.ReadTimeout, httpx.ConnectTimeout) as exc:
+                # Retry once for network/protocol errors
+                self._m_inc(camera_id, "timeouts")
+                LOGGER.warning("[%s] connection error during analysis (retrying): %s", camera_id, exc)
+                try:
+                    await asyncio.sleep(1.0) # cooloff
+                    async with (
+                        _global_vision_sem,
+                        async_timeout.timeout(_VISION_TIMEOUT_SEC),
+                    ):
+                         frame_description = await analyze_image(
+                            self.entry.runtime_data.vision_model,
+                            data,
+                            None,
+                            prev_text=prev_text,
+                        )
+                except Exception as retry_exc:
+                     LOGGER.error("[%s] Retry failed for %s: %s", camera_id, path, retry_exc)
+                     return {}
         except (FileNotFoundError, HomeAssistantError) as exc:
             self._log_snapshot_error(camera_id, path, exc)
             return {}
@@ -955,8 +978,9 @@ class VideoAnalyzer:
         if new_state.state == "on" and (old_state is None or old_state.state != "on"):
             if camera_id not in self._active_motion_cameras:
                 LOGGER.debug("Motion ON: Starting snapshot loop for %s", camera_id)
-                task = self.hass.async_create_task(
+                task = self.hass.async_create_background_task(
                     self._motion_snapshot_loop(camera_id),
+                    name=f"hga_motion_loop_{camera_id}",
                 )
                 self._active_motion_cameras[camera_id] = task
 
@@ -965,7 +989,10 @@ class VideoAnalyzer:
             task = self._active_motion_cameras.pop(camera_id, None)
             if task and not task.done():
                 task.cancel()
-                self.hass.async_create_task(self._process_snapshot_queue(camera_id))
+                self.hass.async_create_background_task(
+                    self._process_snapshot_queue(camera_id),
+                    name=f"hga_flush_on_stop_{camera_id}",
+                )
 
     @callback
     def _get_recording_cameras(self) -> list[str]:
@@ -998,7 +1025,10 @@ class VideoAnalyzer:
             return
 
         if old_state.state == "recording" and new_state.state != "recording":
-            self.hass.async_create_task(self._process_snapshot_queue(entity_id))
+            self.hass.async_create_background_task(
+                self._process_snapshot_queue(entity_id),
+                name=f"hga_flush_recording_{entity_id}",
+            )
 
     def start(self) -> None:
         """Start the video analyzer."""

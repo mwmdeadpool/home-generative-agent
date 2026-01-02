@@ -53,7 +53,15 @@ from ..const import (  # noqa: TID252
     CONF_CRITICAL_ACTION_PIN_HASH,
     CONF_CRITICAL_ACTION_PIN_SALT,
     CONF_GOOGLE_PLACES_API_KEY,
+    CONF_LIGHTRAG_API_KEY,
+    CONF_LIGHTRAG_URL,
     CONF_NOTIFY_SERVICE,
+    CONF_PLEX_ENABLED,
+    CONF_PLEX_SERVER_URL,
+    CONF_PLEX_TOKEN,
+    CONF_REDDIT_CLIENT_ID,
+    CONF_REDDIT_CLIENT_SECRET,
+    CONF_REDDIT_USER_AGENT,
     CONF_WIKIPEDIA_ENABLED,
     CRITICAL_PIN_MAX_LEN,
     CRITICAL_PIN_MIN_LEN,
@@ -1724,3 +1732,571 @@ async def get_wikipedia_page(  # noqa: D417
         }
     except Exception as err:
         return {"error": f"Error getting Wikipedia page: {err}"}
+
+
+# ----- LightRAG Tools -----
+
+
+@tool(parse_docstring=True)
+async def query_lightrag(  # noqa: D417
+    query: str,
+    mode: str = "mix",
+    *,
+    config: Annotated[RunnableConfig, InjectedToolArg()],
+) -> dict[str, Any]:
+    """
+    Search the LightRAG knowledge base for information.
+
+    Args:
+        query: The question or topic to search for.
+        mode: Retrieval mode ('mix' is recommended). Options: 'mix', 'hybrid', 'local', 'global', 'naive'.
+
+    """
+    if "configurable" not in config:
+        return {"error": "Configuration not found"}
+    
+    options = config["configurable"].get("options", {})
+    base_url = options.get(CONF_LIGHTRAG_URL, "http://localhost:9600").rstrip("/")
+    api_key = options.get(CONF_LIGHTRAG_API_KEY, "")
+    
+    hass = config["configurable"]["hass"]
+    client = get_async_client(hass)
+
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["X-API-Key"] = api_key
+
+    payload = {
+        "query": query,
+        "mode": mode,
+    }
+
+    try:
+        response = await client.post(
+            f"{base_url}/query", 
+            json=payload, 
+            headers=headers,
+            timeout=60
+        )
+        
+        if response.status_code != 200:
+            return {"error": f"LightRAG Error ({response.status_code}): {response.text}"}
+            
+        data = response.json()
+        return {
+            "response": data.get("response", "No response generated."),
+            "mode": mode
+        }
+    except Exception as err:
+        return {"error": f"Error querying LightRAG: {err}"}
+
+
+# ----- Reddit Tools -----
+
+
+def _get_reddit_client(config: RunnableConfig) -> Any:
+    """Get a configured PRAW Reddit client."""
+    if "configurable" not in config:
+        raise ValueError("Configuration not found")
+        
+    options = config["configurable"].get("options", {})
+    client_id = options.get(CONF_REDDIT_CLIENT_ID)
+    client_secret = options.get(CONF_REDDIT_CLIENT_SECRET)
+    user_agent = options.get(CONF_REDDIT_USER_AGENT, "HomeAssistant/1.0.0")
+    
+    if not client_id or not client_secret:
+        raise ValueError("Reddit credentials not configured")
+        
+    import praw
+    return praw.Reddit(
+        client_id=client_id,
+        client_secret=client_secret,
+        user_agent=user_agent,
+        check_for_async=False
+    )
+
+
+@tool(parse_docstring=True)
+async def get_subreddit_posts(
+    subreddit: str,
+    sort: str = "hot",
+    time_filter: str = "day",
+    limit: int = 10,
+    *,
+    config: Annotated[RunnableConfig, InjectedToolArg()],
+) -> dict[str, Any]:
+    """
+    Get posts from a specific subreddit.
+
+    Args:
+        subreddit: Name of the subreddit (without r/).
+        sort: Sort method: "hot", "new", "rising", "top". Default is "hot".
+        time_filter: "hour", "day", "week", "month", "year", "all". Default is "day".
+        limit: Number of posts to fetch (1-100). Default is 10.
+    """
+    hass = config["configurable"]["hass"]
+    
+    def _fetch():
+        reddit = _get_reddit_client(config)
+        sub = reddit.subreddit(subreddit)
+        
+        if sort == "hot":
+            posts = sub.hot(limit=limit)
+        elif sort == "new":
+            posts = sub.new(limit=limit)
+        elif sort == "rising":
+            posts = sub.rising(limit=limit)
+        elif sort == "top":
+            posts = sub.top(time_filter=time_filter, limit=limit)
+        else:
+            posts = sub.hot(limit=limit)
+            
+        results = []
+        for post in posts:
+            results.append({
+                "title": post.title,
+                "author": str(post.author) if post.author else "[deleted]",
+                "score": post.score,
+                "url": post.url,
+                "id": post.id,
+                "is_self": post.is_self,
+                "text": post.selftext[:500] + "..." if len(post.selftext) > 500 else post.selftext
+            })
+        return results
+
+    try:
+        return await hass.async_add_executor_job(_fetch)
+    except Exception as err:
+        return {"error": f"Error fetching posts: {err}"}
+
+
+@tool(parse_docstring=True)
+async def get_post_details(
+    post_id: str,
+    include_comments: bool = False,
+    *,
+    config: Annotated[RunnableConfig, InjectedToolArg()],
+) -> dict[str, Any]:
+    """
+    Get detailed information about a specific Reddit post.
+
+    Args:
+        post_id: Reddit post ID or full URL.
+        include_comments: Whether to include top comments. Default is False.
+    """
+    hass = config["configurable"]["hass"]
+
+    def _fetch():
+        reddit = _get_reddit_client(config)
+        if "reddit.com" in post_id:
+            submission = reddit.submission(url=post_id)
+        else:
+            submission = reddit.submission(id=post_id)
+            
+        data = {
+            "title": submission.title,
+            "author": str(submission.author) if submission.author else "[deleted]",
+            "subreddit": str(submission.subreddit),
+            "score": submission.score,
+            "created_utc": submission.created_utc,
+            "url": submission.url,
+            "text": submission.selftext,
+        }
+        
+        if include_comments:
+            submission.comments.replace_more(limit=0)
+            comments = []
+            for comment in submission.comments[:10]:
+                 if hasattr(comment, 'body'):
+                    comments.append({
+                        "author": str(comment.author) if comment.author else "[deleted]",
+                        "body": comment.body[:300],
+                        "score": comment.score
+                    })
+            data["comments"] = comments
+            
+        return data
+
+    try:
+        return await hass.async_add_executor_job(_fetch)
+    except Exception as err:
+        return {"error": f"Error fetching post: {err}"}
+
+
+@tool(parse_docstring=True)
+async def search_reddit(
+    query: str,
+    subreddit: str | None = None,
+    sort: str = "relevance",
+    time_filter: str = "all",
+    limit: int = 10,
+    *,
+    config: Annotated[RunnableConfig, InjectedToolArg()],
+) -> dict[str, Any]:
+    """
+    Search Reddit for posts matching a query.
+
+    Args:
+        query: Search query.
+        subreddit: Limit search to specific subreddit (optional).
+        sort: "relevance", "hot", "top", "new", "comments". Default is "relevance".
+        time_filter: "hour", "day", "week", "month", "year", "all". Default is "all".
+        limit: Number of results (1-100). Default is 10.
+    """
+    hass = config["configurable"]["hass"]
+
+    def _search():
+        reddit = _get_reddit_client(config)
+        if subreddit:
+            api = reddit.subreddit(subreddit)
+        else:
+            api = reddit.subreddit("all")
+            
+        results = []
+        for post in api.search(query, sort=sort, time_filter=time_filter, limit=limit):
+            results.append({
+                "title": post.title,
+                "subreddit": str(post.subreddit),
+                "score": post.score,
+                "url": post.url,
+                "id": post.id
+            })
+        return results
+
+    try:
+        return await hass.async_add_executor_job(_search)
+    except Exception as err:
+        return {"error": f"Error searching Reddit: {err}"}
+
+
+@tool(parse_docstring=True)
+async def get_user_profile(
+    username: str,
+    *,
+    config: Annotated[RunnableConfig, InjectedToolArg()],
+) -> dict[str, Any]:
+    """
+    Get public information about a Reddit user.
+
+    Args:
+        username: Reddit username (without u/).
+    """
+    hass = config["configurable"]["hass"]
+
+    def _fetch():
+        reddit = _get_reddit_client(config)
+        user = reddit.redditor(username)
+        return {
+            "name": user.name,
+            "comment_karma": user.comment_karma,
+            "link_karma": user.link_karma,
+            "created_utc": user.created_utc,
+            "is_mod": user.is_mod,
+            "is_employee": user.is_employee
+        }
+
+    try:
+        return await hass.async_add_executor_job(_fetch)
+    except Exception as err:
+        return {"error": f"Error fetching profile: {err}"}
+
+
+# ----- Plex Tools -----
+
+
+def _get_plex_server(config: RunnableConfig) -> Any:
+    """Get a configured PlexServer instance."""
+    if "configurable" not in config:
+        raise ValueError("Configuration not found")
+        
+    options = config["configurable"].get("options", {})
+    base_url = options.get(CONF_PLEX_SERVER_URL)
+    token = options.get(CONF_PLEX_TOKEN)
+    
+    if not base_url or not token:
+        raise ValueError("Plex configuration missing (URL or Token)")
+        
+    from plexapi.server import PlexServer
+    return PlexServer(base_url, token)
+
+
+@tool(parse_docstring=True)
+async def plex_search_movies(
+    title: str | None = None,
+    year: int | None = None,
+    limit: int = 5,
+    *,
+    config: Annotated[RunnableConfig, InjectedToolArg()],
+) -> dict[str, Any]:
+    """
+    Search for movies in Plex.
+
+    Args:
+        title: Title to match.
+        year: Year to filter by.
+        limit: Max results (default 5).
+    """
+    hass = config["configurable"]["hass"]
+    
+    def _search():
+        plex = _get_plex_server(config)
+        kwargs = {"libtype": "movie"}
+        if title:
+            kwargs["title"] = title
+        if year:
+            kwargs["year"] = year
+            
+        results = plex.library.search(**kwargs)
+        data = []
+        for vid in results[:limit]:
+             data.append({
+                 "title": vid.title,
+                 "year": vid.year,
+                 "key": vid.ratingKey,
+                 "summary": vid.summary[:200]
+             })
+        return data
+
+    try:
+        return await hass.async_add_executor_job(_search)
+    except Exception as err:
+        return {"error": f"Plex error: {err}"}
+
+
+@tool(parse_docstring=True)
+async def plex_get_movie_details(
+    movie_key: str,
+    *,
+    config: Annotated[RunnableConfig, InjectedToolArg()],
+) -> dict[str, Any]:
+    """
+    Get details for a movie by its ratingKey.
+
+    Args:
+        movie_key: The unique key for the movie.
+    """
+    hass = config["configurable"]["hass"]
+
+    def _fetch():
+        plex = _get_plex_server(config)
+        try:
+            item = plex.library.fetchItem(int(movie_key))
+            return {
+                "title": item.title,
+                "year": item.year,
+                "summary": item.summary,
+                "duration_min": item.duration // 60000 if item.duration else 0,
+                "rating": item.rating,
+                "directors": [d.tag for d in item.directors],
+                "roles": [r.tag for r in item.roles[:5]],
+            }
+        except Exception as e:
+            return {"error": str(e)}
+
+    try:
+        return await hass.async_add_executor_job(_fetch)
+    except Exception as err:
+        return {"error": f"Plex error: {err}"}
+
+
+@tool(parse_docstring=True)
+async def plex_recent_movies(
+    count: int = 5,
+    *,
+    config: Annotated[RunnableConfig, InjectedToolArg()],
+) -> list[dict[str, Any]]:
+    """
+    Get recently added movies.
+
+    Args:
+        count: Number of movies to return.
+    """
+    hass = config["configurable"]["hass"]
+
+    def _fetch():
+        plex = _get_plex_server(config)
+        # Assuming 'Movies' section exists, or search global
+        # Global search for recent movies:
+        results = plex.library.search(libtype="movie", sort="addedAt:desc", limit=count)
+        return [{"title": m.title, "year": m.year, "key": m.ratingKey} for m in results]
+
+    try:
+        return await hass.async_add_executor_job(_fetch)
+    except Exception as err:
+        return [{"error": f"Plex error: {err}"}]
+
+
+@tool(parse_docstring=True)
+async def plex_create_playlist(
+    name: str,
+    movie_keys: list[str],
+    *,
+    config: Annotated[RunnableConfig, InjectedToolArg()],
+) -> dict[str, Any]:
+    """
+    Create a playlist from movie keys.
+
+    Args:
+        name: Playlist name.
+        movie_keys: List of movie ratingKeys.
+    """
+    hass = config["configurable"]["hass"]
+
+    def _create():
+        plex = _get_plex_server(config)
+        items = []
+        for key in movie_keys:
+            try:
+                items.append(plex.library.fetchItem(int(key)))
+            except:
+                pass
+        
+        if not items:
+            return {"error": "No valid items found"}
+            
+        pl = plex.createPlaylist(name, items=items)
+        return {"name": pl.title, "key": pl.ratingKey, "count": len(items)}
+
+    try:
+        return await hass.async_add_executor_job(_create)
+    except Exception as err:
+        return {"error": f"Plex error: {err}"}
+
+
+@tool
+async def plex_list_playlists(
+    *,
+    config: Annotated[RunnableConfig, InjectedToolArg()],
+) -> list[dict[str, Any]]:
+    """List all playlists."""
+    hass = config["configurable"]["hass"]
+
+    def _list():
+        plex = _get_plex_server(config)
+        return [{"title": pl.title, "key": pl.ratingKey, "count": pl.leafCount} for pl in plex.playlists()]
+
+    try:
+        return await hass.async_add_executor_job(_list)
+    except Exception as err:
+        return [{"error": f"Plex error: {err}"}]
+
+
+@tool(parse_docstring=True)
+async def plex_get_playlist_items(
+    playlist_key: str,
+    *,
+    config: Annotated[RunnableConfig, InjectedToolArg()],
+) -> list[dict[str, Any]]:
+    """
+    Get items from a playlist.
+
+    Args:
+        playlist_key: Payload key.
+    """
+    hass = config["configurable"]["hass"]
+
+    def _fetch():
+        plex = _get_plex_server(config)
+        try:
+            pl = plex.playlist(int(playlist_key)) # fetchItem doesnt always work for playlists? 
+            # Or fetchItem(key) works. Let's try to find it in playlists() list if fetch fails or just use fetchItem
+            # plex.playlist() might need title? 
+            # safe way:
+            pl = plex.fetchItem(int(playlist_key))
+            return [{"title": i.title, "year": i.year, "key": i.ratingKey} for i in pl.items()]
+        except Exception as e:
+            return [{"error": str(e)}]
+
+    try:
+        return await hass.async_add_executor_job(_fetch)
+    except Exception as err:
+        return [{"error": f"Plex error: {err}"}]
+
+
+@tool(parse_docstring=True)
+async def plex_delete_playlist(
+    playlist_key: str,
+    *,
+    config: Annotated[RunnableConfig, InjectedToolArg()],
+) -> dict[str, Any]:
+    """
+    Delete a playlist.
+
+    Args:
+        playlist_key: Playlist key.
+    """
+    hass = config["configurable"]["hass"]
+
+    def _delete():
+        plex = _get_plex_server(config)
+        try:
+            pl = plex.fetchItem(int(playlist_key))
+            pl.delete()
+            return {"success": True, "title": pl.title}
+        except Exception as e:
+            return {"error": str(e)}
+
+    try:
+        return await hass.async_add_executor_job(_delete)
+    except Exception as err:
+        return {"error": f"Plex error: {err}"}
+
+
+@tool(parse_docstring=True)
+async def plex_add_to_playlist(
+    playlist_key: str,
+    movie_key: str,
+    *,
+    config: Annotated[RunnableConfig, InjectedToolArg()],
+) -> dict[str, Any]:
+    """
+    Add a movie to a playlist.
+
+    Args:
+        playlist_key: Playlist key.
+        movie_key: Movie key.
+    """
+    hass = config["configurable"]["hass"]
+
+    def _add():
+        plex = _get_plex_server(config)
+        try:
+            pl = plex.fetchItem(int(playlist_key))
+            movie = plex.library.fetchItem(int(movie_key))
+            pl.addItems([movie])
+            return {"success": True, "playlist": pl.title, "added": movie.title}
+        except Exception as e:
+            return {"error": str(e)}
+
+    try:
+        return await hass.async_add_executor_job(_add)
+    except Exception as err:
+        return {"error": f"Plex error: {err}"}
+
+
+@tool(parse_docstring=True)
+async def plex_get_movie_genres(
+    movie_key: str,
+    *,
+    config: Annotated[RunnableConfig, InjectedToolArg()],
+) -> dict[str, Any]:
+    """
+    Get genres for a movie.
+
+    Args:
+        movie_key: Movie key.
+    """
+    hass = config["configurable"]["hass"]
+
+    def _fetch():
+        plex = _get_plex_server(config)
+        try:
+            m = plex.library.fetchItem(int(movie_key))
+            return {"title": m.title, "genres": [g.tag for g in m.genres]}
+        except Exception as e:
+            return {"error": str(e)}
+
+    try:
+        return await hass.async_add_executor_job(_fetch)
+    except Exception as err:
+        return {"error": f"Plex error: {err}"}

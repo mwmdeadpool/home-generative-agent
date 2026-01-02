@@ -35,6 +35,10 @@ from .agent.tools import (
     find_nearby_places,
     get_and_analyze_camera_image,
     get_entity_history,
+    get_entity_history,
+    get_post_details,
+    get_subreddit_posts,
+    get_user_profile,
     get_wikipedia_page,
     is_leap_year,
     multiply,
@@ -42,6 +46,19 @@ from .agent.tools import (
     parse_human_date,
     percentage_diff,
     round_number,
+    percentage_diff,
+    plex_add_to_playlist,
+    plex_create_playlist,
+    plex_delete_playlist,
+    plex_get_movie_details,
+    plex_get_movie_genres,
+    plex_get_playlist_items,
+    plex_list_playlists,
+    plex_recent_movies,
+    plex_search_movies,
+    query_lightrag,
+    round_number,
+    search_reddit,
     search_wikipedia,
     subtract,
     subtract_days,
@@ -53,7 +70,10 @@ from .agent.tools import (
 from .const import (
     CONF_CRITICAL_ACTION_PIN_ENABLED,
     CONF_GOOGLE_PLACES_ENABLED,
+    CONF_LIGHTRAG_ENABLED,
+    CONF_PLEX_ENABLED,
     CONF_PROMPT,
+    CONF_REDDIT_ENABLED,
     CONF_WIKIPEDIA_ENABLED,
     CRITICAL_ACTION_PROMPT,
     DOMAIN,
@@ -253,6 +273,26 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         if options.get(CONF_WIKIPEDIA_ENABLED, False):
             langchain_tools["search_wikipedia"] = search_wikipedia
             langchain_tools["get_wikipedia_page"] = get_wikipedia_page
+
+        if options.get(CONF_LIGHTRAG_ENABLED, False):
+            langchain_tools["query_lightrag"] = query_lightrag
+
+        if options.get(CONF_REDDIT_ENABLED, False):
+            langchain_tools["search_reddit"] = search_reddit
+            langchain_tools["get_subreddit_posts"] = get_subreddit_posts
+            langchain_tools["get_post_details"] = get_post_details
+            langchain_tools["get_user_profile"] = get_user_profile
+
+        if options.get(CONF_PLEX_ENABLED, False):
+            langchain_tools["plex_search_movies"] = plex_search_movies
+            langchain_tools["plex_get_movie_details"] = plex_get_movie_details
+            langchain_tools["plex_create_playlist"] = plex_create_playlist
+            langchain_tools["plex_list_playlists"] = plex_list_playlists
+            langchain_tools["plex_get_playlist_items"] = plex_get_playlist_items
+            langchain_tools["plex_delete_playlist"] = plex_delete_playlist
+            langchain_tools["plex_add_to_playlist"] = plex_add_to_playlist
+            langchain_tools["plex_recent_movies"] = plex_recent_movies
+            langchain_tools["plex_get_movie_genres"] = plex_get_movie_genres
 
         tools.extend(langchain_tools.values())
 

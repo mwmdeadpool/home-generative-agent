@@ -298,8 +298,9 @@ async def _bootstrap_db_once(
     store: AsyncPostgresStore,
     checkpointer: AsyncPostgresSaver,
 ) -> None:
-    if entry.data.get(CONF_DB_BOOTSTRAPPED):
-        return
+    # Always run setup to handle schema updates/migrations safely
+    # if entry.data.get(CONF_DB_BOOTSTRAPPED):
+    #    return
 
     # First time only
     await store.setup()
@@ -515,6 +516,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         return ChatOllama(
             model=RECOMMENDED_OLLAMA_CHAT_MODEL,
             base_url=url,
+            timeout=120,
         ).configurable_fields(
             model=ConfigurableField(id="model"),
             format=ConfigurableField(id="format"),
@@ -524,7 +526,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             num_ctx=ConfigurableField(id="num_ctx"),
             repeat_penalty=ConfigurableField(id="repeat_penalty"),
             reasoning=ConfigurableField(id="reasoning"),
-            mirostat=ConfigurableField(id="mirostat"),
             keep_alive=ConfigurableField(id="keep_alive"),
         )
 
@@ -535,7 +536,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         if not healthy:
             continue
         try:
-            ollama_providers[url] = _build_ollama_provider(url)
+            ollama_providers[url] = await hass.async_add_executor_job(
+                _build_ollama_provider, url
+            )
         except Exception:
             LOGGER.exception(
                 "Ollama provider init failed for %s; continuing without it.", url
@@ -553,6 +556,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                     HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_ONLY_HIGH,
                     HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_ONLY_HIGH,
                 },
+                timeout=120,
             ).configurable_fields(
                 model=ConfigurableField(id="model"),
                 temperature=ConfigurableField(id="temperature"),
