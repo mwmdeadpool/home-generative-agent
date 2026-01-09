@@ -73,6 +73,7 @@ from ..const import (  # noqa: TID252
     VLM_USER_KW_TEMPLATE,
     VLM_USER_PROMPT,
 )
+from ..core.conversation_helpers import _resolve_entity_id 
 from ..core.utils import extract_final, verify_pin  # noqa: TID252
 from .helpers import (
     ConfigurableData,
@@ -90,6 +91,28 @@ if TYPE_CHECKING:
     from langchain_core.runnables.base import RunnableSerializable
 
 LOGGER = logging.getLogger(__name__)
+
+@tool(parse_docstring=True)
+async def resolve_entity_ids(  # noqa: D417
+    entity_ids: list[str],
+    *,
+    config: Annotated[RunnableConfig, InjectedToolArg()],
+) -> dict[str, str]:
+    """
+    Resolve suggested entity_ids to existing Home Assistant entity_ids.
+    Args:
+        entity_ids: List of entity_id strings.
+    """
+    if "configurable" not in config:
+        return {}
+
+    hass: HomeAssistant = config["configurable"]["hass"]
+    resolved: dict[str, str] = {}
+    for entity_id in entity_ids:
+        if isinstance(entity_id, str):
+            resolved[entity_id] = _resolve_entity_id(entity_id, hass)
+    return resolved
+
 
 
 def _map_alarm_service(tool_name: str, requested_state: str) -> str:
@@ -560,6 +583,54 @@ async def add_automation(  # noqa: D417
     )
 
     return f"Added automation {ha_automation_config['id']}"
+
+@tool(parse_docstring=True)
+async def write_yaml_file(  # noqa: D417
+    yaml_text: Any,
+    filename_prefix: str = "hga",
+    *,
+    config: Annotated[RunnableConfig, InjectedToolArg()],
+) -> str:
+    """
+    Write YAML content to a unique file under /config/www.
+    Args:
+        yaml_text: The YAML content to write.
+        filename_prefix: Optional filename prefix (letters, numbers, '-' or '_').
+    """
+    if "configurable" not in config:
+        return "Configuration not found. Please check your setup."
+
+    hass = config["configurable"]["hass"]
+    config_dir = Path(hass.config.config_dir)
+    www_dir = config_dir / "www"
+    await asyncio.to_thread(www_dir.mkdir, parents=True, exist_ok=True)
+
+    safe_prefix = re.sub(r"[^a-zA-Z0-9_-]+", "_", filename_prefix).strip("_")
+    if not safe_prefix:
+        safe_prefix = "hga"
+    filename = f"{safe_prefix}_{ulid.ulid_now()}.yaml"
+    path = www_dir / filename
+
+    code_fence_min_lines = 2
+    if isinstance(yaml_text, (dict, list)):
+        text = yaml.dump(
+            yaml_text, allow_unicode=True, sort_keys=False, default_flow_style=False
+        ).strip()
+    else:
+        text = str(yaml_text or "").strip()
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if (
+            len(lines) >= code_fence_min_lines
+            and lines[0].startswith("```")
+            and lines[-1].startswith("```")
+        ):
+            text = "\n".join(lines[1:-1]).strip()
+
+    async with aiofiles.open(path, "w", encoding="utf-8") as f:
+        await f.write(text.rstrip() + "\n")
+
+    return f"Saved YAML to {path}. Access it at /local/{filename}"
 
 
 @tool(parse_docstring=True)

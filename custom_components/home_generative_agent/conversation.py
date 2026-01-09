@@ -35,7 +35,7 @@ from .agent.tools import (
     find_nearby_places,
     get_and_analyze_camera_image,
     get_entity_history,
-    get_entity_history,
+    resolve_entity_ids,
     get_post_details,
     get_subreddit_posts,
     get_user_profile,
@@ -66,6 +66,7 @@ from .agent.tools import (
     time_since,
     upsert_memory,
     week_number,
+    write_yaml_file,
 )
 from .const import (
     CONF_CRITICAL_ACTION_PIN_ENABLED,
@@ -73,12 +74,21 @@ from .const import (
     CONF_LIGHTRAG_ENABLED,
     CONF_PLEX_ENABLED,
     CONF_PROMPT,
+    CONF_SCHEMA_FIRST_YAML,
     CONF_REDDIT_ENABLED,
     CONF_WIKIPEDIA_ENABLED,
     CRITICAL_ACTION_PROMPT,
     DOMAIN,
     LANGCHAIN_LOGGING_LEVEL,
+    SCHEMA_FIRST_YAML_PROMPT,
     TOOL_CALL_ERROR_SYSTEM_MESSAGE,
+)
+
+from .core.conversation_helpers import (
+    _convert_schema_json_to_yaml,
+    _fix_entity_ids_in_text,
+    _is_dashboard_request,
+    _maybe_fix_dashboard_entities,
 )
 
 if TYPE_CHECKING:
@@ -92,7 +102,7 @@ if TYPE_CHECKING:
 
     from .core.runtime import HGAConfigEntry
 
-LOGGER = logging.getLogger(__name__)
+_LOGGER = logging.getLogger(__name__)
 
 if LANGCHAIN_LOGGING_LEVEL == "verbose":
     set_verbose(True)
@@ -123,7 +133,7 @@ def _convert_content(
 ) -> HumanMessage | AIMessage:
     """Convert HA native chat messages to LangChain messages."""
     if content.content is None:
-        LOGGER.warning("Content is None, returning empty message")
+        _LOGGER.warning("Content is None, returning empty message")
         return HumanMessage(content="")
     if isinstance(content, conversation.UserContent):
         return HumanMessage(content=content.content)
@@ -184,7 +194,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         """Return a list of supported languages."""
         return MATCH_ALL
 
-    async def _async_handle_message(  # noqa: PLR0915
+    async def _async_handle_message(  # noqa: PLR0912, PLR0915
         self,
         user_input: conversation.ConversationInput,
         chat_log: conversation.ChatLog,
@@ -220,6 +230,12 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             message_history = message_history[-diff:]
             self.message_history_len = mhlen
 
+        conversation_id = (
+            ulid.ulid_now()
+            if chat_log.conversation_id is None
+            else chat_log.conversation_id
+        )
+
         # HA tools & schema
         try:
             llm_api = await llm.async_get_api(
@@ -229,11 +245,21 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             )
         except HomeAssistantError:
             msg = "Error getting LLM API, check your configuration."
-            LOGGER.exception(msg)
+            _LOGGER.exception(msg)
             intent_response.async_set_error(intent.IntentResponseErrorCode.UNKNOWN, msg)
             return conversation.ConversationResult(
-                response=intent_response, conversation_id=user_input.conversation_id
+                  response=intent_response, conversation_id=conversation_id
             )
+
+        if not options.get(CONF_SCHEMA_FIRST_YAML, False) and _is_dashboard_request(
+            user_input.text
+        ):
+            intent_response.async_set_speech(
+                """Please enable 'Schema-first JSON for YAML requests' in
+                HGA's configuration and try again"""
+            )
+            return conversation.ConversationResult(
+                response=intent_response, conversation_id=conversation_id
 
         tools = [
             _format_tool(tool, llm_api.custom_serializer) for tool in llm_api.tools
@@ -243,7 +269,6 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         langchain_tools: dict[str, Any] = {
             "get_and_analyze_camera_image": get_and_analyze_camera_image,
             "upsert_memory": upsert_memory,
-            "add_automation": add_automation,
             "get_entity_history": get_entity_history,
             "confirm_sensitive_action": confirm_sensitive_action,
             "alarm_control": alarm_control,
@@ -265,7 +290,12 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             "define": define,
             "example_usage": example_usage,
             "synonyms": synonyms,
+            "resolve_entity_ids": resolve_entity_ids,
+            "write_yaml_file": write_yaml_file,
         }
+        if not options.get(CONF_SCHEMA_FIRST_YAML, False):
+            langchain_tools["add_automation"] = add_automation
+        
         
         if options.get(CONF_GOOGLE_PLACES_ENABLED, False):
             langchain_tools["find_nearby_places"] = find_nearby_places
@@ -302,7 +332,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             if chat_log.conversation_id is None
             else chat_log.conversation_id
         )
-        LOGGER.debug("Conversation ID: %s", conversation_id)
+        _LOGGER.debug("Conversation ID: %s", conversation_id)
 
         # Resolve user name (None means automation)
         if (
@@ -316,6 +346,11 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         try:
             pin_enabled = options.get(CONF_CRITICAL_ACTION_PIN_ENABLED, True)
             critical_prompt = CRITICAL_ACTION_PROMPT if pin_enabled else ""
+            schema_prompt = (
+                SCHEMA_FIRST_YAML_PROMPT
+                if options.get(CONF_SCHEMA_FIRST_YAML, False)
+                else ""
+            )
             prompt_parts = [
                 template.Template(
                     (
@@ -323,6 +358,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                         + options.get(CONF_PROMPT, llm.DEFAULT_INSTRUCTIONS_PROMPT)
                         + f"\nYou are in the {self.tz} timezone."
                         + critical_prompt
+                        + schema_prompt
                         + TOOL_CALL_ERROR_SYSTEM_MESSAGE
                         if tools
                         else ""
@@ -338,7 +374,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                 )
             ]
         except TemplateError as err:
-            LOGGER.exception("Error rendering prompt.")
+            _LOGGER.exception("Error rendering prompt.")
             intent_response = intent.IntentResponse(language=user_input.language)
             intent_response.async_set_error(
                 intent.IntentResponseErrorCode.UNKNOWN,
@@ -358,7 +394,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         try:
             chat_model_with_tools = base_llm.bind_tools(tools)
         except AttributeError:
-            LOGGER.exception("Error during conversation processing.")
+            _LOGGER.exception("Error during conversation processing.")
             intent_response = intent.IntentResponse(language=user_input.language)
             intent_response.async_set_error(
                 intent.IntentResponseErrorCode.UNKNOWN,
@@ -372,7 +408,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         user_name = "robot" if user_name is None else user_name
         # Remove special characters since memory namespace labels cannot contain them.
         user_name = user_name.translate(str.maketrans("", "", string.punctuation))
-        LOGGER.debug("User name: %s", user_name)
+        _LOGGER.debug("User name: %s", user_name)
 
         app_config: RunnableConfig = {
             "configurable": {
@@ -415,7 +451,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         try:
             response = await app.ainvoke(input=app_input, config=app_config)
         except HomeAssistantError as err:
-            LOGGER.exception("LangGraph error during conversation processing.")
+            _LOGGER.exception("LangGraph error during conversation processing.")
             intent_response = intent.IntentResponse(language=user_input.language)
             intent_response.async_set_error(
                 intent.IntentResponseErrorCode.UNKNOWN,
@@ -430,10 +466,20 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             {"messages": response["messages"], "tools": tools if tools else None},
         )
 
-        LOGGER.debug("====== End of run ======")
+        _LOGGER.debug("====== End of run ======")
 
         intent_response = intent.IntentResponse(language=user_input.language)
-        intent_response.async_set_speech(response["messages"][-1].content)
+         final_content = response["messages"][-1].content
+        if isinstance(final_content, str):
+            if options.get(CONF_SCHEMA_FIRST_YAML, False):
+                final_content = _maybe_fix_dashboard_entities(final_content, hass)
+            else:
+                final_content = _fix_entity_ids_in_text(final_content, hass)
+            final_content = _convert_schema_json_to_yaml(
+                final_content, options.get(CONF_SCHEMA_FIRST_YAML, False)
+            )
+            _LOGGER.debug("Final response content: %s", final_content)
+        intent_response.async_set_speech(final_content)
         return conversation.ConversationResult(
             response=intent_response, conversation_id=conversation_id
         )
