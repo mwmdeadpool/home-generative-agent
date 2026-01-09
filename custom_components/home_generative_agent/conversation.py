@@ -470,7 +470,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         _LOGGER.debug("====== End of run ======")
 
         intent_response = intent.IntentResponse(language=user_input.language)
-         final_content = response["messages"][-1].content
+        final_content = response["messages"][-1].content
         if isinstance(final_content, str):
             if options.get(CONF_SCHEMA_FIRST_YAML, False):
                 final_content = _maybe_fix_dashboard_entities(final_content, hass)
