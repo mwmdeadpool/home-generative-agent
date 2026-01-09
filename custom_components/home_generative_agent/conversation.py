@@ -260,6 +260,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             )
             return conversation.ConversationResult(
                 response=intent_response, conversation_id=conversation_id
+            )
 
         tools = [
             _format_tool(tool, llm_api.custom_serializer) for tool in llm_api.tools

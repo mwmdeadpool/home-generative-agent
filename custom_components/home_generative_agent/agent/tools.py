@@ -100,6 +100,7 @@ async def resolve_entity_ids(  # noqa: D417
 ) -> dict[str, str]:
     """
     Resolve suggested entity_ids to existing Home Assistant entity_ids.
+
     Args:
         entity_ids: List of entity_id strings.
     """
@@ -593,6 +594,7 @@ async def write_yaml_file(  # noqa: D417
 ) -> str:
     """
     Write YAML content to a unique file under /config/www.
+
     Args:
         yaml_text: The YAML content to write.
         filename_prefix: Optional filename prefix (letters, numbers, '-' or '_').
