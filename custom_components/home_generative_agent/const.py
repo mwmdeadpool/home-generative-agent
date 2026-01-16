@@ -53,6 +53,7 @@ RECOMMENDED_DB_NAME = "ha_db"
 RECOMMENDED_DB_PARAMS = [{"key": "sslmode", "value": "disable"}]
 
 CONF_DB_BOOTSTRAPPED = "db_bootstrapped"
+CONF_VECTORS_BOOTSTRAPPED = "vectors_bootstrapped"
 
 # ---- Mem0 server ----
 CONF_MEM0_ENABLED = "mem0_enabled"

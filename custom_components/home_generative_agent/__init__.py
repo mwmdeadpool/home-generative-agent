@@ -96,6 +96,7 @@ from .const import (
     CONF_OPENAI_VLM,
     CONF_SUMMARIZATION_MODEL_PROVIDER,
     CONF_SUMMARIZATION_MODEL_TEMPERATURE,
+    CONF_VECTORS_BOOTSTRAPPED,
     CONF_VIDEO_ANALYZER_MODE,
     CONF_VLM_PROVIDER,
     CONF_VLM_TEMPERATURE,
@@ -291,6 +292,14 @@ def _assign_first_provider_if_needed(hass: HomeAssistant, entry: ConfigEntry) ->
             entry, subentry, data=MappingProxyType(data), title=subentry.title
         )
 
+# Database and vector index bootstrapping.
+# store.setup() only runs the vector migrations when store.index_config is set.
+# If index_config is None (no embeddings configured yet), setup() runs only the
+# base store migrations and skips VECTOR_MIGRATIONS, which is where store_vectors
+# and its ANN index are created. Adding a model provider with embeddings later
+# will trigger a separate setup() call that creates the vector index then if not
+# already configured during initial bootstrap.
+
 
 async def _bootstrap_db_once(
     hass: HomeAssistant,
@@ -298,18 +307,35 @@ async def _bootstrap_db_once(
     store: AsyncPostgresStore,
     checkpointer: AsyncPostgresSaver,
 ) -> None:
-    # Always run setup to handle schema updates/migrations safely
-    # if entry.data.get(CONF_DB_BOOTSTRAPPED):
-    #    return
+    """Bootstrap database if needed."""
+     if entry.data.get(CONF_DB_BOOTSTRAPPED):
+        return
 
-    # First time only
     await store.setup()
     await checkpointer.setup()
 
-    # Persist the flag so it survives restarts
+    
     hass.config_entries.async_update_entry(
         entry, data={**entry.data, CONF_DB_BOOTSTRAPPED: True}
     )
+
+async def _bootstrap_vectors_once(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    store: AsyncPostgresStore,
+) -> None:
+    """Bootstrap vector index if needed."""
+    if not store.index_config:
+        return
+    if entry.data.get(CONF_VECTORS_BOOTSTRAPPED):
+        return
+
+    await store.setup()
+
+    hass.config_entries.async_update_entry(
+        entry, data={**entry.data, CONF_VECTORS_BOOTSTRAPPED: True}
+    )
+
 
 
 class NullChat:
@@ -686,6 +712,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         checkpointer = AsyncPostgresSaver(pool)
         # First-time setup (if needed)
         await _bootstrap_db_once(hass, entry, store, checkpointer)
+        await _bootstrap_vectors_once(hass, entry, store)
 
         # Migrate person gallery DB schema (if needed)
         try:
@@ -694,7 +721,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             LOGGER.exception("Error migrating person_gallery database schema.")
             return False
 
-        person_gallery = PersonGalleryDAO(pool)
+        person_gallery = PersonGalleryDAO(pool, hass)
 
         async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
             await cur.execute("""
