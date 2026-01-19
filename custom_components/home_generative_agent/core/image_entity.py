@@ -196,19 +196,23 @@ class LastEventImage(ImageEntity):
             return
 
         people = (
-            cast("Sequence[str] | None", args[IDX_LATEST_PATH])
-            if len(args) > IDX_LATEST_PATH
+            cast("Sequence[str] | None", args[IDX_RECOGNIZED_PEOPLE])
+            if len(args) > IDX_RECOGNIZED_PEOPLE
             else None
         )
         summary = (
-            cast("str | None", args[IDX_SUMMARY]) if len(args) > IDX_SUMMARY else None
+            cast("str | None", args[IDX_RECOGNIZED_SUMMARY])
+            if len(args) > IDX_RECOGNIZED_SUMMARY
+            else None
         )
         last_event_iso = (
-            cast("str | None", args[IDX_PEOPLE]) if len(args) > IDX_PEOPLE else None
+            cast("str | None", args[IDX_RECOGNIZED_LAST_EVENT_ISO])
+            if len(args) > IDX_RECOGNIZED_LAST_EVENT_ISO
+            else None
         )
         latest_path = (
-            cast("str | None", args[IDX_LAST_EVENT_ISO])
-            if len(args) > IDX_LAST_EVENT_ISO
+            cast("str | None", args[IDX_RECOGNIZED_LATEST_PATH])
+            if len(args) > IDX_RECOGNIZED_LATEST_PATH
             else None
         )
 
