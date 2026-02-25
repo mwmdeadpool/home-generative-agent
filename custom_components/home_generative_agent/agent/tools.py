@@ -1234,6 +1234,7 @@ async def get_camera_last_events(  # noqa: D417
     event timestamps from the most recent video analysis for each camera.
     Use this when handling camera-related security alerts, or when you need
     to know who or what the cameras have recently observed.
+
     Args:
         camera_entity_id: Optional camera entity ID to limit results to one
             camera (e.g. 'camera.front_door'). If omitted, returns all cameras.
