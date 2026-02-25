@@ -218,7 +218,7 @@ from .sentinel.discovery_semantic import candidate_semantic_key, rule_semantic_k
 from .sentinel.discovery_store import DiscoveryStore
 from .sentinel.engine import SentinelEngine
 from .sentinel.proposal_store import ProposalStore
-from .sentinel.proposal_templates import normalize_candidate
+from .sentinel.proposal_template import normalize_candidate
 from .sentinel.rule_registry import RuleRegistry
 from .sentinel.suppression import SuppressionManager
 

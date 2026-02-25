@@ -6,7 +6,7 @@ import logging
 from typing import TYPE_CHECKING, Any, cast
 
 from .models import AnomalyFinding, Severity, build_anomaly_id
-from .proposal_templates import SUPPORTED_TEMPLATES
+from .proposal_template import SUPPORTED_TEMPLATES
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
