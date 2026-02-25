@@ -34,6 +34,7 @@ from .agent.tools import (
     example_usage,
     find_nearby_places,
     get_and_analyze_camera_image,
+    get_camera_last_events,
     get_entity_history,
     resolve_entity_ids,
     get_post_details,
@@ -270,6 +271,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         # Add LangChain-native tools (wired in graph via config).
         langchain_tools: dict[str, Any] = {
             "get_and_analyze_camera_image": get_and_analyze_camera_image,
+            "get_camera_last_events": get_camera_last_events,
             "upsert_memory": upsert_memory,
             "get_entity_history": get_entity_history,
             "confirm_sensitive_action": confirm_sensitive_action,
@@ -480,7 +482,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
 
         trace.async_conversation_trace_append(
             trace.ConversationTraceEventType.AGENT_DETAIL,
-            {"messages": response["messages"], "tools": tools if tools else None},
+            {"messages": response["messages"], "tools": tools or None},
         )
 
         _LOGGER.debug("====== End of run ======")

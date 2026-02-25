@@ -24,10 +24,12 @@ from homeassistant.const import (
     CONF_PASSWORD,
     CONF_PORT,
     CONF_USERNAME,
+    EVENT_HOMEASSISTANT_STARTED,
+    EVENT_HOMEASSISTANT_STOP,
     Platform,
 )
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import HomeAssistantError
+from homeassistant.exceptions import HomeAssistantError, SupportsResponse
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.httpx_client import get_async_client
 from homeassistant.helpers.network import get_url
@@ -54,6 +56,7 @@ from psycopg.rows import DictRow, dict_row
 from psycopg_pool import AsyncConnectionPool, PoolTimeout
 from pydantic import SecretStr
 from .agent.tools import analyze_image
+from .audit.store import AuditStore
 from .const import (
     CHAT_MODEL_MAX_TOKENS,
     CHAT_MODEL_REPEAT_PENALTY,
@@ -65,6 +68,7 @@ from .const import (
     CONF_DB_PARAMS,
     CONF_DB_URI,
     CONF_EMBEDDING_MODEL_PROVIDER,
+    CONF_EXPLAIN_ENABLED,
     CONF_FACE_API_URL,
     CONF_FACE_RECOGNITION,
     CONF_FEATURE_MODEL,
@@ -78,6 +82,7 @@ from .const import (
     CONF_GEMINI_EMBEDDING_MODEL,
     CONF_GEMINI_SUMMARIZATION_MODEL,
     CONF_GEMINI_VLM,
+    CONF_NOTIFY_SERVICE,
     CONF_MEM0_ENABLED,
     CONF_MEM0_SERVER_URL,
     CONF_OLLAMA_CHAT_CONTEXT_SIZE,
@@ -99,6 +104,13 @@ from .const import (
     CONF_OPENAI_EMBEDDING_MODEL,
     CONF_OPENAI_SUMMARIZATION_MODEL,
     CONF_OPENAI_VLM,
+    CONF_SENTINEL_COOLDOWN_MINUTES,
+    CONF_SENTINEL_DISCOVERY_ENABLED,
+    CONF_SENTINEL_DISCOVERY_INTERVAL_SECONDS,
+    CONF_SENTINEL_DISCOVERY_MAX_RECORDS,
+    CONF_SENTINEL_ENABLED,
+    CONF_SENTINEL_ENTITY_COOLDOWN_MINUTES,
+    CONF_SENTINEL_INTERVAL_SECONDS,
     CONF_SUMMARIZATION_MODEL_PROVIDER,
     CONF_SUMMARIZATION_MODEL_TEMPERATURE,
     CONF_VECTORS_BOOTSTRAPPED,
@@ -112,6 +124,8 @@ from .const import (
     EMBEDDING_MODEL_DIMS,
     FEATURE_CATEGORY_MAP,
     FEATURE_NAMES,
+    HGA_CARD_STATIC_PATH,
+    HGA_CARD_STATIC_PATH_LEGACY,
     MODEL_CATEGORY_SPECS,
     RECOMMENDED_CHAT_MODEL_PROVIDER,
     RECOMMENDED_CHAT_MODEL_TEMPERATURE,
@@ -122,6 +136,7 @@ from .const import (
     RECOMMENDED_DB_PORT,
     RECOMMENDED_DB_USERNAME,
     RECOMMENDED_EMBEDDING_MODEL_PROVIDER,
+    RECOMMENDED_EXPLAIN_ENABLED,
     RECOMMENDED_FACE_API_URL,
     RECOMMENDED_FACE_RECOGNITION,
     RECOMMENDED_GEMINI_CHAT_MODEL,
@@ -142,6 +157,13 @@ from .const import (
     RECOMMENDED_OPENAI_EMBEDDING_MODEL,
     RECOMMENDED_OPENAI_SUMMARIZATION_MODEL,
     RECOMMENDED_OPENAI_VLM,
+    RECOMMENDED_SENTINEL_COOLDOWN_MINUTES,
+    RECOMMENDED_SENTINEL_DISCOVERY_ENABLED,
+    RECOMMENDED_SENTINEL_DISCOVERY_INTERVAL_SECONDS,
+    RECOMMENDED_SENTINEL_DISCOVERY_MAX_RECORDS,
+    RECOMMENDED_SENTINEL_ENABLED,
+    RECOMMENDED_SENTINEL_ENTITY_COOLDOWN_MINUTES,
+    RECOMMENDED_SENTINEL_INTERVAL_SECONDS,
     RECOMMENDED_SUMMARIZATION_MODEL_PROVIDER,
     RECOMMENDED_SUMMARIZATION_MODEL_TEMPERATURE,
     RECOMMENDED_VLM_PROVIDER,
@@ -151,6 +173,7 @@ from .const import (
     SUBENTRY_TYPE_DATABASE,
     SUBENTRY_TYPE_FEATURE,
     SUBENTRY_TYPE_MODEL_PROVIDER,
+    SUBENTRY_TYPE_SENTINEL,
     SUMMARIZATION_MIRO_STAT,
     SUMMARIZATION_MODEL_PREDICT,
     SUMMARIZATION_MODEL_REPEAT_PENALTY,
@@ -186,7 +209,18 @@ from .core.utils import (
 )
 from .core.video_analyzer import VideoAnalyzer
 from .core.video_helpers import latest_target, publish_latest_atomic
+from .explain.llm_explain import LLMExplainer
 from .http import EnrollPersonView
+from .notify.actions import ActionHandler
+from .notify.dispatcher import NotificationDispatcher
+from .sentinel.discovery_engine import SentinelDiscoveryEngine
+from .sentinel.discovery_semantic import candidate_semantic_key, rule_semantic_key
+from .sentinel.discovery_store import DiscoveryStore
+from .sentinel.engine import SentinelEngine
+from .sentinel.proposal_store import ProposalStore
+from .sentinel.proposal_templates import normalize_candidate
+from .sentinel.rule_registry import RuleRegistry
+from .sentinel.suppression import SuppressionManager
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -202,14 +236,69 @@ if TYPE_CHECKING:
 
 LOGGER = logging.getLogger(__name__)
 
+_SERVICE_RESPONSE_ONLY = SupportsResponse.ONLY
+
 PLATFORMS = (Platform.CONVERSATION, Platform.STT, "image", "sensor")
 
 SERVICE_ENROLL_PERSON = "enroll_person"
+SERVICE_GET_AUDIT_RECORDS = "get_audit_records"
+SERVICE_GET_DISCOVERY_RECORDS = "get_discovery_records"
+SERVICE_PROMOTE_DISCOVERY_CANDIDATE = "promote_discovery_candidate"
+SERVICE_GET_PROPOSAL_DRAFTS = "get_proposal_drafts"
+SERVICE_APPROVE_RULE_PROPOSAL = "approve_rule_proposal"
+SERVICE_REJECT_RULE_PROPOSAL = "reject_rule_proposal"
+SERVICE_GET_DYNAMIC_RULES = "get_dynamic_rules"
+SERVICE_DEACTIVATE_DYNAMIC_RULE = "deactivate_dynamic_rule"
+SERVICE_REACTIVATE_DYNAMIC_RULE = "reactivate_dynamic_rule"
 
 ENROLL_SCHEMA = vol.Schema(
     {
         vol.Required("name"): cv.string,
-        vol.Required("file_path"): cv.string,
+         vol.Required("file_path"): cv.string,
+    }
+)
+
+GET_AUDIT_SCHEMA = vol.Schema(
+    {
+        vol.Optional("limit", default=20): vol.Coerce(int),
+    }
+)
+
+GET_DISCOVERY_SCHEMA = vol.Schema(
+    {
+        vol.Optional("limit", default=20): vol.Coerce(int),
+    }
+)
+
+PROMOTE_DISCOVERY_SCHEMA = vol.Schema(
+    {
+        vol.Required("candidate_id"): cv.string,
+        vol.Optional("notes"): cv.string,
+    }
+)
+
+GET_PROPOSAL_SCHEMA = vol.Schema(
+    {
+        vol.Optional("limit", default=50): vol.Coerce(int),
+    }
+)
+
+REVIEW_PROPOSAL_SCHEMA = vol.Schema(
+    {
+        vol.Required("candidate_id"): cv.string,
+        vol.Optional("notes"): cv.string,
+    }
+)
+
+GET_DYNAMIC_RULES_SCHEMA = vol.Schema(
+    {
+        vol.Optional("limit", default=200): vol.Coerce(int),
+    }
+)
+
+TOGGLE_DYNAMIC_RULE_SCHEMA = vol.Schema(
+    {
+        vol.Required("rule_id"): cv.string,
     }
 )
 
@@ -236,6 +325,12 @@ def _provider_api_key(
         if api_key:
             return str(api_key)
     return None
+
+def _resolve_www_dir() -> str | None:
+    www_dir = Path(__file__).resolve().parent / "www"
+    if not www_dir.is_dir():
+        return None
+    return str(www_dir)
 
 async def _read_enroll_image_bytes(hass: HomeAssistant, file_ref: str) -> bytes:
     if media_source.is_media_source_id(file_ref):
@@ -333,6 +428,36 @@ def _assign_first_provider_if_needed(hass: HomeAssistant, entry: ConfigEntry) ->
             entry, subentry, data=MappingProxyType(data), title=subentry.title
         )
 
+def _ensure_default_sentinel_subentry(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Ensure a singleton sentinel subentry exists for deterministic settings."""
+    exists = any(
+        s.subentry_type == SUBENTRY_TYPE_SENTINEL for s in entry.subentries.values()
+    )
+    if exists:
+        return
+
+    payload = {
+        CONF_SENTINEL_ENABLED: RECOMMENDED_SENTINEL_ENABLED,
+        CONF_SENTINEL_INTERVAL_SECONDS: RECOMMENDED_SENTINEL_INTERVAL_SECONDS,
+        CONF_SENTINEL_COOLDOWN_MINUTES: RECOMMENDED_SENTINEL_COOLDOWN_MINUTES,
+        CONF_SENTINEL_ENTITY_COOLDOWN_MINUTES: (
+            RECOMMENDED_SENTINEL_ENTITY_COOLDOWN_MINUTES
+        ),
+        CONF_SENTINEL_DISCOVERY_ENABLED: RECOMMENDED_SENTINEL_DISCOVERY_ENABLED,
+        CONF_SENTINEL_DISCOVERY_INTERVAL_SECONDS: (
+            RECOMMENDED_SENTINEL_DISCOVERY_INTERVAL_SECONDS
+        ),
+        CONF_SENTINEL_DISCOVERY_MAX_RECORDS: RECOMMENDED_SENTINEL_DISCOVERY_MAX_RECORDS,
+        CONF_EXPLAIN_ENABLED: RECOMMENDED_EXPLAIN_ENABLED,
+    }
+    subentry = ConfigSubentry(
+        subentry_type=SUBENTRY_TYPE_SENTINEL,
+        title="Sentinel",
+        unique_id=f"{entry.entry_id}_sentinel",
+        data=MappingProxyType(payload),
+    )
+    hass.config_entries.async_add_subentry(entry, subentry)
+   
 # Database and vector index bootstrapping.
 # store.setup() only runs the vector migrations when store.index_config is set.
 # If index_config is None (no embeddings configured yet), setup() runs only the
@@ -516,6 +641,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
 
     _register_services(hass, entry)
     _ensure_default_feature_subentries(hass, entry)
+    _ensure_default_sentinel_subentry(hass, entry)
     _assign_first_provider_if_needed(hass, entry)
 
     # Resolve effective options (data + options + subentries).
@@ -986,8 +1112,60 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         )
 
     video_analyzer = VideoAnalyzer(hass, entry)
+    
+    suppression = SuppressionManager(hass)
+    await suppression.async_load()
+    audit_store = AuditStore(hass)
+    await audit_store.async_load()
+    discovery_max = int(
+        options.get(
+            CONF_SENTINEL_DISCOVERY_MAX_RECORDS,
+            RECOMMENDED_SENTINEL_DISCOVERY_MAX_RECORDS,
+        )
+    )
+    discovery_store = DiscoveryStore(hass, max_records=discovery_max)
+    await discovery_store.async_load()
+    proposal_store = ProposalStore(hass)
+    await proposal_store.async_load()
+    rule_registry = RuleRegistry(hass)
+    await rule_registry.async_load()
+    action_handler = ActionHandler(
+        hass,
+        suppression,
+        audit_store,
+        entry_id=entry.entry_id,
+        notify_service=options.get(CONF_NOTIFY_SERVICE),
+    )
+    notifier = NotificationDispatcher(hass, options, action_handler)
+    notifier.start()
+    explainer = None
+    if options.get(CONF_EXPLAIN_ENABLED, RECOMMENDED_EXPLAIN_ENABLED):
+        explainer = LLMExplainer(chat_model)
+    sentinel = SentinelEngine(
+        hass,
+        options,
+        suppression,
+        notifier,
+        audit_store,
+        explainer,
+        rule_registry=rule_registry,
+    )
+    discovery_engine = SentinelDiscoveryEngine(
+        hass=hass,
+        options=options,
+        model=chat_model,
+        store=discovery_store,
+        rule_registry=rule_registry,
+        proposal_store=proposal_store,
+    )
 
     face_recognition = options.get(CONF_FACE_RECOGNITION, RECOMMENDED_FACE_RECOGNITION)
+    if face_recognition and person_gallery is None:
+        LOGGER.warning(
+            "Face recognition is enabled but person gallery is unavailable; "
+            "disabling face recognition for this entry."
+        )
+        face_recognition = False
 
     # Save runtime data.
     entry.runtime_data = HGAData(
@@ -1004,6 +1182,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         face_api_url=face_api_url,
         person_gallery=person_gallery,
         pending_actions={},
+        suppression=suppression,
+        sentinel=sentinel,
+        notifier=notifier,
+        action_handler=action_handler,
+        audit_store=audit_store,
+        explainer=explainer,
+        discovery_store=discovery_store,
+        discovery_engine=discovery_engine,
+        proposal_store=proposal_store,
+        rule_registry=rule_registry,
         mem0_client=mem0_client,
     )
 
@@ -1020,6 +1208,34 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
 
     if options.get(CONF_VIDEO_ANALYZER_MODE) != "disable":
         video_analyzer.start()
+
+    if options.get(CONF_SENTINEL_ENABLED, RECOMMENDED_SENTINEL_ENABLED):
+        if hass.is_running:
+            sentinel.start()
+        else:
+
+            def _start_sentinel(_event: object) -> None:
+                hass.loop.call_soon_threadsafe(sentinel.start)
+
+            hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, _start_sentinel)
+    if options.get(
+        CONF_SENTINEL_DISCOVERY_ENABLED,
+        RECOMMENDED_SENTINEL_DISCOVERY_ENABLED,
+    ):
+        if hass.is_running:
+            discovery_engine.start()
+        else:
+
+            def _start_discovery(_event: object) -> None:
+                hass.loop.call_soon_threadsafe(discovery_engine.start)
+
+            hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, _start_discovery)
+
+    async def _stop_background_tasks(_event: object) -> None:
+        await sentinel.stop()
+        await discovery_engine.stop()
+
+    hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, _stop_background_tasks)
 
     msg = (
         "Home Generative Agent initialized with the following models: "
@@ -1066,7 +1282,332 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         _handle_enroll_person,
         schema=ENROLL_SCHEMA,
     )
+    async def _handle_get_audit(call: ServiceCall) -> dict[str, Any]:
+        limit = int(call.data.get("limit", 20))
+        limit = max(1, min(limit, 200))
+        audit_store = entry.runtime_data.audit_store
+        if audit_store is None:
+            return {"records": []}
+        records = await audit_store.async_get_latest(limit)
+        return {"records": records}
 
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_GET_AUDIT_RECORDS,
+        _handle_get_audit,
+        schema=GET_AUDIT_SCHEMA,
+        supports_response=_SERVICE_RESPONSE_ONLY,
+    )
+
+    async def _handle_get_discovery(call: ServiceCall) -> dict[str, Any]:
+        limit = int(call.data.get("limit", 20))
+        limit = max(1, min(limit, 200))
+        discovery_store = entry.runtime_data.discovery_store
+        if discovery_store is None:
+            return {"records": []}
+        records = await discovery_store.async_get_latest(limit)
+        return {"records": records}
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_GET_DISCOVERY_RECORDS,
+        _handle_get_discovery,
+        schema=GET_DISCOVERY_SCHEMA,
+        supports_response=_SERVICE_RESPONSE_ONLY,
+    )
+
+    def _covered_rule_id_for_candidate(candidate: dict[str, Any]) -> str | None:
+        rule_registry = entry.runtime_data.rule_registry
+        if rule_registry is None:
+            return None
+        candidate_key = candidate_semantic_key(candidate)
+        if not candidate_key:
+            return None
+        for rule in rule_registry.list_rules():
+            if rule_semantic_key(rule) != candidate_key:
+                continue
+            rule_id = str(rule.get("rule_id", ""))
+            if rule_id:
+                return rule_id
+        return None
+
+    async def _handle_promote_discovery(call: ServiceCall) -> dict[str, Any]:
+        candidate_id = str(call.data.get("candidate_id"))
+        notes = str(call.data.get("notes", "") or "")
+        discovery_store = entry.runtime_data.discovery_store
+        proposal_store = entry.runtime_data.proposal_store
+        rule_registry = entry.runtime_data.rule_registry
+        if discovery_store is None or proposal_store is None:
+            return {"status": "unavailable"}
+
+        candidate = discovery_store.find_candidate(candidate_id)
+        if candidate is None:
+            return {"status": "not_found"}
+
+        covered_rule_id = _covered_rule_id_for_candidate(candidate)
+        if covered_rule_id is not None:
+            LOGGER.info(
+                "Skipping promote for %s: candidate already covered by %s.",
+                candidate_id,
+                covered_rule_id,
+            )
+            return {
+                "status": "already_active",
+                "candidate_id": candidate_id,
+                "rule_id": covered_rule_id,
+            }
+
+        normalized = normalize_candidate(candidate)
+        if normalized is not None:
+            existing_draft = proposal_store.find_by_rule_id(normalized.rule_id)
+            if existing_draft is not None:
+                LOGGER.info(
+                    "Skipping promote for %s: draft already exists for rule %s.",
+                    candidate_id,
+                    normalized.rule_id,
+                )
+                return {
+                    "status": "exists",
+                    "candidate_id": candidate_id,
+                    "rule_id": normalized.rule_id,
+                }
+            if rule_registry is not None and rule_registry.find_rule(
+                normalized.rule_id
+            ):
+                LOGGER.info(
+                    "Skipping promote for %s: rule %s already active.",
+                    candidate_id,
+                    normalized.rule_id,
+                )
+                return {
+                    "status": "already_active",
+                    "candidate_id": candidate_id,
+                    "rule_id": normalized.rule_id,
+                }
+
+        draft = {
+            "candidate_id": candidate_id,
+            "candidate": candidate,
+            "notes": notes,
+            "status": "draft",
+            "created_at": dt_util.utcnow().isoformat(),
+        }
+        if normalized is not None:
+            draft["rule_id"] = normalized.rule_id
+            draft["template_id"] = normalized.template_id
+        await proposal_store.async_append(draft)
+        notify_service = entry.runtime_data.options.get(CONF_NOTIFY_SERVICE)
+        if notify_service and isinstance(notify_service, str):
+            domain, _, service = notify_service.partition(".")
+            if not service:
+                service = notify_service
+                domain = "notify"
+            await hass.services.async_call(
+                domain,
+                service,
+                {
+                    "title": "HGA proposal draft",
+                    "message": (
+                        f"New proposal draft created for candidate {candidate_id}."
+                    ),
+                    "data": {"tag": f"hga_proposal_{candidate_id[:16]}"},
+                },
+                blocking=False,
+            )
+        return {"status": "ok", "candidate_id": candidate_id}
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_PROMOTE_DISCOVERY_CANDIDATE,
+        _handle_promote_discovery,
+        schema=PROMOTE_DISCOVERY_SCHEMA,
+        supports_response=_SERVICE_RESPONSE_ONLY,
+    )
+
+    async def _handle_get_proposals(call: ServiceCall) -> dict[str, Any]:
+        limit = int(call.data.get("limit", 50))
+        limit = max(1, min(limit, 200))
+        proposal_store = entry.runtime_data.proposal_store
+        if proposal_store is None:
+            return {"records": []}
+        records = await proposal_store.async_get_latest(limit)
+        return {"records": records}
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_GET_PROPOSAL_DRAFTS,
+        _handle_get_proposals,
+        schema=GET_PROPOSAL_SCHEMA,
+        supports_response=_SERVICE_RESPONSE_ONLY,
+    )
+
+    async def _handle_get_dynamic_rules(call: ServiceCall) -> dict[str, Any]:
+        limit = int(call.data.get("limit", 200))
+        limit = max(1, min(limit, 500))
+        rule_registry = entry.runtime_data.rule_registry
+        if rule_registry is None:
+            return {"records": []}
+        records = rule_registry.list_rules(include_disabled=True)
+        return {"records": records[:limit]}
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_GET_DYNAMIC_RULES,
+        _handle_get_dynamic_rules,
+        schema=GET_DYNAMIC_RULES_SCHEMA,
+        supports_response=_SERVICE_RESPONSE_ONLY,
+    )
+
+    async def _handle_approve_proposal(call: ServiceCall) -> dict[str, Any]:
+        candidate_id = str(call.data.get("candidate_id"))
+        notes = str(call.data.get("notes", "") or "")
+        proposal_store = entry.runtime_data.proposal_store
+        rule_registry = entry.runtime_data.rule_registry
+        if proposal_store is None or rule_registry is None:
+            LOGGER.info(
+                "Proposal approval unavailable for candidate %s (stores not ready).",
+                candidate_id,
+            )
+            return {"status": "unavailable"}
+        record = proposal_store.find_by_candidate_id(candidate_id)
+        candidate = record.get("candidate") if record else None
+        if not candidate:
+            LOGGER.info(
+                "Proposal approval failed: candidate %s not found.",
+                candidate_id,
+            )
+            return {"status": "not_found", "candidate_id": candidate_id}
+
+        normalized = normalize_candidate(candidate)
+        if normalized is None:
+            covered_rule_id = _covered_rule_id_for_candidate(candidate)
+            if covered_rule_id is not None:
+                await proposal_store.async_update_status(
+                    candidate_id,
+                    "covered_by_existing_rule",
+                    notes,
+                    extra={"covered_rule_id": covered_rule_id},
+                )
+                LOGGER.info(
+                    "Proposal %s marked covered_by_existing_rule (%s).",
+                    candidate_id,
+                    covered_rule_id,
+                )
+                return {
+                    "status": "covered_by_existing_rule",
+                    "candidate_id": candidate_id,
+                    "rule_id": covered_rule_id,
+                }
+            await proposal_store.async_update_status(
+                candidate_id,
+                "unsupported",
+                notes,
+            )
+            LOGGER.info(
+                (
+                    "Proposal %s marked unsupported "
+                    "(candidate could not map to a template)."
+                ),
+                candidate_id,
+            )
+            return {"status": "unsupported", "candidate_id": candidate_id}
+
+        rule_spec = normalized.as_dict()
+        rule_spec["created_at"] = dt_util.utcnow().isoformat()
+        rule_spec["source_candidate_id"] = candidate_id
+        added = await rule_registry.async_add_rule(rule_spec)
+        await proposal_store.async_update_status(
+            candidate_id,
+            "approved",
+            notes,
+            extra={"rule_id": rule_spec["rule_id"], "rule_spec": rule_spec},
+        )
+        if added:
+            LOGGER.info(
+                "Approved proposal %s and registered dynamic rule %s (%s).",
+                candidate_id,
+                rule_spec["rule_id"],
+                rule_spec["template_id"],
+            )
+        else:
+            await proposal_store.async_update_status(
+                candidate_id,
+                "covered_by_existing_rule",
+                notes,
+                extra={"covered_rule_id": rule_spec["rule_id"]},
+            )
+            LOGGER.info(
+                "Approved proposal %s but dynamic rule %s already existed.",
+                candidate_id,
+                rule_spec["rule_id"],
+            )
+            return {
+                "status": "covered_by_existing_rule",
+                "candidate_id": candidate_id,
+                "rule_id": rule_spec["rule_id"],
+            }
+        return {
+            "status": "ok",
+            "candidate_id": candidate_id,
+            "rule_id": rule_spec["rule_id"],
+        }
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_APPROVE_RULE_PROPOSAL,
+        _handle_approve_proposal,
+        schema=REVIEW_PROPOSAL_SCHEMA,
+        supports_response=_SERVICE_RESPONSE_ONLY,
+    )
+
+    async def _handle_reject_proposal(call: ServiceCall) -> dict[str, Any]:
+        candidate_id = str(call.data.get("candidate_id"))
+        notes = str(call.data.get("notes", "") or "")
+        proposal_store = entry.runtime_data.proposal_store
+        if proposal_store is None:
+            return {"status": "unavailable"}
+        ok = await proposal_store.async_update_status(candidate_id, "rejected", notes)
+        return {"status": "ok" if ok else "not_found", "candidate_id": candidate_id}
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_REJECT_RULE_PROPOSAL,
+        _handle_reject_proposal,
+        schema=REVIEW_PROPOSAL_SCHEMA,
+        supports_response=_SERVICE_RESPONSE_ONLY,
+    )
+
+    async def _handle_deactivate_dynamic_rule(call: ServiceCall) -> dict[str, Any]:
+        rule_id = str(call.data.get("rule_id"))
+        rule_registry = entry.runtime_data.rule_registry
+        if rule_registry is None:
+            return {"status": "unavailable", "rule_id": rule_id}
+        ok = await rule_registry.async_set_rule_enabled(rule_id, enabled=False)
+        return {"status": "ok" if ok else "not_found", "rule_id": rule_id}
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_DEACTIVATE_DYNAMIC_RULE,
+        _handle_deactivate_dynamic_rule,
+        schema=TOGGLE_DYNAMIC_RULE_SCHEMA,
+        supports_response=_SERVICE_RESPONSE_ONLY,
+    )
+
+    async def _handle_reactivate_dynamic_rule(call: ServiceCall) -> dict[str, Any]:
+        rule_id = str(call.data.get("rule_id"))
+        rule_registry = entry.runtime_data.rule_registry
+        if rule_registry is None:
+            return {"status": "unavailable", "rule_id": rule_id}
+        ok = await rule_registry.async_set_rule_enabled(rule_id, enabled=True)
+        return {"status": "ok" if ok else "not_found", "rule_id": rule_id}
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_REACTIVATE_DYNAMIC_RULE,
+        _handle_reactivate_dynamic_rule,
+        schema=TOGGLE_DYNAMIC_RULE_SCHEMA,
+        supports_response=_SERVICE_RESPONSE_ONLY,
+    )
     return True
 
 
@@ -1075,6 +1616,12 @@ async def async_unload_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool
     if entry.runtime_data.pool is not None:
         await entry.runtime_data.pool.close()
     await entry.runtime_data.video_analyzer.stop()
+    if entry.runtime_data.sentinel is not None:
+        await entry.runtime_data.sentinel.stop()
+    if entry.runtime_data.discovery_engine is not None:
+        await entry.runtime_data.discovery_engine.stop()
+    if entry.runtime_data.notifier is not None:
+        entry.runtime_data.notifier.stop()
     await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     return True
 
@@ -1086,6 +1633,7 @@ async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) ->
     - v1 -> v2: move CONF_DB_URI into a database subentry.
     - v2 -> v3: create model provider + feature subentries from legacy options.
     - v3 -> v4: move model settings into feature subentries and trim options.
+    - v4 -> v5: move sentinel settings into a sentinel subentry.
     """
     current_version = config_entry.version or 1
     new_data = dict(config_entry.data)
@@ -1360,6 +1908,64 @@ async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) ->
             CONF_OLLAMA_VLM_CONTEXT_SIZE,
             CONF_OLLAMA_SUMMARIZATION_CONTEXT_SIZE,
             CONF_OLLAMA_REASONING,
+        ):
+            new_options.pop(key, None)
+        sentinel_subentry_exists = any(
+            s.subentry_type == SUBENTRY_TYPE_SENTINEL
+            for s in config_entry.subentries.values()
+        )
+        if not sentinel_subentry_exists:
+            sentinel_data = {
+                CONF_SENTINEL_ENABLED: merged_options.get(
+                    CONF_SENTINEL_ENABLED, RECOMMENDED_SENTINEL_ENABLED
+                ),
+                CONF_SENTINEL_INTERVAL_SECONDS: merged_options.get(
+                    CONF_SENTINEL_INTERVAL_SECONDS,
+                    RECOMMENDED_SENTINEL_INTERVAL_SECONDS,
+                ),
+                CONF_SENTINEL_COOLDOWN_MINUTES: merged_options.get(
+                    CONF_SENTINEL_COOLDOWN_MINUTES,
+                    RECOMMENDED_SENTINEL_COOLDOWN_MINUTES,
+                ),
+                CONF_SENTINEL_ENTITY_COOLDOWN_MINUTES: merged_options.get(
+                    CONF_SENTINEL_ENTITY_COOLDOWN_MINUTES,
+                    RECOMMENDED_SENTINEL_ENTITY_COOLDOWN_MINUTES,
+                ),
+                CONF_SENTINEL_DISCOVERY_ENABLED: merged_options.get(
+                    CONF_SENTINEL_DISCOVERY_ENABLED,
+                    RECOMMENDED_SENTINEL_DISCOVERY_ENABLED,
+                ),
+                CONF_SENTINEL_DISCOVERY_INTERVAL_SECONDS: merged_options.get(
+                    CONF_SENTINEL_DISCOVERY_INTERVAL_SECONDS,
+                    RECOMMENDED_SENTINEL_DISCOVERY_INTERVAL_SECONDS,
+                ),
+                CONF_SENTINEL_DISCOVERY_MAX_RECORDS: merged_options.get(
+                    CONF_SENTINEL_DISCOVERY_MAX_RECORDS,
+                    RECOMMENDED_SENTINEL_DISCOVERY_MAX_RECORDS,
+                ),
+                CONF_EXPLAIN_ENABLED: merged_options.get(
+                    CONF_EXPLAIN_ENABLED, RECOMMENDED_EXPLAIN_ENABLED
+                ),
+            }
+            hass.config_entries.async_add_subentry(
+                config_entry,
+                ConfigSubentry(
+                    subentry_type=SUBENTRY_TYPE_SENTINEL,
+                    title="Sentinel",
+                    unique_id=f"{config_entry.entry_id}_sentinel",
+                    data=MappingProxyType(sentinel_data),
+                ),
+            )
+
+        for key in (
+            CONF_SENTINEL_ENABLED,
+            CONF_SENTINEL_INTERVAL_SECONDS,
+            CONF_SENTINEL_COOLDOWN_MINUTES,
+            CONF_SENTINEL_ENTITY_COOLDOWN_MINUTES,
+            CONF_SENTINEL_DISCOVERY_ENABLED,
+            CONF_SENTINEL_DISCOVERY_INTERVAL_SECONDS,
+            CONF_SENTINEL_DISCOVERY_MAX_RECORDS,
+            CONF_EXPLAIN_ENABLED,
         ):
             new_options.pop(key, None)
 

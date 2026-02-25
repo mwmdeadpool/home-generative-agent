@@ -83,6 +83,7 @@ from .const import (
     RECOMMENDED_WIKIPEDIA_ENABLED,
     SUBENTRY_TYPE_FEATURE,
     SUBENTRY_TYPE_MODEL_PROVIDER,
+    SUBENTRY_TYPE_SENTINEL,
     SUBENTRY_TYPE_STT_PROVIDER,
     VIDEO_ANALYZER_MODE_ALWAYS_NOTIFY,
     VIDEO_ANALYZER_MODE_DISABLE,
@@ -97,6 +98,7 @@ from .core.utils import (
 )
 from .flows.feature_subentry_flow import FeatureSubentryFlow
 from .flows.model_provider_subentry_flow import ModelProviderSubentryFlow
+from .flows.sentinel_subentry_flow import SentinelSubentryFlow
 from .flows.stt_provider_subentry_flow import SttProviderSubentryFlow
 
 if TYPE_CHECKING:
@@ -366,6 +368,7 @@ async def _schema_for_options(
             )
         ] = BooleanSelector()
 
+    if video_analyzer_mode != VIDEO_ANALYZER_MODE_DISABLE: 
         mobile_opts = list_mobile_notify_services(hass)
         if mobile_opts:
             schema[
@@ -429,6 +432,7 @@ class HomeGenerativeAgentConfigFlow(ConfigFlow, domain=DOMAIN):
             SUBENTRY_TYPE_MODEL_PROVIDER: ModelProviderSubentryFlow,
             SUBENTRY_TYPE_FEATURE: FeatureSubentryFlow,
             SUBENTRY_TYPE_STT_PROVIDER: SttProviderSubentryFlow,
+            SUBENTRY_TYPE_SENTINEL: SentinelSubentryFlow,
 
         }
 

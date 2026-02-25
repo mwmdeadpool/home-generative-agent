@@ -399,7 +399,7 @@ class VideoAnalyzer:
             identities = identities or []
 
             subject = format_subject(identities, text)
-            had_known_name = bool(subject and subject not in {"a person"})
+            had_known_name = bool(subject and subject != "a person")
 
             if subject:
                 # If we have a subject, try to weave it in naturally.
@@ -543,6 +543,15 @@ class VideoAnalyzer:
         faces = face_res.get("faces", [])
         if not faces:
             return ["Indeterminate"]
+        
+        dao = self.entry.runtime_data.person_gallery
+        if dao is None:
+            LOGGER.debug(
+                "[%s] Person gallery unavailable; returning indeterminate faces.",
+                camera_id,
+            )
+            return ["Indeterminate"] * len(faces)
+
 
         # --- decode snapshot off the loop (Pillow is sync) ---
         try:
@@ -553,7 +562,7 @@ class VideoAnalyzer:
             LOGGER.warning("Failed to decode snapshot for crops: %s", err)
             img = None  # still return recognition results below
 
-        dao = self.entry.runtime_data.person_gallery
+    
         recognized: list[str] = []
 
         timestamp = dt_util.now().strftime("%Y%m%d_%H%M%S")
@@ -702,7 +711,7 @@ class VideoAnalyzer:
         self, camera_id: str, msg: str, batch: list[Path]
     ) -> None:
         """Decide whether to notify and send if needed."""
-        camera_name = camera_id.split(".")[-1]
+        camera_name = camera_id.rsplit(".", maxsplit=1)[-1]
         chosen = batch[len(batch) // 2]
 
         dst = latest_target(Path(VIDEO_ANALYZER_SNAPSHOT_ROOT), camera_id)
@@ -773,6 +782,7 @@ class VideoAnalyzer:
 
     async def _store_results(self, camera_id: str, batch: list[Path], msg: str) -> None:
         """Store the analysis results in the vector DB."""
+        camera_name = camera_id.rsplit(".", maxsplit=1)[-1]
         if isinstance(self.entry.runtime_data.store, Mem0Client):
             async with async_timeout.timeout(10):
                 await self.entry.runtime_data.store.save_memory(
