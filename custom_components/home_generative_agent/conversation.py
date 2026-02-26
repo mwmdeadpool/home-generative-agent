@@ -19,6 +19,7 @@ from langchain_core.caches import InMemoryCache
 from psycopg_pool import PoolClosed
 from langchain_core.globals import set_debug, set_llm_cache, set_verbose
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage
+from langgraph.errors import GraphRecursionError
 from voluptuous_openapi import convert
 
 from .agent.graph import workflow
@@ -446,7 +447,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                 "pending_actions": runtime_data.pending_actions,
                 "mem0_client": runtime_data.mem0_client,
             },
-            "recursion_limit": 10,
+            "recursion_limit": 25,
         }
 
         # Compile graph into a LangChain Runnable.
@@ -479,6 +480,19 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             intent_response.async_set_error(
                 intent.IntentResponseErrorCode.UNKNOWN,
                 "I'm temporarily unavailable while restarting. Please try again in a moment.",
+            )
+            return conversation.ConversationResult(
+                response=intent_response, conversation_id=conversation_id
+            )
+        except GraphRecursionError:
+            _LOGGER.warning(
+                "LangGraph recursion limit reached during conversation processing."
+            )
+            intent_response = intent.IntentResponse(language=user_input.language)
+            intent_response.async_set_error(
+                intent.IntentResponseErrorCode.UNKNOWN,
+                "I'm sorry, I got stuck in a loop trying to answer that. "
+                "Could you try rephrasing your request?",
             )
             return conversation.ConversationResult(
                 response=intent_response, conversation_id=conversation_id
