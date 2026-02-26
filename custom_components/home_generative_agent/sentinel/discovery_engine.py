@@ -128,8 +128,12 @@ class SentinelDiscoveryEngine:
             return
 
         try:
-            payload = json.loads(content)
-        except json.JSONDecodeError:
+            if isinstance(content, (dict, list)):
+                # Some LLM providers return already-parsed structured data.
+                payload = content if isinstance(content, dict) else {"candidates": content}
+            else:
+                payload = json.loads(content)
+        except (json.JSONDecodeError, TypeError):
             LOGGER.warning("Discovery output was not valid JSON.")
             return
 

@@ -16,6 +16,7 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import intent, llm, template
 from homeassistant.util import ulid
 from langchain_core.caches import InMemoryCache
+from psycopg_pool import PoolClosed
 from langchain_core.globals import set_debug, set_llm_cache, set_verbose
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage
 from voluptuous_openapi import convert
@@ -469,6 +470,19 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         # Interact with agent app.
         try:
             response = await app.ainvoke(input=app_input, config=app_config)
+        except PoolClosed:
+            _LOGGER.warning(
+                "DB connection pool is closed; cannot process conversation request. "
+                "The integration may be restarting."
+            )
+            intent_response = intent.IntentResponse(language=user_input.language)
+            intent_response.async_set_error(
+                intent.IntentResponseErrorCode.UNKNOWN,
+                "I'm temporarily unavailable while restarting. Please try again in a moment.",
+            )
+            return conversation.ConversationResult(
+                response=intent_response, conversation_id=conversation_id
+            )
         except HomeAssistantError as err:
             _LOGGER.exception("LangGraph error during conversation processing.")
             intent_response = intent.IntentResponse(language=user_input.language)

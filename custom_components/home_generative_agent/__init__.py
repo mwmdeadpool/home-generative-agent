@@ -250,6 +250,7 @@ SERVICE_REJECT_RULE_PROPOSAL = "reject_rule_proposal"
 SERVICE_GET_DYNAMIC_RULES = "get_dynamic_rules"
 SERVICE_DEACTIVATE_DYNAMIC_RULE = "deactivate_dynamic_rule"
 SERVICE_REACTIVATE_DYNAMIC_RULE = "reactivate_dynamic_rule"
+SERVICE_SENTINEL_SET_AUTONOMY_LEVEL = "sentinel_set_autonomy_level"
 
 ENROLL_SCHEMA = vol.Schema(
     {
@@ -299,6 +300,15 @@ GET_DYNAMIC_RULES_SCHEMA = vol.Schema(
 TOGGLE_DYNAMIC_RULE_SCHEMA = vol.Schema(
     {
         vol.Required("rule_id"): cv.string,
+    }
+)
+
+
+ET_AUTONOMY_LEVEL_SCHEMA = vol.Schema(
+    {
+        vol.Required("entry_id"): cv.string,
+        vol.Required("level"): vol.All(vol.Coerce(int), vol.In([0, 1, 2, 3])),
+        vol.Optional("pin"): cv.string,
     }
 )
 
@@ -792,11 +802,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     gemini_embeddings: GoogleGenerativeAIEmbeddings | None = None
     if gemini_ok:
         try:
-            gemini_embeddings = GoogleGenerativeAIEmbeddings(
-                api_key=openai_secret,
-                model=options.get(
-                    CONF_GEMINI_EMBEDDING_MODEL, RECOMMENDED_GEMINI_EMBEDDING_MODEL
-                ),
+            _gemini_emb_model = options.get(
+                CONF_GEMINI_EMBEDDING_MODEL, RECOMMENDED_GEMINI_EMBEDDING_MODEL
+            )
+            _gemini_emb_key = openai_secret
+            gemini_embeddings = await hass.async_add_executor_job(
+                lambda: GoogleGenerativeAIEmbeddings(
+                    api_key=_gemini_emb_key,
+                    model=_gemini_emb_model,
+                )
             )
         except Exception:
             LOGGER.exception("Gemini embeddings init failed; continuing without them.")
@@ -854,7 +868,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         async def _shutdown_mem0(_event: Any) -> None:
             await mem0_client.close()
             
-        from homeassistant.const import EVENT_HOMEASSISTANT_STOP
         hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, _shutdown_mem0)
 
     if db_uri is not None:
@@ -1299,6 +1312,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         supports_response=_SERVICE_RESPONSE_ONLY,
     )
 
+    
+
     async def _handle_get_discovery(call: ServiceCall) -> dict[str, Any]:
         limit = int(call.data.get("limit", 20))
         limit = max(1, min(limit, 200))
@@ -1608,13 +1623,45 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         schema=TOGGLE_DYNAMIC_RULE_SCHEMA,
         supports_response=_SERVICE_RESPONSE_ONLY,
     )
+
+
+    async def _handle_sentinel_set_autonomy_level(call: ServiceCall) -> dict[str, Any]:
+        """Set the runtime autonomy level for a specific config entry (admin-only)."""
+        requested_entry_id = str(call.data["entry_id"])
+        level = int(call.data["level"])
+        pin: str | None = call.data.get("pin")
+
+        # Restrict to admin users only.
+        if not call.context.user_id:
+            msg = "sentinel_set_autonomy_level requires an authenticated user."
+            raise HomeAssistantError(msg)
+        user = await hass.auth.async_get_user(call.context.user_id)
+        if user is None or not user.is_admin:
+            msg = "sentinel_set_autonomy_level is restricted to admin users."
+            raise HomeAssistantError(msg)
+
+        sentinel = entry.runtime_data.sentinel
+        if sentinel is None:
+            return {"status": "unavailable", "entry_id": requested_entry_id}
+
+        sentinel.set_autonomy_level(requested_entry_id, level, pin=pin)
+        return {"status": "ok", "entry_id": requested_entry_id, "level": level}
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_SENTINEL_SET_AUTONOMY_LEVEL,
+        _handle_sentinel_set_autonomy_level,
+        schema=SET_AUTONOMY_LEVEL_SCHEMA,
+        supports_response=_SERVICE_RESPONSE_ONLY,
+    )
     return True
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     """Unload the config entry."""
-    if entry.runtime_data.pool is not None:
-        await entry.runtime_data.pool.close()
+    # Unload platforms first so any in-flight conversation requests finish or fail
+    # cleanly before the DB pool is closed underneath them.
+    await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     await entry.runtime_data.video_analyzer.stop()
     if entry.runtime_data.sentinel is not None:
         await entry.runtime_data.sentinel.stop()
@@ -1622,7 +1669,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool
         await entry.runtime_data.discovery_engine.stop()
     if entry.runtime_data.notifier is not None:
         entry.runtime_data.notifier.stop()
-    await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    if entry.runtime_data.pool is not None:
+        await entry.runtime_data.pool.close()
     return True
 
 
