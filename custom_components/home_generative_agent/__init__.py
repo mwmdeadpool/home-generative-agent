@@ -304,7 +304,7 @@ TOGGLE_DYNAMIC_RULE_SCHEMA = vol.Schema(
 )
 
 
-ET_AUTONOMY_LEVEL_SCHEMA = vol.Schema(
+SET_AUTONOMY_LEVEL_SCHEMA = vol.Schema(
     {
         vol.Required("entry_id"): cv.string,
         vol.Required("level"): vol.All(vol.Coerce(int), vol.In([0, 1, 2, 3])),
