@@ -143,8 +143,8 @@ class SentinelDiscoveryEngine:
 
         try:
             validated = cast("dict[str, Any]", DISCOVERY_OUTPUT_SCHEMA(payload))
-        except vol.Invalid:
-            LOGGER.warning("Discovery output failed schema validation.")
+        except vol.Invalid as err:
+            LOGGER.warning("Discovery output failed schema validation: %s", err)
             return
 
         raw_candidates = validated.get("candidates", [])
