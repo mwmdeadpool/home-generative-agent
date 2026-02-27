@@ -137,10 +137,59 @@ RECOMMENDED_SENTINEL_ENABLED = True
 RECOMMENDED_SENTINEL_INTERVAL_SECONDS = 300
 RECOMMENDED_SENTINEL_COOLDOWN_MINUTES = 30
 RECOMMENDED_SENTINEL_ENTITY_COOLDOWN_MINUTES = 15
+CONF_SENTINEL_PENDING_PROMPT_TTL_MINUTES = "sentinel_pending_prompt_ttl_minutes"
+RECOMMENDED_SENTINEL_PENDING_PROMPT_TTL_MINUTES = 240
 RECOMMENDED_EXPLAIN_ENABLED = False
 RECOMMENDED_SENTINEL_DISCOVERY_ENABLED = False
 RECOMMENDED_SENTINEL_DISCOVERY_INTERVAL_SECONDS = 3600
 RECOMMENDED_SENTINEL_DISCOVERY_MAX_RECORDS = 200
+
+# ---- Sentinel autonomy level (runtime kill-switch) ----
+# 0 = fully passive (no notifications, no actions)
+# 1 = notify only (default)
+# 2 = suggest actions (notify + recommend)
+# 3 = act autonomously
+CONF_SENTINEL_AUTONOMY_LEVEL = "sentinel_autonomy_level"
+CONF_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES = "sentinel_runtime_override_ttl_minutes"
+CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE = "sentinel_require_pin_for_level_increase"
+RECOMMENDED_SENTINEL_AUTONOMY_LEVEL: int = 1
+RECOMMENDED_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES: int = 60
+RECOMMENDED_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE: bool = False
+
+# ---- Sentinel staleness validation ----
+CONF_SENTINEL_STALENESS_THRESHOLD_SECONDS = "sentinel_staleness_threshold_seconds"
+RECOMMENDED_SENTINEL_STALENESS_THRESHOLD_SECONDS: int = 1800
+
+# ---- Sentinel auto-execution (Level 2+) ----
+CONF_SENTINEL_AUTO_EXECUTION_ENABLED = "sentinel_auto_execution_enabled"
+RECOMMENDED_SENTINEL_AUTO_EXECUTION_ENABLED: bool = False
+
+CONF_SENTINEL_AUTO_EXECUTE_DEFAULT_MIN_CONFIDENCE = (
+    "sentinel_auto_execute_default_min_confidence"
+)
+RECOMMENDED_SENTINEL_AUTO_EXECUTE_DEFAULT_MIN_CONFIDENCE: float = 0.70
+
+CONF_SENTINEL_AUTO_EXECUTE_MAX_ACTIONS_PER_HOUR = (
+    "sentinel_auto_execute_max_actions_per_hour"
+)
+RECOMMENDED_SENTINEL_AUTO_EXECUTE_MAX_ACTIONS_PER_HOUR: int = 5
+
+CONF_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES = "sentinel_auto_execute_allowed_services"
+RECOMMENDED_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES: list[str] = []
+
+CONF_SENTINEL_EXECUTION_IDEMPOTENCY_WINDOW_MINUTES = (
+    "sentinel_execution_idempotency_window_minutes"
+)
+RECOMMENDED_SENTINEL_EXECUTION_IDEMPOTENCY_WINDOW_MINUTES: int = 15
+
+# ---- Sentinel suppression upgrades ----
+CONF_SENTINEL_QUIET_HOURS_START = "sentinel_quiet_hours_start"
+CONF_SENTINEL_QUIET_HOURS_END = "sentinel_quiet_hours_end"
+CONF_SENTINEL_QUIET_HOURS_SEVERITIES = "sentinel_quiet_hours_severities"
+RECOMMENDED_SENTINEL_QUIET_HOURS_SEVERITIES: list[str] = ["low"]
+
+CONF_SENTINEL_PRESENCE_GRACE_MINUTES = "sentinel_presence_grace_minutes"
+RECOMMENDED_SENTINEL_PRESENCE_GRACE_MINUTES: int = 10
 
 # ---- Sentinel autonomy level (runtime kill-switch) ----
 # 0 = fully passive (no notifications, no actions)
