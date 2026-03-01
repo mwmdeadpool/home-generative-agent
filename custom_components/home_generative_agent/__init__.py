@@ -1265,12 +1265,33 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         RECOMMENDED_FAST_INTENT_COLLECTION,
     )
 
-    if options.get(CONF_FAST_INTENT_ENABLED, False) and embedding_model is not None:
+    if options.get(CONF_FAST_INTENT_ENABLED, False):
         async def _embed_entities_on_start(_event: object) -> None:
             """Embed all actionable entities for fast intent resolution."""
             from .intent_resolver.embedder import collect_entities, embed_entities
 
             try:
+                # Use the main embedding model if available, otherwise create
+                # a dedicated Ollama embedder for fast intent resolution.
+                fi_embedding = embedding_model
+                if fi_embedding is None and ollama_any_ok:
+                    LOGGER.info(
+                        "Fast intent: main embeddings unavailable, "
+                        "creating dedicated Ollama embedder"
+                    )
+                    fi_embedding = OllamaEmbeddings(
+                        model="nomic-embed-text",
+                        base_url=base_ollama_url,
+                    )
+                if fi_embedding is None:
+                    LOGGER.warning(
+                        "Fast intent: no embedding model available, skipping"
+                    )
+                    return
+
+                # Store on runtime_data for use during resolution
+                entry.runtime_data._embedding_model = fi_embedding
+
                 entities = await collect_entities(hass)
                 qdrant_url = options.get(
                     CONF_FAST_INTENT_QDRANT_URL, RECOMMENDED_FAST_INTENT_QDRANT_URL
@@ -1279,7 +1300,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                     CONF_FAST_INTENT_COLLECTION, RECOMMENDED_FAST_INTENT_COLLECTION
                 )
                 count = await embed_entities(
-                    hass, entities, embedding_model,
+                    hass, entities, fi_embedding,
                     qdrant_url=qdrant_url, collection_name=collection,
                 )
                 LOGGER.info("Fast intent resolver: embedded %d entities", count)
