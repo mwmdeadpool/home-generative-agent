@@ -65,6 +65,7 @@ class HGAData:
     proposal_store: ProposalStore | None
     rule_registry: RuleRegistry | None
     mem0_client: Any | None = None
+    _embedding_model: Any | None = None  # For fast intent resolver
 
 
 type HGAConfigEntry = ConfigEntry[HGAData]

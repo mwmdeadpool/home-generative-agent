@@ -73,6 +73,9 @@ from .agent.tools import (
 )
 from .const import (
     CONF_CRITICAL_ACTION_PIN_ENABLED,
+    CONF_FAST_INTENT_ENABLED,
+    CONF_FAST_INTENT_QDRANT_URL,
+    CONF_FAST_INTENT_COLLECTION,
     CONF_GOOGLE_PLACES_ENABLED,
     CONF_LIGHTRAG_ENABLED,
     CONF_PLEX_ENABLED,
@@ -83,10 +86,15 @@ from .const import (
     CRITICAL_ACTION_PROMPT,
     DOMAIN,
     LANGCHAIN_LOGGING_LEVEL,
+    RECOMMENDED_FAST_INTENT_COLLECTION,
+    RECOMMENDED_FAST_INTENT_QDRANT_URL,
     SCHEMA_FIRST_YAML_PROMPT,
     SUBENTRY_TYPE_MODEL_PROVIDER,
     TOOL_CALL_ERROR_SYSTEM_MESSAGE,
 )
+from .intent_resolver.resolver import resolve_intent
+from .intent_resolver.executor import execute_direct, execute_compound
+from .intent_resolver import IntentTier
 
 from .core.conversation_helpers import (
     _convert_schema_json_to_yaml,
@@ -467,6 +475,55 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             "chat_model_usage_metadata": {},
             "messages_to_remove": [],
         }
+
+        # ── Fast Intent Resolver (3-tier) ──
+        # Try to resolve simple HA commands without the full LLM pipeline.
+        if options.get(CONF_FAST_INTENT_ENABLED, False):
+            try:
+                # Use the embedding model from runtime for vector search
+                _embedding_model = getattr(runtime_data, '_embedding_model', None)
+                if _embedding_model is not None:
+                    qdrant_url = options.get(
+                        CONF_FAST_INTENT_QDRANT_URL,
+                        RECOMMENDED_FAST_INTENT_QDRANT_URL,
+                    )
+                    collection = options.get(
+                        CONF_FAST_INTENT_COLLECTION,
+                        RECOMMENDED_FAST_INTENT_COLLECTION,
+                    )
+                    intent_result = await resolve_intent(
+                        user_input.text,
+                        hass,
+                        _embedding_model,
+                        qdrant_url=qdrant_url,
+                        collection_name=collection,
+                    )
+                    if intent_result.tier == IntentTier.DIRECT:
+                        _LOGGER.info(
+                            "Fast intent Tier 1: %s → %s in %.0fms",
+                            user_input.text,
+                            intent_result.actions[0].entity_id if intent_result.actions else "?",
+                            intent_result.resolution_ms,
+                        )
+                        return await execute_direct(
+                            hass, intent_result, language=user_input.language
+                        )
+                    if intent_result.tier == IntentTier.COMPOUND:
+                        _LOGGER.info(
+                            "Fast intent Tier 2: %s → %d actions in %.0fms",
+                            user_input.text,
+                            len(intent_result.actions),
+                            intent_result.resolution_ms,
+                        )
+                        return await execute_compound(
+                            hass, intent_result, language=user_input.language
+                        )
+                    # Tier 3: fall through to full LangGraph
+            except Exception:
+                _LOGGER.debug(
+                    "Fast intent resolver error, falling through to LangGraph",
+                    exc_info=True,
+                )
 
         # Interact with agent app.
         try:

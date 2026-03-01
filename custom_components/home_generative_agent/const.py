@@ -117,6 +117,18 @@ CONF_PROMPT = "prompt"
 CONF_SCHEMA_FIRST_YAML = "schema_first_yaml"
 CONF_DISABLED_FEATURES = "disabled_features"
 
+# ---- Fast Intent Resolver (3-tier) ----
+CONF_FAST_INTENT_ENABLED = "fast_intent_enabled"
+CONF_FAST_INTENT_QDRANT_URL = "fast_intent_qdrant_url"
+CONF_FAST_INTENT_COLLECTION = "fast_intent_collection"
+CONF_FAST_INTENT_TIER1_THRESHOLD = "fast_intent_tier1_threshold"
+CONF_FAST_INTENT_TIER2_THRESHOLD = "fast_intent_tier2_threshold"
+RECOMMENDED_FAST_INTENT_ENABLED = False
+RECOMMENDED_FAST_INTENT_QDRANT_URL = "http://localhost:6333"
+RECOMMENDED_FAST_INTENT_COLLECTION = "hga_entities"
+RECOMMENDED_FAST_INTENT_TIER1_THRESHOLD = 0.75
+RECOMMENDED_FAST_INTENT_TIER2_THRESHOLD = 0.65
+
 # ---- Audit store ----
 CONF_AUDIT_HOT_MAX_RECORDS = "audit_hot_max_records"
 CONF_AUDIT_ARCHIVAL_BACKLOG_MAX = "audit_archival_backlog_max"

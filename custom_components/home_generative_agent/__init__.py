@@ -1211,6 +1211,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         proposal_store=proposal_store,
         rule_registry=rule_registry,
         mem0_client=mem0_client,
+        _embedding_model=embedding_model,
     )
 
     if not hass.data[DOMAIN].get("http_registered"):
@@ -1254,6 +1255,43 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         await discovery_engine.stop()
 
     hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, _stop_background_tasks)
+
+    # ── Fast Intent Resolver: embed entities on startup ──
+    from .const import (
+        CONF_FAST_INTENT_ENABLED,
+        CONF_FAST_INTENT_QDRANT_URL,
+        CONF_FAST_INTENT_COLLECTION,
+        RECOMMENDED_FAST_INTENT_QDRANT_URL,
+        RECOMMENDED_FAST_INTENT_COLLECTION,
+    )
+
+    if options.get(CONF_FAST_INTENT_ENABLED, False) and embedding_model is not None:
+        async def _embed_entities_on_start(_event: object) -> None:
+            """Embed all actionable entities for fast intent resolution."""
+            from .intent_resolver.embedder import collect_entities, embed_entities
+
+            try:
+                entities = await collect_entities(hass)
+                qdrant_url = options.get(
+                    CONF_FAST_INTENT_QDRANT_URL, RECOMMENDED_FAST_INTENT_QDRANT_URL
+                )
+                collection = options.get(
+                    CONF_FAST_INTENT_COLLECTION, RECOMMENDED_FAST_INTENT_COLLECTION
+                )
+                count = await embed_entities(
+                    hass, entities, embedding_model,
+                    qdrant_url=qdrant_url, collection_name=collection,
+                )
+                LOGGER.info("Fast intent resolver: embedded %d entities", count)
+            except Exception:
+                LOGGER.exception("Fast intent resolver: entity embedding failed")
+
+        if hass.is_running:
+            hass.async_create_task(_embed_entities_on_start(None))
+        else:
+            hass.bus.async_listen_once(
+                EVENT_HOMEASSISTANT_STARTED, _embed_entities_on_start
+            )
 
     msg = (
         "Home Generative Agent initialized with the following models: "
