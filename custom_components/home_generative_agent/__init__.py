@@ -819,11 +819,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             _gemini_emb_model = options.get(
                 CONF_GEMINI_EMBEDDING_MODEL, RECOMMENDED_GEMINI_EMBEDDING_MODEL
             )
-            _gemini_emb_key = openai_secret
+            _gemini_emb_key = gemini_secret
             gemini_embeddings = await hass.async_add_executor_job(
                 lambda: GoogleGenerativeAIEmbeddings(
-                    api_key=_gemini_emb_key,
+                    google_api_key=_gemini_emb_key.get_secret_value() if _gemini_emb_key else None,
                     model=_gemini_emb_model,
+                    transport="rest",
                 )
             )
         except Exception:
