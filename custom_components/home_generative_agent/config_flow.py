@@ -40,6 +40,9 @@ from .const import (
     CONF_CRITICAL_ACTION_PIN_SALT,
     CONF_FACE_API_URL,
     CONF_FACE_RECOGNITION,
+    CONF_FAST_INTENT_COLLECTION,
+    CONF_FAST_INTENT_ENABLED,
+    CONF_FAST_INTENT_QDRANT_URL,
     CONF_GOOGLE_PLACES_API_KEY,
     CONF_GOOGLE_PLACES_ENABLED,
     CONF_LIGHTRAG_API_KEY,
@@ -68,6 +71,9 @@ from .const import (
     DOMAIN,
     LLM_HASS_API_NONE,
     RECOMMENDED_FACE_RECOGNITION,
+    RECOMMENDED_FAST_INTENT_COLLECTION,
+    RECOMMENDED_FAST_INTENT_ENABLED,
+    RECOMMENDED_FAST_INTENT_QDRANT_URL,
     RECOMMENDED_GOOGLE_PLACES_ENABLED,
     RECOMMENDED_LIGHTRAG_API_KEY,
     RECOMMENDED_LIGHTRAG_ENABLED,
@@ -124,6 +130,7 @@ DEFAULT_OPTIONS = {
     CONF_LIGHTRAG_ENABLED: RECOMMENDED_LIGHTRAG_ENABLED,
     CONF_REDDIT_ENABLED: RECOMMENDED_REDDIT_ENABLED,
     CONF_PLEX_ENABLED: RECOMMENDED_PLEX_ENABLED,
+    CONF_FAST_INTENT_ENABLED: RECOMMENDED_FAST_INTENT_ENABLED,
 }
 
 # ---------------------------
@@ -258,7 +265,40 @@ async def _schema_for_options(
             },
             default=RECOMMENDED_PLEX_ENABLED,
         ): BooleanSelector(),
+        vol.Optional(
+            CONF_FAST_INTENT_ENABLED,
+            description={
+                "suggested_value": opts.get(CONF_FAST_INTENT_ENABLED, False)
+            },
+            default=RECOMMENDED_FAST_INTENT_ENABLED,
+        ): BooleanSelector(),
     }
+
+    if opts.get(CONF_FAST_INTENT_ENABLED, False):
+        schema[
+            vol.Optional(
+                CONF_FAST_INTENT_QDRANT_URL,
+                description={
+                    "suggested_value": opts.get(
+                        CONF_FAST_INTENT_QDRANT_URL,
+                        RECOMMENDED_FAST_INTENT_QDRANT_URL,
+                    )
+                },
+                default=RECOMMENDED_FAST_INTENT_QDRANT_URL,
+            )
+        ] = TextSelector()
+        schema[
+            vol.Optional(
+                CONF_FAST_INTENT_COLLECTION,
+                description={
+                    "suggested_value": opts.get(
+                        CONF_FAST_INTENT_COLLECTION,
+                        RECOMMENDED_FAST_INTENT_COLLECTION,
+                    )
+                },
+                default=RECOMMENDED_FAST_INTENT_COLLECTION,
+            )
+        ] = TextSelector()
     
     if opts.get(CONF_GOOGLE_PLACES_ENABLED, False):
         schema[

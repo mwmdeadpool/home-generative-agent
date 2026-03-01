@@ -259,7 +259,19 @@
                     "max_messages_in_context": "Max messages in chat context",
                     "critical_action_pin_enabled": "Require critical action PIN",
                     "critical_action_pin": "Critical action PIN (required to unlock/arm/open sensitive devices)",
-                    "schema_first_yaml": "Schema-first JSON for YAML requests"
+                    "schema_first_yaml": "Schema-first JSON for YAML requests",
+                    "fast_intent_enabled": {
+                        "name": "Fast Intent Resolver",
+                        "description": "Enable 3-tier fast intent resolution for sub-500ms HA commands"
+                    },
+                    "fast_intent_qdrant_url": {
+                        "name": "Qdrant URL",
+                        "description": "Qdrant vector database URL for entity embeddings"
+                    },
+                    "fast_intent_collection": {
+                        "name": "Qdrant Collection",
+                        "description": "Collection name for entity embeddings"
+                    }
                 },
                 "data_description": {
                     "prompt": "Instruct how the LLM should respond. This can be a template.",
