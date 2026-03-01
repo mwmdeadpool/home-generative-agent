@@ -18,7 +18,7 @@ DISCOVERY_OUTPUT_SCHEMA = vol.Schema(
                     vol.Required("title"): str,
                     vol.Required("summary"): str,
                     vol.Required("evidence_paths"): [str],
-                    vol.Required("pattern"): str,
+                    vol.Optional("pattern", default=""): str,
                     vol.Required("confidence_hint"): vol.All(
                         vol.Coerce(float), vol.Range(min=0.0, max=1.0)
                     ),
