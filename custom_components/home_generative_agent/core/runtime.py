@@ -24,6 +24,9 @@ if TYPE_CHECKING:
         DiscoveryStore,
     )
     from custom_components.home_generative_agent.sentinel.engine import SentinelEngine
+    from custom_components.home_generative_agent.sentinel.notifier import (
+        SentinelNotifier,
+    )
     from custom_components.home_generative_agent.sentinel.proposal_store import (
         ProposalStore,
     )
