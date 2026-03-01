@@ -252,7 +252,7 @@ def _default_service_for_domain(domain: str, text: str) -> str:
         "media_player": "media_pause" if any(w in text_lower for w in ["pause", "stop"]) else "media_play",
         "scene": "turn_on",
         "script": "turn_on",
-        "automation": "trigger",
+        # automation excluded from fast intent — too easily confused with device entities
         "vacuum": "start" if "start" in text_lower else "return_to_base",
         "alarm_control_panel": "alarm_disarm" if "disarm" in text_lower else "alarm_arm_away",
     }

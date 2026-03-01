@@ -21,10 +21,45 @@ _LOGGER = logging.getLogger(__name__)
 # Domains we care about for fast intent resolution
 ACTIONABLE_DOMAINS = {
     "light", "switch", "fan", "cover", "lock", "climate",
-    "media_player", "scene", "script", "automation",
+    "media_player", "scene", "script",
     "vacuum", "humidifier", "water_heater", "valve",
     "button", "input_boolean", "input_number", "input_select",
     "number", "select", "siren", "alarm_control_panel",
+}
+
+# Domains excluded from fast intent resolution because their friendly names
+# often overlap with device entity names (e.g. an automation called
+# "Turn off office lights when room is unoccupied" would match a request
+# to turn off office lights).  These should only be triggered explicitly
+# through the full LLM path.
+EXCLUDED_DOMAINS = {"automation", "group"}
+
+# Domain priority for tie-breaking when multiple entities match.
+# Higher = preferred.  Direct-control domains (light, switch, fan) outrank
+# indirect ones (scene, script) so "turn off office lights" resolves to
+# the light entity rather than a similarly-named scene or script.
+DOMAIN_PRIORITY: dict[str, float] = {
+    "light": 1.0,
+    "switch": 1.0,
+    "fan": 1.0,
+    "cover": 1.0,
+    "lock": 1.0,
+    "climate": 1.0,
+    "media_player": 0.95,
+    "vacuum": 0.95,
+    "humidifier": 0.95,
+    "valve": 0.95,
+    "siren": 0.9,
+    "alarm_control_panel": 0.9,
+    "scene": 0.7,
+    "script": 0.7,
+    "input_boolean": 0.6,
+    "input_number": 0.6,
+    "input_select": 0.6,
+    "number": 0.6,
+    "select": 0.6,
+    "button": 0.6,
+    "water_heater": 0.8,
 }
 
 
@@ -270,13 +305,24 @@ async def search_entities(
             return []
 
         results = resp.json().get("result", [])
-        return [
-            {
+        matches = []
+        for r in results:
+            domain = r["payload"]["domain"]
+            raw_score = r["score"]
+            # Apply domain priority weighting to break ties between
+            # entities with similar embeddings (e.g. a light vs an
+            # automation whose name contains the same words).
+            priority = DOMAIN_PRIORITY.get(domain, 0.5)
+            # Weighted score: 80% embedding similarity + 20% domain priority
+            weighted_score = (raw_score * 0.8) + (priority * 0.2)
+            matches.append({
                 "entity_id": r["payload"]["entity_id"],
-                "domain": r["payload"]["domain"],
+                "domain": domain,
                 "friendly_name": r["payload"]["friendly_name"],
                 "area_name": r["payload"].get("area_name"),
-                "score": r["score"],
-            }
-            for r in results
-        ]
+                "score": weighted_score,
+                "raw_score": raw_score,
+            })
+        # Re-sort by weighted score (highest first)
+        matches.sort(key=lambda m: m["score"], reverse=True)
+        return matches
