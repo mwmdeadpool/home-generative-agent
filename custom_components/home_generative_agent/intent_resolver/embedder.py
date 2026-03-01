@@ -167,11 +167,13 @@ async def embed_entities(
     async with httpx.AsyncClient(timeout=30.0) as client:
         # Check if collection exists
         resp = await client.get(f"{qdrant_url}/collections/{collection_name}")
-        if resp.status_code != 200:
+        if resp.status_code == 200:
+            _LOGGER.debug("Qdrant collection '%s' already exists", collection_name)
+        else:
             # Create with appropriate dimensions
             test_embedding = await embedding_model.aembed_query("test")
             dims = len(test_embedding)
-            await client.put(
+            create_resp = await client.put(
                 f"{qdrant_url}/collections/{collection_name}",
                 json={
                     "vectors": {
@@ -180,6 +182,12 @@ async def embed_entities(
                     }
                 },
             )
+            if create_resp.status_code not in (200, 201):
+                _LOGGER.error(
+                    "Failed to create Qdrant collection '%s': %s %s",
+                    collection_name, create_resp.status_code, create_resp.text
+                )
+                raise RuntimeError(f"Qdrant collection creation failed: {create_resp.status_code}")
             _LOGGER.info(
                 "Created Qdrant collection '%s' with %d dimensions",
                 collection_name, dims,
@@ -208,19 +216,27 @@ async def embed_entities(
                 })
 
         # Upsert all points
+        total_upserted = 0
         for i in range(0, len(all_points), 100):
             batch = all_points[i : i + 100]
-            await client.put(
+            upsert_resp = await client.put(
                 f"{qdrant_url}/collections/{collection_name}/points",
                 json={"points": batch},
             )
+            if upsert_resp.status_code not in (200, 201):
+                _LOGGER.error(
+                    "Failed to upsert points to '%s': %s %s",
+                    collection_name, upsert_resp.status_code, upsert_resp.text
+                )
+                raise RuntimeError(f"Qdrant upsert failed: {upsert_resp.status_code}")
+            total_upserted += len(batch)
 
     elapsed = (time.monotonic() - start) * 1000
     _LOGGER.info(
-        "Embedded %d entities in %.0fms into '%s'",
-        len(entities), elapsed, collection_name,
+        "Embedded %d/%d entities in %.0fms into '%s'",
+        total_upserted, len(entities), elapsed, collection_name,
     )
-    return len(entities)
+    return total_upserted
 
 
 async def search_entities(
