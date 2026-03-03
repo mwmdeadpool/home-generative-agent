@@ -7,7 +7,6 @@ from collections.abc import Sequence
 from typing import TYPE_CHECKING
 from urllib.parse import urljoin
 
-
 import numpy as np
 from homeassistant.helpers.httpx_client import get_async_client
 from psycopg.rows import DictRow, dict_row

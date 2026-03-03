@@ -21,7 +21,6 @@ from ..const import (  # noqa: TID252
     CONF_DB_URI,
     CONF_EMBEDDING_MODEL_PROVIDER,
     CONF_EXPLAIN_ENABLED,
-    RECOMMENDED_EXPLAIN_ENABLED,
     CONF_FEATURE_MODEL,
     CONF_FEATURE_MODEL_CONTEXT_SIZE,
     CONF_FEATURE_MODEL_KEEPALIVE,
@@ -50,6 +49,8 @@ from ..const import (  # noqa: TID252
     CONF_OLLAMA_VLM_KEEPALIVE,
     CONF_OLLAMA_VLM_URL,
     CONF_OPENAI_CHAT_MODEL,
+    CONF_OPENAI_COMPATIBLE_API_KEY,
+    CONF_OPENAI_COMPATIBLE_BASE_URL,
     CONF_OPENAI_EMBEDDING_MODEL,
     CONF_OPENAI_SUMMARIZATION_MODEL,
     CONF_OPENAI_VLM,
@@ -71,6 +72,7 @@ from ..const import (  # noqa: TID252
     RECOMMENDED_DB_PASSWORD,
     RECOMMENDED_DB_PORT,
     RECOMMENDED_DB_USERNAME,
+    RECOMMENDED_EXPLAIN_ENABLED,
     RECOMMENDED_GEMINI_CHAT_MODEL,
     RECOMMENDED_GEMINI_EMBEDDING_MODEL,
     RECOMMENDED_GEMINI_SUMMARIZATION_MODEL,
@@ -220,6 +222,7 @@ def _apply_sentinel_options(
     sentinel_notify = str(data.get(CONF_NOTIFY_SERVICE, "") or "").strip()
     if sentinel_notify:
         options[CONF_NOTIFY_SERVICE] = sentinel_notify
+
 
 def _provider_capabilities_from_settings(settings: Mapping[str, Any]) -> set[str]:
     """Derive capability categories from settings keys."""
@@ -634,6 +637,11 @@ def _apply_provider_to_category(
 
     if provider.provider_type == "openai" and (api_key := settings.get("api_key")):
         options[CONF_API_KEY] = api_key
+
+    if provider.provider_type == "openai_compatible":
+        if base_url := settings.get("base_url"):
+            options[CONF_OPENAI_COMPATIBLE_BASE_URL] = base_url
+        options[CONF_OPENAI_COMPATIBLE_API_KEY] = settings.get("api_key", "none")
 
     if provider.provider_type == "gemini" and (api_key := settings.get("api_key")):
         options[CONF_GEMINI_API_KEY] = api_key

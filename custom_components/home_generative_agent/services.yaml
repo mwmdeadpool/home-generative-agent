@@ -53,6 +53,7 @@ save_and_analyze_snapshot:
           step: 1
           unit_of_measurement: min
           mode: box
+
 get_audit_records:
   name: Get audit records
   description: Return the latest sentinel audit records (read-only).
@@ -190,6 +191,7 @@ reactivate_dynamic_rule:
       example: "open_entry_at_night_while_away_window"
       selector:
         text:
+
 sentinel_set_autonomy_level:
   name: Set sentinel autonomy level
   description: >

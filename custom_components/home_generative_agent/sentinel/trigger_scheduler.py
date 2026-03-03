@@ -256,7 +256,6 @@ class SentinelTriggerScheduler:
         Intended to be used with ``asyncio.wait_for`` so the run loop wakes
         up immediately when a new trigger arrives rather than sleeping for the
         full polling interval.
-
         """
         await self._trigger_available.wait()
         self._trigger_available.clear()

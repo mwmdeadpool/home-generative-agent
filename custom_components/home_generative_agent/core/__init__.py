@@ -7,6 +7,13 @@ from .conversation_helpers import (
     _resolve_entity_id,
 )
 
+from .conversation_helpers import (
+    _convert_schema_json_to_yaml,
+    _fix_entity_ids_in_text,
+    _is_dashboard_request,
+    _maybe_fix_dashboard_entities,
+    _resolve_entity_id,
+)
 from .image_entity import ImageEntity
 from .migrations import migrate_person_gallery
 from .person_gallery import PersonGalleryDAO

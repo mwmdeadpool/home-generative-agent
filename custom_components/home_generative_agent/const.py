@@ -15,11 +15,13 @@ SUBENTRY_TYPE_MODEL_PROVIDER = "model_provider"
 SUBENTRY_TYPE_FEATURE = "feature"
 SUBENTRY_TYPE_STT_PROVIDER = "stt_provider"
 SUBENTRY_TYPE_SENTINEL = "sentinel"
+
 HTTP_STATUS_UNAUTHORIZED = 401
 HTTP_STATUS_BAD_REQUEST = 400
 HTTP_STATUS_WEBPAGE_NOT_FOUND = 404
 HTTP_STATUS_OK = 200
 HTTP_STATUS_REQUEST_TOO_LARGE = 413
+
 # ---- Critical action guard ----
 CONF_CRITICAL_ACTION_PIN_ENABLED = "critical_action_pin_enabled"
 CONF_CRITICAL_ACTION_PIN = "critical_action_pin"
@@ -58,11 +60,6 @@ RECOMMENDED_DB_PARAMS = [{"key": "sslmode", "value": "disable"}]
 
 CONF_DB_BOOTSTRAPPED = "db_bootstrapped"
 CONF_VECTORS_BOOTSTRAPPED = "vectors_bootstrapped"
-
-# ---- Mem0 server ----
-CONF_MEM0_ENABLED = "mem0_enabled"
-CONF_MEM0_SERVER_URL = "mem0_server_url"
-RECOMMENDED_MEM0_SERVER_URL = "http://192.168.10.2:8673/sse"
 
 # ---- Notify service (for mobile push notifications) ----
 CONF_NOTIFY_SERVICE = "notify_service"
@@ -117,30 +114,18 @@ CONF_PROMPT = "prompt"
 CONF_SCHEMA_FIRST_YAML = "schema_first_yaml"
 CONF_DISABLED_FEATURES = "disabled_features"
 
-# ---- Fast Intent Resolver (3-tier) ----
-CONF_FAST_INTENT_ENABLED = "fast_intent_enabled"
-CONF_FAST_INTENT_QDRANT_URL = "fast_intent_qdrant_url"
-CONF_FAST_INTENT_COLLECTION = "fast_intent_collection"
-CONF_FAST_INTENT_TIER1_THRESHOLD = "fast_intent_tier1_threshold"
-CONF_FAST_INTENT_TIER2_THRESHOLD = "fast_intent_tier2_threshold"
-RECOMMENDED_FAST_INTENT_ENABLED = False
-RECOMMENDED_FAST_INTENT_QDRANT_URL = "http://localhost:6333"
-RECOMMENDED_FAST_INTENT_COLLECTION = "hga_entities"
-RECOMMENDED_FAST_INTENT_TIER1_THRESHOLD = 0.75
-RECOMMENDED_FAST_INTENT_TIER2_THRESHOLD = 0.65
-
 # ---- Audit store ----
 CONF_AUDIT_HOT_MAX_RECORDS = "audit_hot_max_records"
 CONF_AUDIT_ARCHIVAL_BACKLOG_MAX = "audit_archival_backlog_max"
 CONF_AUDIT_RETENTION_DAYS = "audit_retention_days"
 CONF_AUDIT_HIGH_RETENTION_DAYS = "audit_high_retention_days"
 
-
 # ---- Proactive sentinel ----
 CONF_SENTINEL_ENABLED = "sentinel_enabled"
 CONF_SENTINEL_INTERVAL_SECONDS = "sentinel_interval_seconds"
 CONF_SENTINEL_COOLDOWN_MINUTES = "sentinel_cooldown_minutes"
 CONF_SENTINEL_ENTITY_COOLDOWN_MINUTES = "sentinel_entity_cooldown_minutes"
+CONF_SENTINEL_PENDING_PROMPT_TTL_MINUTES = "sentinel_pending_prompt_ttl_minutes"
 CONF_EXPLAIN_ENABLED = "explain_enabled"
 CONF_SENTINEL_DISCOVERY_ENABLED = "sentinel_discovery_enabled"
 CONF_SENTINEL_DISCOVERY_INTERVAL_SECONDS = "sentinel_discovery_interval_seconds"
@@ -149,7 +134,6 @@ RECOMMENDED_SENTINEL_ENABLED = True
 RECOMMENDED_SENTINEL_INTERVAL_SECONDS = 300
 RECOMMENDED_SENTINEL_COOLDOWN_MINUTES = 30
 RECOMMENDED_SENTINEL_ENTITY_COOLDOWN_MINUTES = 15
-CONF_SENTINEL_PENDING_PROMPT_TTL_MINUTES = "sentinel_pending_prompt_ttl_minutes"
 RECOMMENDED_SENTINEL_PENDING_PROMPT_TTL_MINUTES = 240
 RECOMMENDED_EXPLAIN_ENABLED = False
 RECOMMENDED_SENTINEL_DISCOVERY_ENABLED = False
@@ -215,27 +199,15 @@ RECOMMENDED_SENTINEL_TRIAGE_TIMEOUT_SECONDS: int = 10
 
 # ---- Sentinel baseline storage (Issue #265) ----
 CONF_SENTINEL_BASELINE_ENABLED = "sentinel_baseline_enabled"
-CONF_SENTINEL_BASELINE_INTERVAL_MINUTES = "sentinel_baseline_interval_minutes"
-CONF_SENTINEL_BASELINE_HISTORY_DAYS = "sentinel_baseline_history_days"
+CONF_SENTINEL_BASELINE_UPDATE_INTERVAL_MINUTES = (
+    "sentinel_baseline_update_interval_minutes"
+)
+CONF_SENTINEL_BASELINE_FRESHNESS_THRESHOLD_SECONDS = (
+    "sentinel_baseline_freshness_threshold_seconds"
+)
 RECOMMENDED_SENTINEL_BASELINE_ENABLED: bool = False
-RECOMMENDED_SENTINEL_BASELINE_INTERVAL_MINUTES: int = 60
-RECOMMENDED_SENTINEL_BASELINE_HISTORY_DAYS: int = 7
-CONF_SENTINEL_BASELINE_UPDATE_INTERVAL_MINUTES = "sentinel_baseline_update_interval_minutes"
 RECOMMENDED_SENTINEL_BASELINE_UPDATE_INTERVAL_MINUTES: int = 15
-CONF_SENTINEL_BASELINE_FRESHNESS_THRESHOLD_SECONDS = "sentinel_baseline_freshness_threshold_seconds"
-RECOMMENDED_SENTINEL_BASELINE_FRESHNESS_THRESHOLD_SECONDS: int = 1800
-
-# ---- Sentinel autonomy level (runtime kill-switch) ----
-# 0 = fully passive (no notifications, no actions)
-# 1 = notify only (default)
-# 2 = suggest actions (notify + recommend)
-# 3 = act autonomously
-CONF_SENTINEL_AUTONOMY_LEVEL = "sentinel_autonomy_level"
-CONF_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES = "sentinel_runtime_override_ttl_minutes"
-CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE = "sentinel_require_pin_for_level_increase"
-RECOMMENDED_SENTINEL_AUTONOMY_LEVEL: int = 1
-RECOMMENDED_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES: int = 60
-RECOMMENDED_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE: bool = False
+RECOMMENDED_SENTINEL_BASELINE_FRESHNESS_THRESHOLD_SECONDS: int = 3600
 
 # ---- Feature definitions ----
 DEFAULT_FEATURE_TYPES: tuple[str, ...] = (
@@ -268,6 +240,9 @@ CONF_FEATURE_MODEL_REASONING = "reasoning"
 CONF_FEATURE_MODEL_KEEPALIVE = "keepalive_s"
 CONF_FEATURE_MODEL_CONTEXT_SIZE = "context_size"
 
+# --- Gemini API key (used in config_flow/__init__.py) ---
+CONF_GEMINI_API_KEY = "gemini_api_key"
+
 # ---- Speech-to-Text (STT) ----
 CONF_STT_OPENAI_PROVIDER_ID = "openai_provider_subentry_id"
 CONF_STT_MODEL_NAME = "model_name"
@@ -285,40 +260,6 @@ STT_MODEL_OPENAI_SUPPORTED = Literal[
 RECOMMENDED_OPENAI_STT_MODEL: STT_MODEL_OPENAI_SUPPORTED = "gpt-4o-mini-transcribe"
 STT_RESPONSE_FORMATS = ("text", "json", "verbose_json", "srt", "vtt")
 
-# --- Google Places ---
-CONF_GOOGLE_PLACES_ENABLED = "google_places_enabled"
-CONF_GOOGLE_PLACES_API_KEY = "google_places_api_key"
-RECOMMENDED_GOOGLE_PLACES_ENABLED = False
-
-# --- Wikipedia ---
-CONF_WIKIPEDIA_ENABLED = "wikipedia_enabled"
-RECOMMENDED_WIKIPEDIA_ENABLED = False
-
-# --- LightRAG ---
-CONF_LIGHTRAG_ENABLED = "lightrag_enabled"
-CONF_LIGHTRAG_URL = "lightrag_url"
-CONF_LIGHTRAG_API_KEY = "lightrag_api_key"
-RECOMMENDED_LIGHTRAG_ENABLED = False
-RECOMMENDED_LIGHTRAG_URL = "http://localhost:9600"
-RECOMMENDED_LIGHTRAG_API_KEY = ""
-
-# --- Reddit ---
-CONF_REDDIT_ENABLED = "reddit_enabled"
-CONF_REDDIT_CLIENT_ID = "reddit_client_id"
-CONF_REDDIT_CLIENT_SECRET = "reddit_client_secret"
-CONF_REDDIT_USER_AGENT = "reddit_user_agent"
-RECOMMENDED_REDDIT_ENABLED = False
-RECOMMENDED_REDDIT_USER_AGENT = "HomeAssistant/1.0.0"
-
-# --- Plex ---
-CONF_PLEX_ENABLED = "plex_enabled"
-CONF_PLEX_SERVER_URL = "plex_server_url"
-CONF_PLEX_TOKEN = "plex_token"
-RECOMMENDED_PLEX_ENABLED = False
-
-# --- Gemini API key (used in config_flow/__init__.py) ---
-CONF_GEMINI_API_KEY = "gemini_api_key"
-
 # ---------------- Chat model ----------------
 CHAT_MODEL_TOP_P = 1.0
 # *SUPPORTED are used as defaults and fallbacks for Ollama in the UI.
@@ -327,11 +268,11 @@ CHAT_MODEL_OPENAI_SUPPORTED = Literal[
     "gpt-5", "gpt-5-mini", "gpt-5-nano", "gpt-4o", "gpt-4.1", "o4-mini"
 ]
 CHAT_MODEL_GEMINI_SUPPORTED = Literal[
-    "gemini-3-flash", "gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite"
+    "gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite"
 ]
 
 CONF_CHAT_MODEL_PROVIDER = "chat_model_provider"
-PROVIDERS = Literal["openai", "ollama", "gemini"]
+PROVIDERS = Literal["openai", "openai_compatible", "ollama", "gemini"]
 RECOMMENDED_CHAT_MODEL_PROVIDER: PROVIDERS = "ollama"
 
 CONF_OLLAMA_CHAT_MODEL = "ollama_chat_model"
@@ -344,6 +285,9 @@ CHAT_MODEL_REPEAT_PENALTY = 1.05  # Ollama only
 
 CONF_OPENAI_CHAT_MODEL = "openai_chat_model"
 RECOMMENDED_OPENAI_CHAT_MODEL: CHAT_MODEL_OPENAI_SUPPORTED = "gpt-5"
+
+CONF_OPENAI_COMPATIBLE_CHAT_MODEL = "openai_compatible_chat_model"
+RECOMMENDED_OPENAI_COMPATIBLE_CHAT_MODEL = "gpt-4o"
 
 CONF_GEMINI_CHAT_MODEL = "gemini_chat_model"
 RECOMMENDED_GEMINI_CHAT_MODEL: CHAT_MODEL_GEMINI_SUPPORTED = "gemini-2.5-flash-lite"
@@ -373,7 +317,7 @@ VLM_TOP_P = 1.0
 VLM_OLLAMA_SUPPORTED = Literal["qwen2.5vl:7b", "qwen3-vl:8b"]
 VLM_OPENAI_SUPPORTED = Literal["gpt-5-nano", "gpt-4.1", "gpt-4.1-nano"]
 VLM_GEMINI_SUPPORTED = Literal[
-    "gemini-3-flash", "gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite"
+    "gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite"
 ]
 
 CONF_VLM_PROVIDER = "vlm_provider"
@@ -390,6 +334,9 @@ VLM_MIRO_STAT = 0  # Ollama only
 
 CONF_OPENAI_VLM = "openai_vlm"
 RECOMMENDED_OPENAI_VLM: VLM_OPENAI_SUPPORTED = "gpt-5-nano"
+
+CONF_OPENAI_COMPATIBLE_VLM = "openai_compatible_vlm"
+RECOMMENDED_OPENAI_COMPATIBLE_VLM = "gpt-4o"
 
 CONF_GEMINI_VLM = "gemini_vlm"
 RECOMMENDED_GEMINI_VLM: VLM_GEMINI_SUPPORTED = "gemini-2.5-flash-lite"
@@ -457,7 +404,7 @@ SUMMARIZATION_MODEL_TOP_P = 1.0
 SUMMARIZATION_MODEL_OLLAMA_SUPPORTED = Literal["qwen3:1.7b", "qwen3:8b"]
 SUMMARIZATION_MODEL_OPENAI_SUPPORTED = Literal["gpt-5-nano", "gpt-4.1", "gpt-4.1-nano"]
 SUMMARIZATION_MODEL_GEMINI_SUPPORTED = Literal[
-    "gemini-3-flash", "gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite"
+    "gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite"
 ]
 
 CONF_SUMMARIZATION_MODEL_PROVIDER = "summarization_provider"
@@ -480,6 +427,9 @@ CONF_OPENAI_SUMMARIZATION_MODEL = "openai_summarization_model"
 RECOMMENDED_OPENAI_SUMMARIZATION_MODEL: SUMMARIZATION_MODEL_OPENAI_SUPPORTED = (
     "gpt-5-nano"
 )
+
+CONF_OPENAI_COMPATIBLE_SUMMARIZATION_MODEL = "openai_compatible_summarization_model"
+RECOMMENDED_OPENAI_COMPATIBLE_SUMMARIZATION_MODEL = "gpt-4o"
 
 CONF_GEMINI_SUMMARIZATION_MODEL = "gemini_summarization_model"
 RECOMMENDED_GEMINI_SUMMARIZATION_MODEL: SUMMARIZATION_MODEL_GEMINI_SUPPORTED = (
@@ -520,6 +470,9 @@ RECOMMENDED_OPENAI_EMBEDDING_MODEL: EMBEDDING_MODEL_OPENAI_SUPPORTED = (
     "text-embedding-3-small"
 )
 
+CONF_OPENAI_COMPATIBLE_EMBEDDING_MODEL = "openai_compatible_embedding_model"
+RECOMMENDED_OPENAI_COMPATIBLE_EMBEDDING_MODEL = "gpt-4o"
+
 CONF_GEMINI_EMBEDDING_MODEL = "gemini_embedding_model"
 RECOMMENDED_GEMINI_EMBEDDING_MODEL: EMBEDDING_MODEL_GEMINI_SUPPORTED = (
     "gemini-embedding-001"
@@ -530,6 +483,10 @@ EMBEDDING_MODEL_CTX = 512
 EMBEDDING_MODEL_PROMPT_TEMPLATE = """
 Represent this sentence for searching relevant passages: {query}
 """
+
+# ---------------- OpenAI-compatible endpoint (edge) ----------------
+CONF_OPENAI_COMPATIBLE_BASE_URL = "openai_compatible_base_url"
+CONF_OPENAI_COMPATIBLE_API_KEY = "openai_compatible_api_key"
 
 # ---------------- Camera video analyzer ----------------
 CONF_VIDEO_ANALYZER_MODE = "video_analyzer_mode"
@@ -644,6 +601,7 @@ If the user asks for an automation, output an AutomationSpec JSON object.
 If the user asks for a dashboard or Lovelace view, output a DashboardSpec JSON object.
 If the user asks to save YAML to a file, call the "write_yaml_file" tool.
 When referencing entities, use the exact entity_id values from the device overview.
+
 AutomationSpec:
 {"alias":string,"description"?:string,"mode"?:("single"|"restart"|"queued"|"parallel"),
 "max"?:int,"trigger":[Trigger,...],"condition"?:[Condition,...],"action":[Action,...]}
@@ -667,6 +625,7 @@ Action:
 {"repeat":{"count":int,"sequence":[Action,...]}}
 {"wait_for_trigger":[Trigger,...],"timeout"?:string,"continue_on_timeout"?:false}
 {"stop":"Reason"}
+
 DashboardSpec:
 {"title":string,"views":[View,...]}
 View:
@@ -701,16 +660,19 @@ MODEL_CATEGORY_SPECS: dict[str, dict[str, Any]] = {
         "recommended_temperature": RECOMMENDED_CHAT_MODEL_TEMPERATURE,
         "providers": {
             "openai": list(get_args(CHAT_MODEL_OPENAI_SUPPORTED)),
+            "openai_compatible": list(get_args(CHAT_MODEL_OPENAI_SUPPORTED)),
             "ollama": list(get_args(CHAT_MODEL_OLLAMA_SUPPORTED)),
             "gemini": list(get_args(CHAT_MODEL_GEMINI_SUPPORTED)),
         },
         "recommended_models": {
             "openai": RECOMMENDED_OPENAI_CHAT_MODEL,
+            "openai_compatible": RECOMMENDED_OPENAI_COMPATIBLE_CHAT_MODEL,
             "ollama": RECOMMENDED_OLLAMA_CHAT_MODEL,
             "gemini": RECOMMENDED_GEMINI_CHAT_MODEL,
         },
         "model_keys": {
             "openai": CONF_OPENAI_CHAT_MODEL,
+            "openai_compatible": CONF_OPENAI_COMPATIBLE_CHAT_MODEL,
             "ollama": CONF_OLLAMA_CHAT_MODEL,
             "gemini": CONF_GEMINI_CHAT_MODEL,
         },
@@ -722,16 +684,19 @@ MODEL_CATEGORY_SPECS: dict[str, dict[str, Any]] = {
         "recommended_temperature": RECOMMENDED_VLM_TEMPERATURE,
         "providers": {
             "openai": list(get_args(VLM_OPENAI_SUPPORTED)),
+            "openai_compatible": list(get_args(VLM_OPENAI_SUPPORTED)),
             "ollama": list(get_args(VLM_OLLAMA_SUPPORTED)),
             "gemini": list(get_args(VLM_GEMINI_SUPPORTED)),
         },
         "recommended_models": {
             "openai": RECOMMENDED_OPENAI_VLM,
+            "openai_compatible": RECOMMENDED_OPENAI_COMPATIBLE_VLM,
             "ollama": RECOMMENDED_OLLAMA_VLM,
             "gemini": RECOMMENDED_GEMINI_VLM,
         },
         "model_keys": {
             "openai": CONF_OPENAI_VLM,
+            "openai_compatible": CONF_OPENAI_COMPATIBLE_VLM,
             "ollama": CONF_OLLAMA_VLM,
             "gemini": CONF_GEMINI_VLM,
         },
@@ -743,16 +708,19 @@ MODEL_CATEGORY_SPECS: dict[str, dict[str, Any]] = {
         "recommended_temperature": RECOMMENDED_SUMMARIZATION_MODEL_TEMPERATURE,
         "providers": {
             "openai": list(get_args(SUMMARIZATION_MODEL_OPENAI_SUPPORTED)),
+            "openai_compatible": list(get_args(SUMMARIZATION_MODEL_OPENAI_SUPPORTED)),
             "ollama": list(get_args(SUMMARIZATION_MODEL_OLLAMA_SUPPORTED)),
             "gemini": list(get_args(SUMMARIZATION_MODEL_GEMINI_SUPPORTED)),
         },
         "recommended_models": {
             "openai": RECOMMENDED_OPENAI_SUMMARIZATION_MODEL,
+            "openai_compatible": RECOMMENDED_OPENAI_COMPATIBLE_SUMMARIZATION_MODEL,
             "ollama": RECOMMENDED_OLLAMA_SUMMARIZATION_MODEL,
             "gemini": RECOMMENDED_GEMINI_SUMMARIZATION_MODEL,
         },
         "model_keys": {
             "openai": CONF_OPENAI_SUMMARIZATION_MODEL,
+            "openai_compatible": CONF_OPENAI_COMPATIBLE_SUMMARIZATION_MODEL,
             "ollama": CONF_OLLAMA_SUMMARIZATION_MODEL,
             "gemini": CONF_GEMINI_SUMMARIZATION_MODEL,
         },
@@ -764,16 +732,19 @@ MODEL_CATEGORY_SPECS: dict[str, dict[str, Any]] = {
         "recommended_temperature": None,
         "providers": {
             "openai": list(get_args(EMBEDDING_MODEL_OPENAI_SUPPORTED)),
+            "openai_compatible": list(get_args(EMBEDDING_MODEL_OPENAI_SUPPORTED)),
             "ollama": list(get_args(EMBEDDING_MODEL_OLLAMA_SUPPORTED)),
             "gemini": list(get_args(EMBEDDING_MODEL_GEMINI_SUPPORTED)),
         },
         "recommended_models": {
             "openai": RECOMMENDED_OPENAI_EMBEDDING_MODEL,
+            "openai_compatible": RECOMMENDED_OPENAI_COMPATIBLE_EMBEDDING_MODEL,
             "ollama": RECOMMENDED_OLLAMA_EMBEDDING_MODEL,
             "gemini": RECOMMENDED_GEMINI_EMBEDDING_MODEL,
         },
         "model_keys": {
             "openai": CONF_OPENAI_EMBEDDING_MODEL,
+            "openai_compatible": CONF_OPENAI_COMPATIBLE_EMBEDDING_MODEL,
             "ollama": CONF_OLLAMA_EMBEDDING_MODEL,
             "gemini": CONF_GEMINI_EMBEDDING_MODEL,
         },

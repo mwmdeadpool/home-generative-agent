@@ -16,86 +16,33 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import intent, llm, template
 from homeassistant.util import ulid
 from langchain_core.caches import InMemoryCache
-from psycopg_pool import PoolClosed
 from langchain_core.globals import set_debug, set_llm_cache, set_verbose
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage
-from langgraph.errors import GraphRecursionError
 from voluptuous_openapi import convert
 
 from .agent.graph import workflow
 from .agent.tools import (
-    add,
     add_automation,
-    add_days,
     alarm_control,
     confirm_sensitive_action,
-    current_time,
-    date_diff,
-    define,
-    divide,
-    example_usage,
-    find_nearby_places,
     get_and_analyze_camera_image,
     get_camera_last_events,
     get_entity_history,
     resolve_entity_ids,
-    get_post_details,
-    get_subreddit_posts,
-    get_user_profile,
-    get_wikipedia_page,
-    is_leap_year,
-    multiply,
-    next_weekday,
-    parse_human_date,
-    percentage_diff,
-    round_number,
-    percentage_diff,
-    plex_add_to_playlist,
-    plex_create_playlist,
-    plex_delete_playlist,
-    plex_get_movie_details,
-    plex_get_movie_genres,
-    plex_get_playlist_items,
-    plex_list_playlists,
-    plex_recent_movies,
-    plex_search_movies,
-    query_lightrag,
-    round_number,
-    search_reddit,
-    search_wikipedia,
-    subtract,
-    subtract_days,
-    synonyms,
-    time_since,
     upsert_memory,
-    week_number,
     write_yaml_file,
 )
 from .const import (
     CONF_CRITICAL_ACTION_PIN_ENABLED,
-    CONF_FAST_INTENT_ENABLED,
-    CONF_FAST_INTENT_QDRANT_URL,
-    CONF_FAST_INTENT_COLLECTION,
-    CONF_GOOGLE_PLACES_ENABLED,
-    CONF_LIGHTRAG_ENABLED,
-    CONF_PLEX_ENABLED,
     CONF_PROMPT,
     CONF_SCHEMA_FIRST_YAML,
-    CONF_REDDIT_ENABLED,
-    CONF_WIKIPEDIA_ENABLED,
     CRITICAL_ACTION_PROMPT,
     DOMAIN,
     LANGCHAIN_LOGGING_LEVEL,
-    RECOMMENDED_FAST_INTENT_COLLECTION,
-    RECOMMENDED_FAST_INTENT_QDRANT_URL,
     SCHEMA_FIRST_YAML_PROMPT,
     SUBENTRY_TYPE_MODEL_PROVIDER,
     TOOL_CALL_ERROR_SYSTEM_MESSAGE,
 )
-from .intent_resolver.resolver import resolve_intent
-from .intent_resolver.executor import execute_direct, execute_compound
-from .intent_resolver import IntentTier
-
 from .core.conversation_helpers import (
     _convert_schema_json_to_yaml,
     _fix_entity_ids_in_text,
@@ -115,6 +62,7 @@ if TYPE_CHECKING:
     from .core.runtime import HGAConfigEntry
 
 _LOGGER = logging.getLogger(__name__)
+
 
 if LANGCHAIN_LOGGING_LEVEL == "verbose":
     set_verbose(True)
@@ -260,7 +208,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             _LOGGER.exception(msg)
             intent_response.async_set_error(intent.IntentResponseErrorCode.UNKNOWN, msg)
             return conversation.ConversationResult(
-                  response=intent_response, conversation_id=conversation_id
+                response=intent_response, conversation_id=conversation_id
             )
 
         if not options.get(CONF_SCHEMA_FIRST_YAML, False) and _is_dashboard_request(
@@ -286,66 +234,14 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             "get_entity_history": get_entity_history,
             "confirm_sensitive_action": confirm_sensitive_action,
             "alarm_control": alarm_control,
-            "current_time": current_time,
-            "time_since": time_since,
-            "add_days": add_days,
-            "subtract_days": subtract_days,
-            "date_diff": date_diff,
-            "next_weekday": next_weekday,
-            "is_leap_year": is_leap_year,
-            "week_number": week_number,
-            "parse_human_date": parse_human_date,
-            "add": add,
-            "subtract": subtract,
-            "multiply": multiply,
-            "divide": divide,
-            "percentage_diff": percentage_diff,
-            "round_number": round_number,
-            "define": define,
-            "example_usage": example_usage,
-            "synonyms": synonyms,
             "resolve_entity_ids": resolve_entity_ids,
             "write_yaml_file": write_yaml_file,
         }
         if not options.get(CONF_SCHEMA_FIRST_YAML, False):
             langchain_tools["add_automation"] = add_automation
-        
-        
-        if options.get(CONF_GOOGLE_PLACES_ENABLED, False):
-            langchain_tools["find_nearby_places"] = find_nearby_places
-            
-        if options.get(CONF_WIKIPEDIA_ENABLED, False):
-            langchain_tools["search_wikipedia"] = search_wikipedia
-            langchain_tools["get_wikipedia_page"] = get_wikipedia_page
-
-        if options.get(CONF_LIGHTRAG_ENABLED, False):
-            langchain_tools["query_lightrag"] = query_lightrag
-
-        if options.get(CONF_REDDIT_ENABLED, False):
-            langchain_tools["search_reddit"] = search_reddit
-            langchain_tools["get_subreddit_posts"] = get_subreddit_posts
-            langchain_tools["get_post_details"] = get_post_details
-            langchain_tools["get_user_profile"] = get_user_profile
-
-        if options.get(CONF_PLEX_ENABLED, False):
-            langchain_tools["plex_search_movies"] = plex_search_movies
-            langchain_tools["plex_get_movie_details"] = plex_get_movie_details
-            langchain_tools["plex_create_playlist"] = plex_create_playlist
-            langchain_tools["plex_list_playlists"] = plex_list_playlists
-            langchain_tools["plex_get_playlist_items"] = plex_get_playlist_items
-            langchain_tools["plex_delete_playlist"] = plex_delete_playlist
-            langchain_tools["plex_add_to_playlist"] = plex_add_to_playlist
-            langchain_tools["plex_recent_movies"] = plex_recent_movies
-            langchain_tools["plex_get_movie_genres"] = plex_get_movie_genres
-
         tools.extend(langchain_tools.values())
 
         # Conversation ID
-        conversation_id = (
-            ulid.ulid_now()
-            if chat_log.conversation_id is None
-            else chat_log.conversation_id
-        )
         _LOGGER.debug("Conversation ID: %s", conversation_id)
 
         # Resolve user name (None means automation)
@@ -453,9 +349,8 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                 "ha_llm_api": llm_api or None,
                 "hass": hass,
                 "pending_actions": runtime_data.pending_actions,
-                "mem0_client": runtime_data.mem0_client,
             },
-            "recursion_limit": 25,
+            "recursion_limit": 10,
         }
 
         # Compile graph into a LangChain Runnable.
@@ -476,84 +371,9 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             "messages_to_remove": [],
         }
 
-        # ── Fast Intent Resolver (3-tier) ──
-        # Try to resolve simple HA commands without the full LLM pipeline.
-        if options.get(CONF_FAST_INTENT_ENABLED, False):
-            try:
-                # Use the embedding model from runtime for vector search
-                _embedding_model = getattr(runtime_data, '_embedding_model', None)
-                if _embedding_model is not None:
-                    qdrant_url = options.get(
-                        CONF_FAST_INTENT_QDRANT_URL,
-                        RECOMMENDED_FAST_INTENT_QDRANT_URL,
-                    )
-                    collection = options.get(
-                        CONF_FAST_INTENT_COLLECTION,
-                        RECOMMENDED_FAST_INTENT_COLLECTION,
-                    )
-                    intent_result = await resolve_intent(
-                        user_input.text,
-                        hass,
-                        _embedding_model,
-                        qdrant_url=qdrant_url,
-                        collection_name=collection,
-                    )
-                    if intent_result.tier == IntentTier.DIRECT:
-                        _LOGGER.info(
-                            "Fast intent Tier 1: %s → %s in %.0fms",
-                            user_input.text,
-                            intent_result.actions[0].entity_id if intent_result.actions else "?",
-                            intent_result.resolution_ms,
-                        )
-                        return await execute_direct(
-                            hass, intent_result, language=user_input.language
-                        )
-                    if intent_result.tier == IntentTier.COMPOUND:
-                        _LOGGER.info(
-                            "Fast intent Tier 2: %s → %d actions in %.0fms",
-                            user_input.text,
-                            len(intent_result.actions),
-                            intent_result.resolution_ms,
-                        )
-                        return await execute_compound(
-                            hass, intent_result, language=user_input.language
-                        )
-                    # Tier 3: fall through to full LangGraph
-            except Exception:
-                _LOGGER.debug(
-                    "Fast intent resolver error, falling through to LangGraph",
-                    exc_info=True,
-                )
-
         # Interact with agent app.
         try:
             response = await app.ainvoke(input=app_input, config=app_config)
-        except PoolClosed:
-            _LOGGER.warning(
-                "DB connection pool is closed; cannot process conversation request. "
-                "The integration may be restarting."
-            )
-            intent_response = intent.IntentResponse(language=user_input.language)
-            intent_response.async_set_error(
-                intent.IntentResponseErrorCode.UNKNOWN,
-                "I'm temporarily unavailable while restarting. Please try again in a moment.",
-            )
-            return conversation.ConversationResult(
-                response=intent_response, conversation_id=conversation_id
-            )
-        except GraphRecursionError:
-            _LOGGER.warning(
-                "LangGraph recursion limit reached during conversation processing."
-            )
-            intent_response = intent.IntentResponse(language=user_input.language)
-            intent_response.async_set_error(
-                intent.IntentResponseErrorCode.UNKNOWN,
-                "I'm sorry, I got stuck in a loop trying to answer that. "
-                "Could you try rephrasing your request?",
-            )
-            return conversation.ConversationResult(
-                response=intent_response, conversation_id=conversation_id
-            )
         except HomeAssistantError as err:
             _LOGGER.exception("LangGraph error during conversation processing.")
             intent_response = intent.IntentResponse(language=user_input.language)

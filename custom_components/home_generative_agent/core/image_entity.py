@@ -194,7 +194,7 @@ class LastEventImage(ImageEntity):
     @callback
     def _on_recognized(self, *args: Any) -> None:
         """Handle SIGNAL_HGA_RECOGNIZED."""
-        if not args or cast("str", args[IDX_CAMERA_ID]) != self._camera_id:
+        if not args or cast("str", args[IDX_RECOGNIZED_CAMERA_ID]) != self._camera_id:
             return
 
         people = (

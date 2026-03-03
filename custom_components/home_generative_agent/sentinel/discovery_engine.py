@@ -128,12 +128,8 @@ class SentinelDiscoveryEngine:
             return
 
         try:
-            if isinstance(content, (dict, list)):
-                # Some LLM providers return already-parsed structured data.
-                payload = content if isinstance(content, dict) else {"candidates": content}
-            else:
-                payload = json.loads(content)
-        except (json.JSONDecodeError, TypeError):
+            payload = json.loads(content)
+        except json.JSONDecodeError:
             LOGGER.warning("Discovery output was not valid JSON.")
             return
 
@@ -143,8 +139,8 @@ class SentinelDiscoveryEngine:
 
         try:
             validated = cast("dict[str, Any]", DISCOVERY_OUTPUT_SCHEMA(payload))
-        except vol.Invalid as err:
-            LOGGER.warning("Discovery output failed schema validation: %s", err)
+        except vol.Invalid:
+            LOGGER.warning("Discovery output failed schema validation.")
             return
 
         raw_candidates = validated.get("candidates", [])

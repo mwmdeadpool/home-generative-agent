@@ -39,22 +39,17 @@ from homeassistant.helpers.target import (
 )
 from homeassistant.util import dt as dt_util
 from langchain_core.runnables import ConfigurableField
-from langchain_google_genai import (
-    ChatGoogleGenerativeAI,
-    GoogleGenerativeAIEmbeddings,
-    HarmBlockThreshold,
-    HarmCategory,
-)
+from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 from langchain_ollama import ChatOllama, OllamaEmbeddings
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.store.postgres import AsyncPostgresStore
 from langgraph.store.postgres.base import PostgresIndexConfig
-
 from psycopg.rows import DictRow, dict_row
 from psycopg_pool import AsyncConnectionPool, PoolTimeout
 from pydantic import SecretStr
+
 from .agent.tools import analyze_image
 from .audit.store import AuditStore
 from .const import (
@@ -83,8 +78,6 @@ from .const import (
     CONF_GEMINI_SUMMARIZATION_MODEL,
     CONF_GEMINI_VLM,
     CONF_NOTIFY_SERVICE,
-    CONF_MEM0_ENABLED,
-    CONF_MEM0_SERVER_URL,
     CONF_OLLAMA_CHAT_CONTEXT_SIZE,
     CONF_OLLAMA_CHAT_KEEPALIVE,
     CONF_OLLAMA_CHAT_MODEL,
@@ -101,6 +94,12 @@ from .const import (
     CONF_OLLAMA_VLM_KEEPALIVE,
     CONF_OLLAMA_VLM_URL,
     CONF_OPENAI_CHAT_MODEL,
+    CONF_OPENAI_COMPATIBLE_API_KEY,
+    CONF_OPENAI_COMPATIBLE_BASE_URL,
+    CONF_OPENAI_COMPATIBLE_CHAT_MODEL,
+    CONF_OPENAI_COMPATIBLE_EMBEDDING_MODEL,
+    CONF_OPENAI_COMPATIBLE_SUMMARIZATION_MODEL,
+    CONF_OPENAI_COMPATIBLE_VLM,
     CONF_OPENAI_EMBEDDING_MODEL,
     CONF_OPENAI_SUMMARIZATION_MODEL,
     CONF_OPENAI_VLM,
@@ -158,6 +157,10 @@ from .const import (
     RECOMMENDED_OLLAMA_VLM,
     RECOMMENDED_OLLAMA_VLM_KEEPALIVE,
     RECOMMENDED_OPENAI_CHAT_MODEL,
+    RECOMMENDED_OPENAI_COMPATIBLE_CHAT_MODEL,
+    RECOMMENDED_OPENAI_COMPATIBLE_EMBEDDING_MODEL,
+    RECOMMENDED_OPENAI_COMPATIBLE_SUMMARIZATION_MODEL,
+    RECOMMENDED_OPENAI_COMPATIBLE_VLM,
     RECOMMENDED_OPENAI_EMBEDDING_MODEL,
     RECOMMENDED_OPENAI_SUMMARIZATION_MODEL,
     RECOMMENDED_OPENAI_VLM,
@@ -186,7 +189,6 @@ from .const import (
     SUMMARIZATION_MODEL_PREDICT,
     SUMMARIZATION_MODEL_REPEAT_PENALTY,
     SUMMARIZATION_MODEL_TOP_P,
-    RECOMMENDED_MEM0_SERVER_URL,
     VIDEO_ANALYZER_SNAPSHOT_ROOT,
     VLM_MIRO_STAT,
     VLM_NUM_PREDICT,
@@ -212,6 +214,7 @@ from .core.utils import (
     generate_embeddings,
     ollama_healthy,
     ollama_url_for_category,
+    openai_compatible_healthy,
     openai_healthy,
     reasoning_field,
 )
@@ -220,7 +223,6 @@ from .core.video_helpers import latest_target, publish_latest_atomic
 from .explain.llm_explain import LLMExplainer
 from .http import EnrollPersonView
 from .notify.actions import ActionHandler
-from .notify.dispatcher import NotificationDispatcher
 from .sentinel.baseline import SentinelBaselineUpdater
 from .sentinel.discovery_engine import SentinelDiscoveryEngine
 from .sentinel.discovery_semantic import candidate_semantic_key, rule_semantic_key
@@ -266,7 +268,7 @@ SERVICE_SENTINEL_SET_AUTONOMY_LEVEL = "sentinel_set_autonomy_level"
 ENROLL_SCHEMA = vol.Schema(
     {
         vol.Required("name"): cv.string,
-         vol.Required("file_path"): cv.string,
+        vol.Required("file_path"): cv.string,
     }
 )
 
@@ -314,10 +316,8 @@ TOGGLE_DYNAMIC_RULE_SCHEMA = vol.Schema(
     }
 )
 
-
 SET_AUTONOMY_LEVEL_SCHEMA = vol.Schema(
     {
-        vol.Required("entry_id"): cv.string,
         vol.Required("level"): vol.All(vol.Coerce(int), vol.In([0, 1, 2, 3])),
         vol.Optional("pin"): cv.string,
     }
@@ -335,6 +335,7 @@ def _default_feature_payload(feature_type: str) -> dict[str, Any]:
         "config": {},
     }
 
+
 def _provider_api_key(
     providers: Mapping[str, ModelProviderConfig], provider_type: str
 ) -> str | None:
@@ -347,11 +348,26 @@ def _provider_api_key(
             return str(api_key)
     return None
 
+
+def _provider_setting(
+    providers: Mapping[str, ModelProviderConfig], provider_type: str, key: str
+) -> str | None:
+    """Return a named setting for the first matching provider type, or None."""
+    for provider in providers.values():
+        if provider.provider_type != provider_type:
+            continue
+        value = provider.data.get("settings", {}).get(key)
+        if value:
+            return str(value)
+    return None
+
+
 def _resolve_www_dir() -> str | None:
     www_dir = Path(__file__).resolve().parent / "www"
     if not www_dir.is_dir():
         return None
     return str(www_dir)
+
 
 async def _read_enroll_image_bytes(hass: HomeAssistant, file_ref: str) -> bytes:
     if media_source.is_media_source_id(file_ref):
@@ -449,6 +465,7 @@ def _assign_first_provider_if_needed(hass: HomeAssistant, entry: ConfigEntry) ->
             entry, subentry, data=MappingProxyType(data), title=subentry.title
         )
 
+
 def _ensure_default_sentinel_subentry(hass: HomeAssistant, entry: ConfigEntry) -> None:
     """Ensure a singleton sentinel subentry exists for deterministic settings."""
     exists = any(
@@ -481,7 +498,8 @@ def _ensure_default_sentinel_subentry(hass: HomeAssistant, entry: ConfigEntry) -
         data=MappingProxyType(payload),
     )
     hass.config_entries.async_add_subentry(entry, subentry)
-   
+
+
 # Database and vector index bootstrapping.
 # store.setup() only runs the vector migrations when store.index_config is set.
 # If index_config is None (no embeddings configured yet), setup() runs only the
@@ -504,10 +522,10 @@ async def _bootstrap_db_once(
     await store.setup()
     await checkpointer.setup()
 
-    
     hass.config_entries.async_update_entry(
         entry, data={**entry.data, CONF_DB_BOOTSTRAPPED: True}
     )
+
 
 async def _bootstrap_vectors_once(
     hass: HomeAssistant,
@@ -525,7 +543,6 @@ async def _bootstrap_vectors_once(
     hass.config_entries.async_update_entry(
         entry, data={**entry.data, CONF_VECTORS_BOOTSTRAPPED: True}
     )
-
 
 
 class NullChat:
@@ -676,6 +693,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     openai_secret = SecretStr(api_key) if api_key else None
     gemini_key = conf.get(CONF_GEMINI_API_KEY) or _provider_api_key(providers, "gemini")
     gemini_secret = SecretStr(gemini_key) if gemini_key else None
+    openai_compatible_base_url = conf.get(
+        CONF_OPENAI_COMPATIBLE_BASE_URL
+    ) or _provider_setting(providers, "openai_compatible", "base_url")
+    openai_compatible_api_key = (
+        conf.get(CONF_OPENAI_COMPATIBLE_API_KEY)
+        or _provider_setting(providers, "openai_compatible", "api_key")
+        or "none"
+    )
     base_ollama_url = ensure_http_url(conf.get(CONF_OLLAMA_URL, RECOMMENDED_OLLAMA_URL))
     ollama_chat_url = (
         ollama_url_for_category(conf, "chat", fallback=base_ollama_url)
@@ -705,9 +730,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         )
         ollama_health = dict(zip(ollama_urls, ollama_results, strict=False))
 
-    openai_ok, gemini_ok = await asyncio.gather(
+    openai_ok, gemini_ok, openai_compatible_ok = await asyncio.gather(
         openai_healthy(hass, api_key, timeout_s=health_timeout),
         gemini_healthy(hass, gemini_key, timeout_s=health_timeout),
+        openai_compatible_healthy(
+            hass,
+            openai_compatible_base_url,
+            openai_compatible_api_key,
+            timeout_s=health_timeout,
+        ),
     )
     ollama_any_ok = any(ollama_health.values())
 
@@ -736,7 +767,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         return ChatOllama(
             model=RECOMMENDED_OLLAMA_CHAT_MODEL,
             base_url=url,
-            timeout=120,
         ).configurable_fields(
             model=ConfigurableField(id="model"),
             format=ConfigurableField(id="format"),
@@ -746,6 +776,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             num_ctx=ConfigurableField(id="num_ctx"),
             repeat_penalty=ConfigurableField(id="repeat_penalty"),
             reasoning=ConfigurableField(id="reasoning"),
+            mirostat=ConfigurableField(id="mirostat"),
             keep_alive=ConfigurableField(id="keep_alive"),
         )
 
@@ -756,9 +787,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         if not healthy:
             continue
         try:
-            ollama_providers[url] = await hass.async_add_executor_job(
-                _build_ollama_provider, url
-            )
+            ollama_providers[url] = _build_ollama_provider(url)
         except Exception:
             LOGGER.exception(
                 "Ollama provider init failed for %s; continuing without it.", url
@@ -770,13 +799,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             gemini_provider = ChatGoogleGenerativeAI(
                 api_key=gemini_secret,
                 model=RECOMMENDED_GEMINI_CHAT_MODEL,
-                safety_settings={
-                    HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_ONLY_HIGH,
-                    HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_ONLY_HIGH,
-                    HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_ONLY_HIGH,
-                    HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_ONLY_HIGH,
-                },
-                timeout=120,
             ).configurable_fields(
                 model=ConfigurableField(id="model"),
                 temperature=ConfigurableField(id="temperature"),
@@ -785,6 +807,27 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             )
         except Exception:
             LOGGER.exception("Gemini provider init failed; continuing without it.")
+
+    openai_compatible_provider: (
+        RunnableSerializable[LanguageModelInput, BaseMessage] | None
+    ) = None
+    if openai_compatible_ok and openai_compatible_base_url:
+        try:
+            openai_compatible_provider = ChatOpenAI(
+                api_key=SecretStr(openai_compatible_api_key),
+                base_url=openai_compatible_base_url,
+                timeout=120,
+                http_async_client=http_client,
+            ).configurable_fields(
+                model_name=ConfigurableField(id="model_name"),
+                temperature=ConfigurableField(id="temperature"),
+                top_p=ConfigurableField(id="top_p"),
+                max_tokens=ConfigurableField(id="max_tokens"),
+            )
+        except Exception:
+            LOGGER.exception(
+                "OpenAI-compatible provider init failed; continuing without it."
+            )
 
     # Embeddings: instantiate both, then select based on provider
     openai_embeddings: OpenAIEmbeddings | None = None
@@ -813,11 +856,34 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         except Exception:
             LOGGER.exception("Ollama embeddings init failed; continuing without them.")
 
-    # Gemini embeddings disabled - API key auth issues with REST transport.
-    # Ollama embeddings (nomic-embed-text) provide equivalent functionality.
     gemini_embeddings: GoogleGenerativeAIEmbeddings | None = None
     if gemini_ok:
-        LOGGER.debug("Gemini embeddings skipped - using Ollama instead")
+        try:
+            gemini_embeddings = GoogleGenerativeAIEmbeddings(
+                google_api_key=gemini_secret,
+                model=options.get(
+                    CONF_GEMINI_EMBEDDING_MODEL, RECOMMENDED_GEMINI_EMBEDDING_MODEL
+                ),
+            )
+        except Exception:
+            LOGGER.exception("Gemini embeddings init failed; continuing without them.")
+
+    openai_compatible_embeddings: OpenAIEmbeddings | None = None
+    if openai_compatible_ok and openai_compatible_base_url:
+        try:
+            openai_compatible_embeddings = OpenAIEmbeddings(
+                api_key=SecretStr(openai_compatible_api_key),
+                base_url=openai_compatible_base_url,
+                model=options.get(
+                    CONF_OPENAI_COMPATIBLE_EMBEDDING_MODEL,
+                    RECOMMENDED_OPENAI_COMPATIBLE_EMBEDDING_MODEL,
+                ),
+                dimensions=EMBEDDING_MODEL_DIMS,
+            )
+        except Exception:
+            LOGGER.exception(
+                "OpenAI-compatible embeddings init failed; continuing without them."
+            )
 
     # Choose active embedding provider
     embedding_model: (
@@ -829,6 +895,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     index_config: PostgresIndexConfig | None = None
     if embedding_provider == "openai":
         embedding_model = openai_embeddings
+    elif embedding_provider == "openai_compatible":
+        embedding_model = openai_compatible_embeddings
     elif embedding_provider == "gemini":
         embedding_model = gemini_embeddings
     else:
@@ -853,26 +921,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     }
 
     db_uri = build_database_uri_from_entry(entry)
-    mem0_client = None
-    db_subentry = next(
-        (s for s in entry.subentries.values() if s.subentry_type == SUBENTRY_TYPE_DATABASE),
-        None,
-    )
-    if db_subentry and db_subentry.data.get(CONF_MEM0_ENABLED):
-        # Use our wrapper client which handles SSE connection via langchain-mcp-adapters
-        from .core.mem0_client import Mem0Client
-        mem0_client = Mem0Client(
-            db_subentry.data.get(CONF_MEM0_SERVER_URL, RECOMMENDED_MEM0_SERVER_URL),
-            hass
-        )
-        # Connect to the MCP server
-        await mem0_client.connect()
-        
-        # Register shutdown handler
-        async def _shutdown_mem0(_event: Any) -> None:
-            await mem0_client.close()
-            
-        hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, _shutdown_mem0)
 
     if db_uri is not None:
         pool: AsyncConnectionPool[AsyncConnection[DictRow]] | None = (
@@ -890,53 +938,63 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             LOGGER.exception("Error opening postgresql db.")
             return False
 
-        # Initialize database for long-term memory.
-        store = AsyncPostgresStore(
-            pool,
-            index=index_config if index_config else None,
-        )
-        # Initialize database for thread-based (short-term) memory.
-        checkpointer = AsyncPostgresSaver(pool)
-        # First-time setup (if needed)
-        await _bootstrap_db_once(hass, entry, store, checkpointer)
-        await _bootstrap_vectors_once(hass, entry, store)
-
-        # Migrate person gallery DB schema (if needed)
         try:
-            await migrate_person_gallery(pool)
+            # Initialize database for long-term memory.
+            store = AsyncPostgresStore(
+                pool,
+                index=index_config or None,
+            )
+            # Initialize database for thread-based (short-term) memory.
+            checkpointer = AsyncPostgresSaver(pool)
+            # First-time setup (if needed)
+            await _bootstrap_db_once(hass, entry, store, checkpointer)
+            await _bootstrap_vectors_once(hass, entry, store)
+
+            # Migrate person gallery DB schema (if needed)
+            try:
+                await migrate_person_gallery(pool)
+            except Exception:
+                LOGGER.exception("Error migrating person_gallery database schema.")
+                raise
+
+            person_gallery = PersonGalleryDAO(pool, hass)
+
+            async with (
+                pool.connection() as conn,
+                conn.cursor(row_factory=dict_row) as cur,
+            ):
+                await cur.execute("""
+                        SELECT current_database() AS db,
+                            current_user     AS usr,
+                            inet_server_addr()::text AS host,
+                            inet_server_port()       AS port,
+                            current_schemas(true)    AS schemas,
+                            current_setting('search_path', true) AS search_path
+                    """)
+                env = await cur.fetchone()
+                if env:
+                    LOGGER.info(
+                        """
+                        DB env: db=%s user=%s host=%s port=%s schemas=%s search_path=%s
+                        """,
+                        env["db"],
+                        env["usr"],
+                        env["host"],
+                        env["port"],
+                        env["schemas"],
+                        env["search_path"],
+                    )
+
+                await cur.execute("SELECT COUNT(*) AS total FROM public.person_gallery")
+                resp = await cur.fetchone()
+                if resp:
+                    LOGGER.info(
+                        "Gallery rows visible to this connection: %s", resp["total"]
+                    )
         except Exception:
-            LOGGER.exception("Error migrating person_gallery database schema.")
+            LOGGER.exception("Postgresql setup failed; closing pool.")
+            await pool.close()
             return False
-
-        person_gallery = PersonGalleryDAO(pool, hass)
-
-        async with pool.connection() as conn, conn.cursor(row_factory=dict_row) as cur:
-            await cur.execute("""
-                    SELECT current_database() AS db,
-                        current_user     AS usr,
-                        inet_server_addr()::text AS host,
-                        inet_server_port()       AS port,
-                        current_schemas(true)    AS schemas,
-                        current_setting('search_path', true) AS search_path
-                """)
-            env = await cur.fetchone()
-            if env:
-                LOGGER.info(
-                    "DB env: db=%s user=%s host=%s port=%s schemas=%s search_path=%s",
-                    env["db"],
-                    env["usr"],
-                    env["host"],
-                    env["port"],
-                    env["schemas"],
-                    env["search_path"],
-                )
-
-            await cur.execute("SELECT COUNT(*) AS total FROM public.person_gallery")
-            resp = await cur.fetchone()
-            if resp:
-                LOGGER.info(
-                    "Gallery rows visible to this connection: %s", resp["total"]
-                )
     else:
         person_gallery = None
         checkpointer = MemorySaver()
@@ -985,6 +1043,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                 }
             }
         )
+    elif chat_provider == "openai_compatible":
+        chat_model = (openai_compatible_provider or NullChat()).with_config(
+            config={
+                "configurable": {
+                    "model_name": options.get(
+                        CONF_OPENAI_COMPATIBLE_CHAT_MODEL,
+                        RECOMMENDED_OPENAI_COMPATIBLE_CHAT_MODEL,
+                    ),
+                    "temperature": chat_temp,
+                    "top_p": CHAT_MODEL_TOP_P,
+                }
+            }
+        )
     elif chat_provider == "gemini":
         chat_model = (gemini_provider or NullChat()).with_config(
             config={
@@ -1026,6 +1097,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             config={
                 "configurable": {
                     "model_name": options.get(CONF_OPENAI_VLM, RECOMMENDED_OPENAI_VLM),
+                    "temperature": vlm_temp,
+                    "top_p": VLM_TOP_P,
+                }
+            }
+        )
+    elif vlm_provider == "openai_compatible":
+        vision_model = (openai_compatible_provider or NullChat()).with_config(
+            config={
+                "configurable": {
+                    "model_name": options.get(
+                        CONF_OPENAI_COMPATIBLE_VLM, RECOMMENDED_OPENAI_COMPATIBLE_VLM
+                    ),
                     "temperature": vlm_temp,
                     "top_p": VLM_TOP_P,
                 }
@@ -1085,6 +1168,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                 }
             }
         )
+    elif sum_provider == "openai_compatible":
+        summarization_model = (openai_compatible_provider or NullChat()).with_config(
+            config={
+                "configurable": {
+                    "model_name": options.get(
+                        CONF_OPENAI_COMPATIBLE_SUMMARIZATION_MODEL,
+                        RECOMMENDED_OPENAI_COMPATIBLE_SUMMARIZATION_MODEL,
+                    ),
+                    "temperature": sum_temp,
+                    "top_p": SUMMARIZATION_MODEL_TOP_P,
+                }
+            }
+        )
     elif sum_provider == "gemini":
         summarization_model = (gemini_provider or NullChat()).with_config(
             config={
@@ -1129,7 +1225,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         )
 
     video_analyzer = VideoAnalyzer(hass, entry)
-    
     suppression = SuppressionManager(hass)
     await suppression.async_load()
     audit_store = AuditStore(hass)
@@ -1155,10 +1250,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     )
     notifier = SentinelNotifier(hass, options, suppression, action_handler)
     notifier.start()
-    # Keep a legacy dispatcher instance so existing runtime_data consumers
-    # (e.g. tests, services) that reference NotificationDispatcher continue
-    # to work.  It is not started — SentinelNotifier owns the event loop.
-    _legacy_dispatcher = NotificationDispatcher(hass, options, action_handler)
     explainer = None
     if options.get(CONF_EXPLAIN_ENABLED, RECOMMENDED_EXPLAIN_ENABLED):
         explainer = LLMExplainer(chat_model)
@@ -1237,16 +1328,27 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         discovery_engine=discovery_engine,
         proposal_store=proposal_store,
         rule_registry=rule_registry,
-        mem0_client=mem0_client,
-        _embedding_model=embedding_model,
     )
 
     if not hass.data[DOMAIN].get("http_registered"):
         hass.http.register_view(EnrollPersonView(hass, entry))
-        www_dir = Path(__file__).resolve().parent / "www"
-        if www_dir.is_dir():
+        www_dir = await hass.async_add_executor_job(_resolve_www_dir)
+        if www_dir is not None:
             await hass.http.async_register_static_paths(
-                [StaticPathConfig("/hga-enroll-card", str(www_dir), cache_headers=True)]
+                [
+                    # Canonical prefix for all HGA frontend card modules.
+                    StaticPathConfig(
+                        HGA_CARD_STATIC_PATH,
+                        str(www_dir),
+                        cache_headers=True,
+                    ),
+                    # Backward-compatible alias for existing enroll card resources.
+                    StaticPathConfig(
+                        HGA_CARD_STATIC_PATH_LEGACY,
+                        str(www_dir),
+                        cache_headers=True,
+                    ),
+                ]
             )
         hass.data[DOMAIN]["http_registered"] = True
 
@@ -1254,7 +1356,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
 
     if options.get(CONF_VIDEO_ANALYZER_MODE) != "disable":
         video_analyzer.start()
-
     if options.get(CONF_SENTINEL_ENABLED, RECOMMENDED_SENTINEL_ENABLED):
         if hass.is_running:
             sentinel.start()
@@ -1282,64 +1383,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         await discovery_engine.stop()
 
     hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, _stop_background_tasks)
-
-    # ── Fast Intent Resolver: embed entities on startup ──
-    from .const import (
-        CONF_FAST_INTENT_ENABLED,
-        CONF_FAST_INTENT_QDRANT_URL,
-        CONF_FAST_INTENT_COLLECTION,
-        RECOMMENDED_FAST_INTENT_QDRANT_URL,
-        RECOMMENDED_FAST_INTENT_COLLECTION,
-    )
-
-    if options.get(CONF_FAST_INTENT_ENABLED, False):
-        async def _embed_entities_on_start(_event: object) -> None:
-            """Embed all actionable entities for fast intent resolution."""
-            from .intent_resolver.embedder import collect_entities, embed_entities
-
-            try:
-                # Use the main embedding model if available, otherwise create
-                # a dedicated Ollama embedder for fast intent resolution.
-                fi_embedding = embedding_model
-                if fi_embedding is None and ollama_any_ok:
-                    LOGGER.info(
-                        "Fast intent: main embeddings unavailable, "
-                        "creating dedicated Ollama embedder"
-                    )
-                    fi_embedding = OllamaEmbeddings(
-                        model="nomic-embed-text",
-                        base_url=base_ollama_url,
-                    )
-                if fi_embedding is None:
-                    LOGGER.warning(
-                        "Fast intent: no embedding model available, skipping"
-                    )
-                    return
-
-                # Store on runtime_data for use during resolution
-                entry.runtime_data._embedding_model = fi_embedding
-
-                entities = await collect_entities(hass)
-                qdrant_url = options.get(
-                    CONF_FAST_INTENT_QDRANT_URL, RECOMMENDED_FAST_INTENT_QDRANT_URL
-                )
-                collection = options.get(
-                    CONF_FAST_INTENT_COLLECTION, RECOMMENDED_FAST_INTENT_COLLECTION
-                )
-                count = await embed_entities(
-                    hass, entities, fi_embedding,
-                    qdrant_url=qdrant_url, collection_name=collection,
-                )
-                LOGGER.info("Fast intent resolver: embedded %d entities", count)
-            except Exception:
-                LOGGER.exception("Fast intent resolver: entity embedding failed")
-
-        if hass.is_running:
-            hass.async_create_task(_embed_entities_on_start(None))
-        else:
-            hass.bus.async_listen_once(
-                EVENT_HOMEASSISTANT_STARTED, _embed_entities_on_start
-            )
 
     msg = (
         "Home Generative Agent initialized with the following models: "
@@ -1386,6 +1429,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         _handle_enroll_person,
         schema=ENROLL_SCHEMA,
     )
+
     async def _handle_get_audit(call: ServiceCall) -> dict[str, Any]:
         limit = int(call.data.get("limit", 20))
         limit = max(1, min(limit, 200))
@@ -1402,8 +1446,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         schema=GET_AUDIT_SCHEMA,
         supports_response=_SERVICE_RESPONSE_ONLY,
     )
-
-    
 
     async def _handle_get_discovery(call: ServiceCall) -> dict[str, Any]:
         limit = int(call.data.get("limit", 20))
@@ -1437,7 +1479,37 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                 return rule_id
         return None
 
-    async def _handle_promote_discovery(call: ServiceCall) -> dict[str, Any]:
+    def _covered_specific_rule_for_any_camera_normalized(
+        template_id: str,
+        params: dict[str, Any],
+    ) -> str | None:
+        rule_registry = entry.runtime_data.rule_registry
+        if rule_registry is None:
+            return None
+        if params.get("camera_selector") != "any":
+            return None
+        if template_id not in {
+            "unknown_person_camera_no_home",
+            "unknown_person_camera_when_home",
+        }:
+            return None
+        for rule in rule_registry.list_rules():
+            if str(rule.get("template_id", "")) != template_id:
+                continue
+            rule_params = rule.get("params") or {}
+            if not isinstance(rule_params, dict):
+                continue
+            camera_entity_id = str(rule_params.get("camera_entity_id", ""))
+            if not camera_entity_id:
+                continue
+            rule_id = str(rule.get("rule_id", ""))
+            if rule_id:
+                return rule_id
+        return None
+
+    async def _handle_promote_discovery(  # noqa: PLR0911
+        call: ServiceCall,
+    ) -> dict[str, Any]:
         candidate_id = str(call.data.get("candidate_id"))
         notes = str(call.data.get("notes", "") or "")
         discovery_store = entry.runtime_data.discovery_store
@@ -1465,6 +1537,24 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
 
         normalized = normalize_candidate(candidate)
         if normalized is not None:
+            covered_specific_rule_id = _covered_specific_rule_for_any_camera_normalized(
+                normalized.template_id,
+                normalized.params,
+            )
+            if covered_specific_rule_id is not None:
+                LOGGER.info(
+                    (
+                        "Skipping promote for %s: any-camera proposal covered by "
+                        "specific rule %s."
+                    ),
+                    candidate_id,
+                    covered_specific_rule_id,
+                )
+                return {
+                    "status": "already_active",
+                    "candidate_id": candidate_id,
+                    "rule_id": covered_specific_rule_id,
+                }
             existing_draft = proposal_store.find_by_rule_id(normalized.rule_id)
             if existing_draft is not None:
                 LOGGER.info(
@@ -1564,7 +1654,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         supports_response=_SERVICE_RESPONSE_ONLY,
     )
 
-    async def _handle_approve_proposal(call: ServiceCall) -> dict[str, Any]:
+    async def _handle_approve_proposal(  # noqa: PLR0911
+        call: ServiceCall,
+    ) -> dict[str, Any]:
         candidate_id = str(call.data.get("candidate_id"))
         notes = str(call.data.get("notes", "") or "")
         proposal_store = entry.runtime_data.proposal_store
@@ -1584,26 +1676,27 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             )
             return {"status": "not_found", "candidate_id": candidate_id}
 
+        covered_rule_id = _covered_rule_id_for_candidate(candidate)
+        if covered_rule_id is not None:
+            await proposal_store.async_update_status(
+                candidate_id,
+                "covered_by_existing_rule",
+                notes,
+                extra={"covered_rule_id": covered_rule_id},
+            )
+            LOGGER.info(
+                "Proposal %s marked covered_by_existing_rule (%s).",
+                candidate_id,
+                covered_rule_id,
+            )
+            return {
+                "status": "covered_by_existing_rule",
+                "candidate_id": candidate_id,
+                "rule_id": covered_rule_id,
+            }
+
         normalized = normalize_candidate(candidate)
         if normalized is None:
-            covered_rule_id = _covered_rule_id_for_candidate(candidate)
-            if covered_rule_id is not None:
-                await proposal_store.async_update_status(
-                    candidate_id,
-                    "covered_by_existing_rule",
-                    notes,
-                    extra={"covered_rule_id": covered_rule_id},
-                )
-                LOGGER.info(
-                    "Proposal %s marked covered_by_existing_rule (%s).",
-                    candidate_id,
-                    covered_rule_id,
-                )
-                return {
-                    "status": "covered_by_existing_rule",
-                    "candidate_id": candidate_id,
-                    "rule_id": covered_rule_id,
-                }
             await proposal_store.async_update_status(
                 candidate_id,
                 "unsupported",
@@ -1617,6 +1710,30 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                 candidate_id,
             )
             return {"status": "unsupported", "candidate_id": candidate_id}
+        covered_specific_rule_id = _covered_specific_rule_for_any_camera_normalized(
+            normalized.template_id,
+            normalized.params,
+        )
+        if covered_specific_rule_id is not None:
+            await proposal_store.async_update_status(
+                candidate_id,
+                "covered_by_existing_rule",
+                notes,
+                extra={"covered_rule_id": covered_specific_rule_id},
+            )
+            LOGGER.info(
+                (
+                    "Proposal %s marked covered_by_existing_rule (%s): any-camera "
+                    "proposal superseded by camera-specific rule."
+                ),
+                candidate_id,
+                covered_specific_rule_id,
+            )
+            return {
+                "status": "covered_by_existing_rule",
+                "candidate_id": candidate_id,
+                "rule_id": covered_specific_rule_id,
+            }
 
         rule_spec = normalized.as_dict()
         rule_spec["created_at"] = dt_util.utcnow().isoformat()
@@ -1715,10 +1832,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         supports_response=_SERVICE_RESPONSE_ONLY,
     )
 
-
     async def _handle_sentinel_set_autonomy_level(call: ServiceCall) -> dict[str, Any]:
-        """Set the runtime autonomy level for a specific config entry (admin-only)."""
-        requested_entry_id = str(call.data["entry_id"])
+        """Set the runtime autonomy level (admin-only)."""
         level = int(call.data["level"])
         pin: str | None = call.data.get("pin")
 
@@ -1733,10 +1848,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
 
         sentinel = entry.runtime_data.sentinel
         if sentinel is None:
-            return {"status": "unavailable", "entry_id": requested_entry_id}
+            return {"status": "unavailable", "entry_id": entry.entry_id}
 
-        sentinel.set_autonomy_level(requested_entry_id, level, pin=pin)
-        return {"status": "ok", "entry_id": requested_entry_id, "level": level}
+        sentinel.set_autonomy_level(entry.entry_id, level, pin=pin)
+        return {"status": "ok", "entry_id": entry.entry_id, "level": level}
 
     hass.services.async_register(
         DOMAIN,
@@ -1745,14 +1860,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         schema=SET_AUTONOMY_LEVEL_SCHEMA,
         supports_response=_SERVICE_RESPONSE_ONLY,
     )
+
     return True
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     """Unload the config entry."""
-    # Unload platforms first so any in-flight conversation requests finish or fail
-    # cleanly before the DB pool is closed underneath them.
-    await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    if entry.runtime_data.pool is not None:
+        await entry.runtime_data.pool.close()
     await entry.runtime_data.video_analyzer.stop()
     if entry.runtime_data.sentinel is not None:
         await entry.runtime_data.sentinel.stop()
@@ -1760,8 +1875,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool
         await entry.runtime_data.discovery_engine.stop()
     if entry.runtime_data.notifier is not None:
         entry.runtime_data.notifier.stop()
-    if entry.runtime_data.pool is not None:
-        await entry.runtime_data.pool.close()
+    await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     return True
 
 
@@ -2049,6 +2163,7 @@ async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) ->
             CONF_OLLAMA_REASONING,
         ):
             new_options.pop(key, None)
+
         sentinel_subentry_exists = any(
             s.subentry_type == SUBENTRY_TYPE_SENTINEL
             for s in config_entry.subentries.values()

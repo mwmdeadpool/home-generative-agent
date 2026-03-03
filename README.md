@@ -19,6 +19,18 @@ These are some of the features currently supported:
 
 This integration will set up the `conversation` platform, allowing users to converse directly with the Home Generative Assistant, and the `image` and `sensor` platforms which create entities to display the latest camera image, the AI-generated summary, and recognized people in HA's UI or they can be used to create automations.
 
+## Table of Contents
+
+- [Installation](#installation)
+- [Configuration](#configuration)
+- [Sentinel (Proactive Anomaly Detection)](#sentinel-proactive-anomaly-detection)
+- [Image and Sensor Entities](#image-and-sensor-entities)
+- [Enroll People (Face Recognition)](#enroll-people-face-recognition)
+- [Architecture and Design](#architecture-and-design)
+- [Example Use Cases](#example-use-cases)
+- [Makefile](#makefile)
+- [Contributions are welcome!](#contributions-are-welcome)
+
 ## Installation
 
 ### HACS
@@ -38,13 +50,21 @@ This integration will set up the `conversation` platform, allowing users to conv
 
 4. Install all the Blueprints in the `blueprints` directory. You can manually create automations using these that converse directly with the Agent (the Agent can also create automations for you from your your conversations with it, see examples below.)
 
-5. (Optional) Install `ollama` on your edge device by following the instructions [here](https://ollama.com/download).
+5. (Optional) Install `ollama` on your edge device by following the instructions [here](https://ollama.com/download), **or** run any OpenAI-compatible server (vLLM, llama.cpp, LiteLLM, etc.) and add it as an **OpenAI Compatible** edge provider.
 
 - Pull `ollama` models `gpt-oss`, `qwen3:8b`, `qwen3:1.7b`, `qwen2.5vl:7b` and `mxbai-embed-large`.
 
 6. (Optional) Install [face-service](https://github.com/goruck/face-service) on your edge device if you want to use face recognition.
 
 - Go to Developers tools -> Actions -> Enroll Person in the HA UI to enroll a new person into the face database from an image file.
+- If you want the dashboard enrollment card, add the Lovelace resource after installing the integration:
+  - Settings -> Dashboards -> Resources -> Add
+  - URL: `/hga-card/hga-enroll-card.js`
+  - Type: `JavaScript Module`
+- If you want the Sentinel proposals dashboard card, add this resource as well:
+  - Settings -> Dashboards -> Resources -> Add
+  - URL: `/hga-card/hga-proposals-card.js`
+  - Type: `JavaScript Module`
 
 ### Manual (non-HACS install)
 1. Install PostgreSQL with pgvector as shown above in Step 1.
@@ -72,12 +92,31 @@ A "feature" is a discrete capability exposed by the integration (for example Con
 3. Click **+ Model Provider** to add a provider (Edge/Cloud → provider → settings).
    - The first provider is automatically assigned to all features with default models.
 4. Use a feature’s gear icon to adjust that feature’s model settings later.
+5. Click **+ Sentinel** to configure proactive Sentinel behavior.
+   - This is where Sentinel runtime, cooldowns, discovery, explanation, and optional notify service are configured.
 
 Embedding model selection: the integration uses the first model provider that supports embeddings (or the feature’s provider when it advertises embedding capability). If you want a different embedding model, add a provider that supports embeddings and select the desired embedding model name in that provider’s defaults, then re-run Setup or reload the integration.
 
-If you want separate Ollama servers per feature, add multiple Model Provider subentries and assign them in each feature’s settings. For example: create a “Primary Ollama” provider pointing at your chat server and a “Vision Ollama” provider pointing at your camera analysis server, then select the appropriate provider on the feature’s model settings step.
+If you want separate servers per feature, add multiple Model Provider subentries and assign them in each feature’s settings. For example: create a “Primary Ollama” provider pointing at your chat server and a “Vision Ollama” provider pointing at your camera analysis server, then select the appropriate provider on the feature’s model settings step. You can mix provider types — for example a local vLLM server added as an **OpenAI Compatible** provider alongside an Ollama provider.
 
-Global options (prompt, face recognition URL, context management, critical-action PIN, etc.) live in the integration’s **Options** flow.
+Global options (prompt, face recognition URL, context management, critical-action PIN, etc.) live in the integration’s **Options** flow. Sentinel settings are configured in the **Sentinel** subentry.
+
+### Speech-to-Text (STT)
+
+HGA can provide a built-in STT engine using the OpenAI Whisper API so you can use voice without a separate STT integration.
+
+1. Open Settings → Devices & Services → Home Generative Agent.
+2. Click **+ STT Provider**.
+3. Choose **OpenAI** and give it a name.
+4. On the **Credentials** step, either:
+   - Reuse an existing OpenAI Model Provider subentry, or
+   - Select **Use a separate key** and enter a dedicated OpenAI API key.
+5. On **Model & advanced options**, pick a model (recommended: `gpt-4o-mini-transcribe`) and set optional fields:
+   - `language` (optional): e.g., `en` or `en-US`
+   - `prompt` (optional): hints for domain-specific vocabulary
+   - `temperature` (optional): 0–1
+   - `translate`: only supported by `whisper-1`; other models will fall back to transcription
+6. Go to Settings → Voice assistants → Assist pipelines and select **STT - OpenAI** (or your chosen name) for Speech-to-text.
 
 ### Schema-first YAML mode
 
@@ -109,6 +148,382 @@ The agent will demand the PIN before it:
 If you have an alarm control panel, the agent will ask for that alarm's code when arming or disarming; this code is separate from the critical-action PIN.
 
 When you ask the agent to perform a protected action, it queues the request and asks for the PIN. Reply with the digits to complete the action; after five bad attempts or 10 minutes, the queued action expires and you must ask again. If the guard is enabled but no PIN is configured, the agent will reject the request until you set one in options.
+
+## Sentinel (Proactive Anomaly Detection)
+
+Sentinel adds proactive, deterministic anomaly detection and a review pipeline for generated rule proposals.
+
+Sentinel is a singleton service per Home Generative Agent config entry. Configure exactly one Sentinel subentry.
+
+### Architecture
+
+1. `snapshot`: Builds an authoritative JSON snapshot (entities, camera activity, derived context).
+2. `sentinel`: Runs deterministic rules on that snapshot.
+3. `triage` (optional): LLM triage pass that evaluates findings and can suppress low-value alerts before notification (autonomy level ≥ 1). Fails open — on error the finding is always notified.
+4. `notifier`: Orchestrates mobile push and persistent notifications with snooze actions and per-area routing.
+5. `baseline` (optional): Background service that writes rolling statistical summaries per entity to a PostgreSQL table and fires temporal anomaly findings (deviation from rolling average or expected hour-of-day pattern).
+6. `discovery` (optional): Uses an LLM to suggest rule candidates (advisory only).
+7. `proposal` review: User promotes/approves/rejects candidates.
+8. `rule_registry`: Stores approved generated rules (including active/inactive state) for deterministic runtime evaluation.
+9. `audit`: Persists findings and user action outcomes.
+
+Important: The LLM never executes actions or directly decides runtime safety behavior. Detection and actuation remain deterministic. Triage can suppress low-value notifications but cannot alter any finding field or gate execution.
+
+### Sentinel Notification Behavior
+
+When Sentinel notifications are enabled:
+
+- Mobile push explanation text is compact and plain-language (targeted for small screens).
+- Explanation text is normalized before send (markdown/backticks removed, whitespace collapsed).
+- If explanation text is missing or too long, Sentinel uses a deterministic fallback message.
+- Fallback urgency wording depends on severity:
+  - `high`: `Urgent: check and secure it now.`
+  - `medium`: `Check soon and secure it if unexpected.`
+  - `low`: `Review when convenient.`
+- For `is_sensitive` findings, recognized person names in the explanation text are replaced with `"a recognised person"` before the message is sent.
+- Mobile action buttons (primary action first, then False Alarm, then snooze options):
+  - `Execute` — shown for non-sensitive findings with suggested actions. Calls the conversation agent or fires `hga_sentinel_execute_requested`.
+  - `Ask Agent` — shown for sensitive findings with suggested actions. Hands the finding to the conversation agent, which can verify a PIN or alarm code before acting.
+  - `False Alarm` — marks the alert as a false positive. Sets `user_response.false_positive = true` in the audit record, which is used to calculate the false-positive rate KPI.
+  - `Snooze 24 h` — suppresses this finding type for 24 hours.
+  - `Snooze Always` — suppresses this finding type permanently. A confirmation notification is sent first; the snooze is only written after the user taps **Confirm** in the follow-up notification.
+- Per-area routing: when `sentinel_area_notify_map` maps an area name to a notify service, findings whose triggering entities belong to that area are routed to that service instead of the global `notify_service`.
+
+### LLM Triage (Optional)
+
+When `sentinel_triage_enabled` is `true`, each finding passes through an LLM triage step before notification (requires autonomy level ≥ 1).
+
+- The triage prompt uses a restricted input allowlist — only sanitized fields are sent: `type`, `severity`, `confidence`, `is_sensitive`, `entity_count`, `suggested_actions_count`, and a small set of optional derived evidence (`is_night`, `anyone_home`, `recognized_people_count`, `last_changed_age_seconds`). Raw entity state values, attribute strings, area names, and free-form evidence text are never included.
+- Triage returns a `decision` (`notify` or `suppress`) and a `reason_code` for audit.
+- `triage_confidence` is recorded in the audit log but does not gate execution.
+- Triage cannot alter any finding field — it can only gate the notification.
+- Fails open: on timeout or error the decision becomes `notify` with `reason_code: triage_error`.
+
+Configuration options (in the Sentinel subentry):
+
+- `sentinel_triage_enabled` — enable LLM triage (default: `false`)
+- `sentinel_triage_timeout_seconds` — max time to wait for triage LLM response (default: `10`)
+
+### Baseline Detection (Optional)
+
+When `sentinel_baseline_enabled` is `true`, a background `SentinelBaselineUpdater` task writes rolling statistical summaries (per entity, per metric) to a `sentinel_baselines` PostgreSQL table on a configurable cadence.
+
+Two temporal detection helpers can be registered as dynamic-rule evaluators:
+
+- `evaluate_baseline_deviation` — fires when a numeric entity state deviates from its rolling average by more than a configured threshold percent.
+- `evaluate_time_of_day_anomaly` — fires when a numeric entity state differs from the expected hour-of-day rolling average by more than a configured threshold percent.
+
+Baseline freshness states (returned by `check_baseline_freshness`):
+
+- `fresh` — baseline was updated within the freshness threshold
+- `stale` — baseline exists but is older than the freshness threshold
+- `unavailable` — no baseline record exists for this entity/metric
+
+Configuration options (in the Sentinel subentry):
+
+- `sentinel_baseline_enabled` — enable baseline tracking (default: `false`)
+- `sentinel_baseline_update_interval_minutes` — how often baselines are recalculated (default: `15`)
+- `sentinel_baseline_freshness_threshold_seconds` — age after which a baseline is considered stale (default: `3600`)
+
+### Sentinel Action Flows
+
+When a user taps an action button, Sentinel uses a two-tier dispatch strategy: it first attempts to call the HGA conversation agent directly via `conversation.process`; if no conversation entity is available it falls back to firing a Home Assistant event so blueprints/automations can handle the request.
+
+#### Execute (non-sensitive findings)
+
+1. **Agent available** — calls the conversation agent with a natural-language prompt describing the finding and suggested actions. The agent checks live context, takes action, and its reply is pushed back as a mobile notification (when `notify_service` is configured).
+2. **Agent unavailable** — fires `hga_sentinel_execute_requested` so a blueprint or automation can handle it.
+3. **Sensitive finding** — blocked with status `blocked`.
+
+#### Ask Agent / Handoff (sensitive findings)
+
+1. **Agent available** — calls the conversation agent with a security-focused prompt. The agent can verify a PIN or alarm code (if configured under Critical Action settings) before executing. Its reply is pushed back as a mobile notification.
+2. **Agent unavailable** — fires `hga_sentinel_ask_requested` (includes a `suggested_prompt` field) so a blueprint can route it to the agent.
+
+#### Event payloads
+
+Both `hga_sentinel_execute_requested` and `hga_sentinel_ask_requested` share these fields:
+
+- `requested_at`
+- `anomaly_id`
+- `type`
+- `severity`
+- `confidence`
+- `triggering_entities`
+- `suggested_actions`
+- `is_sensitive`
+- `evidence`
+- `mobile_action_payload`
+
+`hga_sentinel_ask_requested` additionally includes:
+
+- `suggested_prompt` — a ready-to-use natural-language prompt for the conversation agent.
+
+### Sentinel Blueprints
+
+Three draft blueprints are included in the `blueprints/` folder:
+
+- `hga_sentinel_execute_router.yaml`
+- `hga_sentinel_execute_escalate_high.yaml`
+- `hga_sentinel_ask_router.yaml`
+
+How to import in Home Assistant:
+
+1. Open `Settings` -> `Automations & Scenes` -> `Blueprints`.
+2. Import each YAML from this repository's `blueprints/` directory.
+3. Create automations from the imported blueprints and configure inputs.
+
+What each blueprint does:
+
+- `hga_sentinel_execute_router.yaml`: routes `hga_sentinel_execute_requested` by `suggested_actions` to scripts (`check_appliance`, `check_camera`, `check_sensor`, `close_entry`, `lock_entity`) with default fallback support.
+- `hga_sentinel_execute_escalate_high.yaml`: handles only `severity: high` execute events and can send persistent notifications, mobile push, and optional TTS.
+- `hga_sentinel_ask_router.yaml`: routes `hga_sentinel_ask_requested` events to the HGA conversation agent. The agent receives the `suggested_prompt` from the event, can verify a PIN if needed, and sends its response back as a notification.
+
+Recommended usage:
+
+- Start with `hga_sentinel_execute_escalate_high.yaml` for immediate high-priority visibility.
+- Add `hga_sentinel_execute_router.yaml` when you have scripts ready for action-specific handling.
+- Add `hga_sentinel_ask_router.yaml` as a fallback for sensitive findings when the built-in agent dispatch is not available (e.g., the conversation entity is not yet registered at startup).
+
+Script contract for router targets:
+
+- Router script calls pass one object in `data.sentinel_event`.
+- `sentinel_event` matches the execute event payload and includes:
+  - `requested_at`
+  - `anomaly_id`
+  - `type`
+  - `severity`
+  - `confidence`
+  - `triggering_entities`
+  - `suggested_actions`
+  - `is_sensitive`
+  - `evidence`
+  - `mobile_action_payload`
+
+Where to store these scripts in Home Assistant:
+
+- Create them as regular HA scripts: `Settings` -> `Automations & Scenes` -> `Scripts` -> `+ Create Script` -> `Edit in YAML`.
+- Save each with a stable script entity ID (for example `script.hga_check_camera_flow`) so it can be selected in `hga_sentinel_execute_router.yaml`.
+- If you manage YAML directly, store them in `scripts.yaml` (or an included scripts file) and reload scripts.
+
+Example script target for `check_appliance`:
+
+```yaml
+alias: HGA Check Appliance Flow
+mode: queued
+fields:
+  sentinel_event:
+    description: Sentinel execute event payload
+sequence:
+  - action: persistent_notification.create
+    data:
+      title: "HGA Appliance Follow-up"
+      message: >
+        Type={{ sentinel_event.type }},
+        severity={{ sentinel_event.severity }},
+        entities={{ sentinel_event.triggering_entities | join(', ') }}.
+  - action: notify.mobile_app_phone
+    data:
+      title: "HGA Appliance Follow-up"
+      message: >
+        Suggested actions:
+        {{ sentinel_event.suggested_actions | join(', ') if sentinel_event.suggested_actions else 'none' }}
+```
+
+Example script target for `check_camera`:
+
+```yaml
+alias: HGA Check Camera Flow
+mode: queued
+fields:
+  sentinel_event:
+    description: Sentinel execute event payload
+sequence:
+  - action: notify.mobile_app_phone
+    data:
+      title: "HGA Camera Follow-up"
+      message: >
+        Camera-related event {{ sentinel_event.type }}.
+        Entities={{ sentinel_event.triggering_entities | join(', ') if sentinel_event.triggering_entities else 'none' }}.
+  - action: persistent_notification.create
+    data:
+      title: "HGA Camera Follow-up"
+      message: >
+        Evidence: {{ sentinel_event.evidence }}
+```
+
+Example script target for `lock_entity`:
+
+```yaml
+alias: HGA Lock Entity Follow-up
+mode: queued
+fields:
+  sentinel_event:
+    description: Sentinel execute event payload
+sequence:
+  - variables:
+      lock_id: >
+        {% set ids = sentinel_event.triggering_entities | default([], true) %}
+        {{ ids[0] if ids else '' }}
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: "{{ lock_id.startswith('lock.') }}"
+        sequence:
+          - action: lock.lock
+            target:
+              entity_id: "{{ lock_id }}"
+    default:
+      - action: persistent_notification.create
+        data:
+          title: "HGA Lock Entity Follow-up"
+          message: >
+            Could not resolve lock entity from event:
+            {{ sentinel_event.triggering_entities | default([], true) }}
+```
+
+Tip: if your script needs the raw mobile action callback details, read `sentinel_event.mobile_action_payload`.
+
+### Supported Generated Rule Templates
+
+- `unlocked_lock_when_home`
+- `alarm_disarmed_open_entry`
+- `low_battery_sensors`
+- `unavailable_sensors`
+- `open_entry_when_home`
+- `open_entry_while_away`
+- `open_entry_at_night_when_home`
+- `open_entry_at_night_while_away`
+- `open_any_window_at_night_while_away`
+- `motion_detected_at_night_while_alarm_disarmed`
+- `motion_without_camera_activity`
+- `motion_while_alarm_disarmed_and_home_present`
+- `unknown_person_camera_no_home`
+- `unknown_person_camera_when_home`
+
+### Discovery Novelty and Dedupe
+
+Discovery suggestions are deduped in the backend using deterministic semantic keys.
+
+Novelty checks compare candidates against:
+- Active rules in `rule_registry`
+- Existing proposal drafts
+- Recent discovery records
+
+Discovery records may include:
+- `semantic_key`: canonical normalized key for candidate meaning
+- `dedupe_reason`: candidate disposition (`novel`, `existing_semantic_key`, `batch_duplicate`)
+- `filtered_candidates`: candidates removed by dedupe with their reason
+
+### Configuring Discovery, Triage, and Baseline
+
+These optional features are configured in the Sentinel subentry:
+
+1. Home Assistant -> `Settings` -> `Devices & Services`
+2. Open `Home Generative Agent`
+3. Select `+ Sentinel` (or reconfigure the existing Sentinel subentry)
+4. Set options:
+   - Discovery: `sentinel_discovery_enabled`, `sentinel_discovery_interval_seconds`, `sentinel_discovery_max_records`
+   - Triage: `sentinel_triage_enabled`, `sentinel_triage_timeout_seconds`
+   - Baseline: `sentinel_baseline_enabled`, `sentinel_baseline_update_interval_minutes`, `sentinel_baseline_freshness_threshold_seconds`
+   - Per-area notifications: `sentinel_area_notify_map` (area name → notify service, e.g. `{"Garage": "notify.mobile_app_garage_tablet"}`)
+
+Discovery and triage both require a configured chat model. If no model is available, those loops are skipped.
+
+### Proposal Lifecycle
+
+Proposal draft statuses:
+- `draft`
+- `approved`
+- `rejected`
+- `unsupported`
+- `covered_by_existing_rule`
+
+`covered_by_existing_rule` means the candidate is semantically covered by an active rule and should not be approved as a separate rule. `covered_rule_id` is attached when available.
+
+### Sentinel Services
+
+- `home_generative_agent.get_discovery_records`
+- `home_generative_agent.promote_discovery_candidate`
+- `home_generative_agent.get_proposal_drafts`
+- `home_generative_agent.approve_rule_proposal`
+- `home_generative_agent.reject_rule_proposal`
+- `home_generative_agent.get_dynamic_rules`
+- `home_generative_agent.deactivate_dynamic_rule`
+- `home_generative_agent.reactivate_dynamic_rule`
+- `home_generative_agent.get_audit_records`
+
+Typical response fields:
+- `status`
+- `candidate_id`
+- `rule_id`
+- `covered_rule_id`
+- `records`
+- `enabled`
+
+### Proposals Card (Optional)
+
+If you install `hga-proposals-card.js`, the card can drive the full review flow:
+- Discovery candidates
+- Filtered discovery candidates (with dedupe reasons)
+- Proposal drafts (pending)
+- Proposal history
+
+It also supports:
+- Promote to draft
+- Reject candidate (local dismiss in browser storage)
+- Approve/reject proposal
+- Collapsible sections (Proposal Drafts is expanded by default)
+- "Request New Template" shortcut that opens a prefilled GitHub issue form
+- Immediate "Template Requested" feedback after click (stored per candidate in browser local storage)
+- Deactivate/reactivate controls for historical approved rules
+
+Installation:
+1. Go to `Settings -> Dashboards -> Resources -> Add Resource`.
+2. Add:
+   - URL: `/hga-card/hga-proposals-card.js`
+   - Type: `JavaScript Module`
+3. Add the card to a dashboard using a manual card config:
+
+```yaml
+type: custom:hga-proposals-card
+title: Sentinel Proposals
+```
+
+Notes:
+- The card type must include the `custom:` prefix.
+- If the card shows as unknown after adding the resource, hard refresh the browser and reload frontend resources.
+- Legacy resource URLs under `/hga-enroll-card/...` still work for backward compatibility.
+
+When updating card JS, bump the Lovelace resource query string (for example `?v=12`) to avoid stale browser cache.
+
+### Unsupported Proposals
+
+`unsupported` means the candidate could not be mapped to a supported deterministic template.
+
+Preferred handling:
+1. Reject if not useful.
+2. If useful, request a new template via `.github/ISSUE_TEMPLATE/feature_rule_request.yml` (the card pre-populates relevant fields from the proposal and marks the candidate as "Template Requested" locally in the browser).
+3. After template support is added, re-approve the proposal to re-evaluate with current mapping logic.
+
+Compatibility note: `unavailable_sensors_while_home` supports re-approving legacy drafts whose `evidence_paths` used domainless entity IDs (for example `entities[entity_id=backyard_vmd3_0].state`).
+
+`unavailable_sensors` is also supported for candidates without explicit occupancy context (for example `backyard_sensors_unavailable`). It triggers only when all listed sensors are `unavailable`; if any required sensor is missing or not unavailable, no finding is produced.
+
+`motion_while_alarm_disarmed_and_home_present` is supported for candidates that provide motion entities, an alarm entity, and one or more `person.*` entities in evidence paths. It triggers only when all required entities are present and states match exactly: alarm `disarmed`, motion `on`, and person `home`.
+
+`motion_detected_at_night_while_alarm_disarmed` is supported for candidates that provide motion entities, an alarm entity, and `derived.is_night` evidence (for example candidate `motion_at_night_disarmed`). It triggers only when all required entities referenced by the rule are present, snapshot `derived.is_night` is `true`, alarm state is `disarmed`, and at least one motion entity is `on`. It returns no findings when required entities are missing.
+
+`low_battery_sensors` is supported for battery entity candidates (for example `sensor.elias_t_h_battery` and `sensor.girls_t_h_battery`). It triggers when any listed sensor is at or below the configured threshold (default `40%`) and produces no findings if any required entity is missing or has a non-numeric state.
+
+### Troubleshooting
+
+- If card UI looks unchanged after an update, you are likely serving cached JS.
+- If similar candidates keep appearing, inspect `dedupe_reason` and `filtered_candidates` in discovery records.
+- If a proposal appears duplicate, check logs for:
+  - `Rule registry ignored duplicate rule ...`
+  - `... covered_by_existing_rule ...`
+- Existing stored proposal drafts are not auto-migrated; statuses update when proposals are re-processed.
 
 ## Image and Sensor Entities
 
@@ -300,6 +715,35 @@ action:
 
 Most users won’t need to consume these directly; the platform entities update automatically.
 
+## Enroll People (Face Recognition)
+
+You can enroll faces either via a service call or through the dashboard card.
+
+### Service (Developer Tools -> Actions)
+
+Service: `home_generative_agent.enroll_person`
+
+```yaml
+service: home_generative_agent.enroll_person
+data:
+  name: "Eva"
+  file_path: "/media/faces/eva_face.jpg"
+```
+
+The file must be inside Home Assistant's `/media` folder so it is accessible to the integration.
+
+### Dashboard Card (File Picker)
+
+Add the custom card to any dashboard after registering the resource in Installation step 6.
+
+```yaml
+type: custom:hga-enroll-card
+title: Enroll Person
+endpoint: /api/home_generative_agent/enroll
+```
+
+Use the file picker or drag-and-drop to upload one or more images. The card will enroll any images that contain a detectable face and skip those that do not.
+
 ## Architecture and Design
 
 Below is a high-level view of the architecture.
@@ -308,22 +752,26 @@ Below is a high-level view of the architecture.
 
 The general integration architecture follows the best practices as described in [Home Assistant Core](https://developers.home-assistant.io/docs/development_index/) and is compliant with [Home Assistant Community Store](https://www.hacs.xyz/) (HACS) publishing requirements.
 
-The agent is built using LangGraph and uses the HA `conversation` component to interact with the user. The agent uses the Home Assistant LLM API to fetch the state of the home and understand the HA native tools it has at its disposal. I implemented all other tools available to the agent using LangChain. The agent employs several LLMs, a large and very accurate primary model for high-level reasoning, smaller specialized helper models for camera image analysis, primary model context summarization, and embedding generation for long-term semantic search. The models can be either cloud (best accuracy, highest cost) or edge-based (good accuracy, lowest cost). The edge models run under the [Ollama](https://ollama.com/) framework on a computer located in the home. Recommended defaults and supported models are configurable in the integration UI, with defaults defined in `const.py`.
+The agent is built using LangGraph and uses the HA `conversation` component to interact with the user. The agent uses the Home Assistant LLM API to fetch the state of the home and understand the HA native tools it has at its disposal. I implemented all other tools available to the agent using LangChain. The agent employs several LLMs, a large and very accurate primary model for high-level reasoning, smaller specialized helper models for camera image analysis, primary model context summarization, and embedding generation for long-term semantic search. The models can be either cloud (best accuracy, highest cost) or edge-based (good accuracy, lowest cost). Edge models run under the [Ollama](https://ollama.com/) framework or any OpenAI-compatible server (vLLM, llama.cpp, LiteLLM, etc.) on a computer located in the home. Recommended defaults and supported models are configurable in the integration UI, with defaults defined in `const.py`.
 
 Category | Provider | Default model | Purpose
 -- | -- | -- | -- |
 Chat | OpenAI | gpt-5 | High-level reasoning and planning
 Chat | Ollama | gpt-oss | High-level reasoning and planning
 Chat | Gemini | gemini-2.5-flash-lite | High-level reasoning and planning
+Chat | OpenAI Compatible | gpt-4o | High-level reasoning and planning
 VLM | Ollama | qwen3-vl:8b | Image scene analysis
 VLM | OpenAI | gpt-5-nano | Image scene analysis
 VLM | Gemini | gemini-2.5-flash-lite | Image scene analysis
+VLM | OpenAI Compatible | gpt-4o | Image scene analysis
 Summarization | Ollama | qwen3:1.7b | Primary model context summarization
 Summarization | OpenAI | gpt-5-nano | Primary model context summarization
 Summarization | Gemini | gemini-2.5-flash-lite | Primary model context summarization
+Summarization | OpenAI Compatible | gpt-4o | Primary model context summarization
 Embeddings | Ollama | mxbai-embed-large | Embedding generation for semantic search
 Embeddings | OpenAI | text-embedding-3-small | Embedding generation for semantic search
 Embeddings | Gemini | gemini-embedding-001 | Embedding generation for semantic search
+Embeddings | OpenAI Compatible | gpt-4o | Embedding generation for semantic search
 
 ### LangGraph-based Agent
 LangGraph powers the conversation agent, enabling you to create stateful, multi-actor applications utilizing LLMs as quickly as possible. It extends LangChain's capabilities, introducing the ability to create and manage cyclical graphs essential for developing complex agent runtimes. A graph models the agent workflow, as seen in the image below.
@@ -366,11 +814,12 @@ Langchain Tool | Purpose
 -- | -- |
 `get_and_analyze_camera_image` | run scene analysis on the image from a camera
 `upsert_memory` | add or update a memory
-`add_automation` | create and register a HA automation
+`add_automation` | create and register a HA automation (available when Schema-first YAML mode is disabled)
 `write_yaml_file` | write YAML to `/config/www/` and return a `/local/...` URL
 `confirm_sensitive_action` | confirm and execute a pending critical action with a PIN
 `alarm_control` | arm or disarm an alarm control panel with the alarm code
 `get_entity_history` | query HA database for entity history
+`resolve_entity_ids` | resolve entity IDs from friendly names, areas, labels, and domains
 <del>`get_current_device_state`</del> | <del>get the current state of one or more Home Assistant devices</del> (deprecated, using native HA GetLiveContext tool instead)
 
 ### Hardware
@@ -464,6 +913,38 @@ You can enable proactive video scene analysis from cameras visible to Home Assis
 The image below is an example of a notification sent to the mobile app.
 
 ![Alt text](./assets/video-analysis-screenshot.jpeg)
+
+## Makefile
+
+The Makefile provides a repeatable local dev workflow. It creates a `hga` venv using Python 3.13 and wires common tasks (deps, lint, tests, type checking).
+
+Common commands:
+
+```bash
+make venv       # create venv with pip/setuptools/wheel
+make devdeps    # install dev-only deps
+make testdeps   # install test deps
+make runtimedeps # regenerate + install runtime deps from manifest
+```
+
+Checks and formatting:
+
+```bash
+make lint       # regenerate runtime deps + ruff check (non-mutating)
+make format     # ruff format (mutating)
+make fix        # ruff --fix (mutating)
+make typecheck  # pyright
+```
+
+Tests and cleanup:
+
+```bash
+make test       # pytest with runtime deps installed
+make all        # devdeps + testdeps + runtimedeps + lint + test + check + typecheck
+make clean      # remove the venv
+```
+
+Note: `make lint` will fail if `requirements_runtime_manifest.txt` is out of date. Run `make runtimedeps` or `make lint` to regenerate it.
 
 ## Contributions are welcome!
 

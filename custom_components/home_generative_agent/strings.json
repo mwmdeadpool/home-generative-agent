@@ -1,283 +1,274 @@
 {
-    "config": {
-        "step": {
-            "user": {
-                "title": "Home Generative Agent",
-                "description": "Default features are being created. Next, run **Setup** to enable/configure features and the database, then add a **Model Provider**."
-            }
-        },
-        "error": {
-            "cannot_connect": "Can't reach the service. Check keys/URLs and try again.",
-            "invalid_auth": "Invalid API key.",
-            "invalid_pin": "PIN must be 4-10 digits.",
-            "unknown": "Unexpected error."
-        }
+  "config": {
+    "step": {
+      "user": {
+        "title": "Home Generative Agent",
+        "description": "Default features are being created. Next, run **Setup** to enable/configure features and the database, then add a **Model Provider**."
+      }
     },
-    "config_subentries": {
-        "database": {
-            "entry_type": "service",
-            "abort": {
-                "reconfigure_successful": "Database configuration updated successfully."
-            },
-            "initiate_flow": {
-                "reconfigure": "Reconfigure Database",
-                "user": "Setup Database"
-            },
-            "step": {
-                "set_options": {
-                    "title": "Database setup",
-                    "description": "Enter the necessary parameters for the databse",
-                    "data": {
-                        "username": "Database username",
-                        "password": "Database password",
-                        "host": "Database host",
-                        "port": "Database port (optional)",
-                        "db_name": "Database name",
-                        "db_params": "Database connection params (optional)"
-                    }
-                }
-            },
-            "error": {
-                "cannot_connect": "Could not connect to the database. Check the database settings and try again.",
-                "invalid_auth": "Invalid authorization.",
-                "invalid_uri": "URI could not be generated.",
-                "unknown": "Unexpected error."
-            }
-        },
-        "model_provider": {
-            "entry_type": "service",
-            "abort": {
-                "reconfigure_successful": "Model provider updated."
-            },
-            "initiate_flow": {
-                "reconfigure": "Reconfigure Model Provider",
-                "user": "Add Model Provider"
-            },
-            "step": {
-                "deployment": {
-                    "title": "Deployment",
-                    "description": "Choose where this provider runs.",
-                    "data": {
-                        "deployment": "Deployment"
-                    }
-                },
-                "provider": {
-                    "title": "Provider",
-                    "description": "Select a provider type and name.",
-                    "data": {
-                        "provider_type": "Provider",
-                        "name": "Provider name"
-                    }
-                },
-                "settings": {
-                    "title": "Provider settings",
-                    "description": "Configure the provider endpoint or credentials.",
-                    "data": {
-                        "base_url": "Base URL",
-                        "api_key": "API key",
-                        "gemini_api_key": "Gemini API key"
-                    }
-                }
-            },
-            "error": {
-                "cannot_connect": "Can't reach the provider.",
-                "invalid_auth": "Invalid credentials.",
-                "unknown": "Unexpected error."
-            }
-        },
-        "stt_provider": {
-            "entry_type": "service",
-            "abort": {
-                "reconfigure_successful": "STT provider updated."
-            },
-            "initiate_flow": {
-                "reconfigure": "Reconfigure STT Provider",
-                "user": "Add STT Provider"
-            },
-            "step": {
-                "provider": {
-                    "title": "Speech-to-Text Provider",
-                    "description": "Select a provider type and name.",
-                    "data": {
-                        "provider_type": "Provider",
-                        "name": "Provider name"
-                    }
-                },
-                "credentials": {
-                    "title": "Credentials",
-                    "description": "Choose how to authenticate the STT provider.",
-                    "data": {
-                        "openai_provider_subentry_id": "Reuse OpenAI model provider",
-                        "api_key": "OpenAI API key"
-                    }
-                },
-                "model": {
-                    "title": "Model & advanced options",
-                    "description": "Select a model and optional advanced settings.",
-                    "data": {
-                        "model_name": "Model",
-                        "language": "Language (optional)",
-                        "prompt": "Prompt (optional)",
-                        "temperature": "Temperature (optional)",
-                        "translate": "Translate to English",
-                        "response_format": "Response format"
-                    }
-                }
-            },
-            "error": {
-                "cannot_connect": "Can't reach the provider.",
-                "invalid_auth": "Invalid credentials.",
-                "invalid_model": "Select a valid model.",
-                "not_supported": "Provider not supported yet.",
-                "unknown": "Unexpected error."
-            }
-        },
-        "sentinel": {
-            "entry_type": "service",
-            "abort": {
-                "reconfigure_successful": "Sentinel configuration updated."
-            },
-            "initiate_flow": {
-                "reconfigure": "Reconfigure Sentinel",
-                "user": "Configure Sentinel"
-            },
-            "step": {
-                "settings": {
-                    "title": "Sentinel",
-                    "description": "Configure proactive Sentinel monitoring and discovery.",
-                    "data": {
-                        "sentinel_enabled": "Enable proactive sentinel",
-                        "sentinel_interval_seconds": "Sentinel interval (seconds)",
-                        "sentinel_cooldown_minutes": "Sentinel cooldown per type (minutes)",
-                        "sentinel_entity_cooldown_minutes": "Sentinel cooldown per entity (minutes)",
-                        "sentinel_pending_prompt_ttl_minutes": "Pending prompt TTL (minutes)",
-                        "sentinel_discovery_enabled": "Enable sentinel discovery (LLM suggestions)",
-                        "sentinel_discovery_interval_seconds": "Discovery interval (seconds)",
-                        "sentinel_discovery_max_records": "Max discovery records to retain",
-                        "explain_enabled": "Enable LLM explanations for sentinel findings",
-                        "notify_service": "Sentinel Notify Service (optional)"
-                    }
-                }
-            }
-        },
-        "feature": {
-            "entry_type": "service",
-            "abort": {
-                "reconfigure_successful": "Feature updated.",
-                "setup_complete": "Setup completed."
-            },
-            "error": {
-                "no_providers": "No model providers are configured.",
-                "cannot_connect": "Could not connect to the database. Check settings and try again.",
-                "invalid_auth": "Invalid authorization.",
-                "invalid_uri": "URI could not be generated.",
-                "unknown": "Unexpected error."
-            },
-            "initiate_flow": {
-                "reconfigure": "Reconfigure Feature",
-                "user": "Setup"
-            },
-            "step": {
-                "feature_enable": {
-                    "title": "Feature setup",
-                    "description": "Enable or disable optional features.",
-                    "data": {
-                        "camera_image_analysis": "Camera Image Analysis",
-                        "conversation_summary": "Conversation Summary"
-                    }
-                },
-                "feature_provider": {
-                    "title": "Choose model provider",
-                    "description": "Select a model provider for {feature_name}.",
-                    "data": {
-                        "model_provider_id": "Model provider"
-                    }
-                },
-                "feature_model": {
-                    "title": "{feature_name}",
-                    "description": "Configure model settings for this feature. {provider_notice}",
-                    "data": {
-                        "model_name": "Model",
-                        "temperature": "Temperature",
-                        "keepalive_s": "Ollama keepalive (seconds or Never unload (-1))",
-                        "context_size": "Ollama context size (tokens)",
-                        "reasoning": "Ollama reasoning"
-                    }
-                },
-                "database": {
-                    "title": "Database setup",
-                    "description": "Enter the necessary parameters for the database.",
-                    "data": {
-                        "username": "Database username",
-                        "password": "Database password",
-                        "host": "Database host",
-                        "port": "Database port (optional)",
-                        "db_name": "Database name",
-                        "db_params": "Database connection params (optional)"
-                    }
-                },
-                "instructions": {
-                    "title": "Add a model provider",
-                    "description": "No model provider is configured yet. Add one from **Model Provider**."
-                }
-            }
-        }
-    },
-    "selector": {
-        "db_params": {
-            "fields": {
-                "key": {
-                    "name": "Key",
-                    "description": "Connection parameter name (for example: sslmode, connect_timeout)"
-                },
-                "value": {
-                    "name": "Value",
-                    "description": "Connection parameter value (for example: disable, 30)"
-                }
-            }
-        }
-    },
-    "exceptions": {
-        "invalid_config_entry": {
-            "message": "Invalid config entry provided. Got {config_entry}"
-        }
-    },
-    "options": {
-        "step": {
-            "init": {
-                "title": "Home Generative Agent Options",
-                "description": "Configure global behavior and prompts.",
-                "data": {
-                    "face_api_url": "Face recognition API URL (optional)",
-                    "prompt": "Instructions",
-                    "llm_hass_api": "Control Home Assistant",
-                    "video_analyzer_mode": "Video analyzer mode",
-                    "notify_service": "Video Analyzer Notify Service (optional)",
-                    "face_recognition": "Enable face recognition",
-                    "manage_context_with_tokens": "Context management method",
-                    "max_tokens_in_context": "Max tokens in chat context",
-                    "max_messages_in_context": "Max messages in chat context",
-                    "critical_action_pin_enabled": "Require critical action PIN",
-                    "critical_action_pin": "Critical action PIN (required to unlock/arm/open sensitive devices)",
-                    "schema_first_yaml": "Schema-first JSON for YAML requests",
-                    "fast_intent_enabled": {
-                        "name": "Fast Intent Resolver",
-                        "description": "Enable 3-tier fast intent resolution for sub-500ms HA commands"
-                    },
-                    "fast_intent_qdrant_url": {
-                        "name": "Qdrant URL",
-                        "description": "Qdrant vector database URL for entity embeddings"
-                    },
-                    "fast_intent_collection": {
-                        "name": "Qdrant Collection",
-                        "description": "Collection name for entity embeddings"
-                    }
-                },
-                "data_description": {
-                    "prompt": "Instruct how the LLM should respond. This can be a template.",
-                    "schema_first_yaml": "When enabled, YAML requests are answered with strict JSON that is converted to YAML."
-                }
-            }
-        }
+    "error": {
+      "cannot_connect": "Can't reach the service. Check keys/URLs and try again.",
+      "invalid_auth": "Invalid API key.",
+      "invalid_pin": "PIN must be 4-10 digits.",
+      "unknown": "Unexpected error."
     }
+  },
+  "config_subentries": {
+    "database": {
+      "entry_type": "service",
+      "abort": {
+        "reconfigure_successful": "Database configuration updated successfully."
+      },
+      "initiate_flow": {
+        "reconfigure": "Reconfigure Database",
+        "user": "Setup Database"
+      },
+      "step": {
+        "set_options": {
+          "title": "Database setup",
+          "description": "Enter the necessary parameters for the databse",
+          "data": {
+            "username": "Database username",
+            "password": "Database password",
+            "host": "Database host",
+            "port": "Database port (optional)",
+            "db_name": "Database name",
+            "db_params": "Database connection params (optional)"
+          }
+        }
+      },
+      "error": {
+        "cannot_connect": "Could not connect to the database. Check the database settings and try again.",
+        "invalid_auth": "Invalid authorization.",
+        "invalid_uri": "URI could not be generated.",
+        "unknown": "Unexpected error."
+      }
+    },
+    "model_provider": {
+      "entry_type": "service",
+      "abort": {
+        "reconfigure_successful": "Model provider updated."
+      },
+      "initiate_flow": {
+        "reconfigure": "Reconfigure Model Provider",
+        "user": "Add Model Provider"
+      },
+      "step": {
+        "deployment": {
+          "title": "Deployment",
+          "description": "Choose where this provider runs.",
+          "data": {
+            "deployment": "Deployment"
+          }
+        },
+        "provider": {
+          "title": "Provider",
+          "description": "Select a provider type and name.",
+          "data": {
+            "provider_type": "Provider",
+            "name": "Provider name"
+          }
+        },
+        "settings": {
+          "title": "Provider settings",
+          "description": "Configure the provider endpoint or credentials.",
+          "data": {
+            "base_url": "Base URL",
+            "api_key": "API key",
+            "gemini_api_key": "Gemini API key"
+          },
+          "data_description": {
+            "api_key": "Required for OpenAI. For OpenAI Compatible providers, leave blank or enter 'none' if the endpoint requires no authentication."
+          }
+        }
+      },
+      "error": {
+        "cannot_connect": "Can't reach the provider.",
+        "invalid_auth": "Invalid credentials.",
+        "unknown": "Unexpected error."
+      }
+    },
+    "stt_provider": {
+      "entry_type": "service",
+      "abort": {
+        "reconfigure_successful": "STT provider updated."
+      },
+      "initiate_flow": {
+        "reconfigure": "Reconfigure STT Provider",
+        "user": "Add STT Provider"
+      },
+      "step": {
+        "provider": {
+          "title": "Speech-to-Text Provider",
+          "description": "Select a provider type and name.",
+          "data": {
+            "provider_type": "Provider",
+            "name": "Provider name"
+          }
+        },
+        "credentials": {
+          "title": "Credentials",
+          "description": "Choose how to authenticate the STT provider.",
+          "data": {
+            "openai_provider_subentry_id": "Reuse OpenAI model provider",
+            "api_key": "OpenAI API key"
+          }
+        },
+        "model": {
+          "title": "Model & advanced options",
+          "description": "Select a model and optional advanced settings.",
+          "data": {
+            "model_name": "Model",
+            "language": "Language (optional)",
+            "prompt": "Prompt (optional)",
+            "temperature": "Temperature (optional)",
+            "translate": "Translate to English",
+            "response_format": "Response format"
+          }
+        }
+      },
+      "error": {
+        "cannot_connect": "Can't reach the provider.",
+        "invalid_auth": "Invalid credentials.",
+        "invalid_model": "Select a valid model.",
+        "not_supported": "Provider not supported yet.",
+        "unknown": "Unexpected error."
+      }
+    },
+    "sentinel": {
+      "entry_type": "service",
+      "abort": {
+        "reconfigure_successful": "Sentinel configuration updated."
+      },
+      "initiate_flow": {
+        "reconfigure": "Reconfigure Sentinel",
+        "user": "Configure Sentinel"
+      },
+      "step": {
+        "settings": {
+          "title": "Sentinel",
+          "description": "Configure proactive Sentinel monitoring and discovery.",
+          "data": {
+            "sentinel_enabled": "Enable proactive sentinel",
+            "sentinel_interval_seconds": "Sentinel interval (seconds)",
+            "sentinel_cooldown_minutes": "Sentinel cooldown per type (minutes)",
+            "sentinel_entity_cooldown_minutes": "Sentinel cooldown per entity (minutes)",
+            "sentinel_pending_prompt_ttl_minutes": "Pending prompt TTL (minutes)",
+            "sentinel_discovery_enabled": "Enable sentinel discovery (LLM suggestions)",
+            "sentinel_discovery_interval_seconds": "Discovery interval (seconds)",
+            "sentinel_discovery_max_records": "Max discovery records to retain",
+            "explain_enabled": "Enable LLM explanations for sentinel findings",
+            "notify_service": "Sentinel Notify Service (optional)"
+          }
+        }
+      }
+    },
+    "feature": {
+      "entry_type": "service",
+      "abort": {
+        "reconfigure_successful": "Feature updated.",
+        "setup_complete": "Setup completed."
+      },
+      "error": {
+        "no_providers": "No model providers are configured.",
+        "cannot_connect": "Could not connect to the database. Check settings and try again.",
+        "invalid_auth": "Invalid authorization.",
+        "invalid_uri": "URI could not be generated.",
+        "unknown": "Unexpected error."
+      },
+      "initiate_flow": {
+        "reconfigure": "Reconfigure Feature",
+        "user": "Setup"
+      },
+      "step": {
+        "feature_enable": {
+          "title": "Feature setup",
+          "description": "Enable or disable optional features.",
+          "data": {
+            "camera_image_analysis": "Camera Image Analysis",
+            "conversation_summary": "Conversation Summary"
+          }
+        },
+        "feature_provider": {
+          "title": "Choose model provider",
+          "description": "Select a model provider for {feature_name}.",
+          "data": {
+            "model_provider_id": "Model provider"
+          }
+        },
+        "feature_model": {
+          "title": "{feature_name}",
+          "description": "Configure model settings for this feature. {provider_notice}",
+          "data": {
+            "model_name": "Model",
+            "temperature": "Temperature",
+            "keepalive_s": "Ollama keepalive (seconds or Never unload (-1))",
+            "context_size": "Ollama context size (tokens)",
+            "reasoning": "Ollama reasoning"
+          }
+        },
+        "database": {
+          "title": "Database setup",
+          "description": "Enter the necessary parameters for the database.",
+          "data": {
+            "username": "Database username",
+            "password": "Database password",
+            "host": "Database host",
+            "port": "Database port (optional)",
+            "db_name": "Database name",
+            "db_params": "Database connection params (optional)"
+          }
+        },
+        "instructions": {
+          "title": "Add a model provider",
+          "description": "No model provider is configured yet. Add one from **Model Provider**."
+        }
+      }
+    }
+  },
+  "selector": {
+    "db_params": {
+      "fields": {
+        "key": {
+          "name": "Key",
+          "description": "Connection parameter name (for example: sslmode, connect_timeout)"
+        },
+        "value": {
+          "name": "Value",
+          "description": "Connection parameter value (for example: disable, 30)"
+        }
+      }
+    }
+  },
+  "exceptions": {
+    "invalid_config_entry": {
+      "message": "Invalid config entry provided. Got {config_entry}"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Home Generative Agent Options",
+        "description": "Configure global behavior and prompts.",
+        "data": {
+          "face_api_url": "Face recognition API URL (optional)",
+          "prompt": "Instructions",
+          "llm_hass_api": "Control Home Assistant",
+          "video_analyzer_mode": "Video analyzer mode",
+          "notify_service": "Video Analyzer Notify Service (optional)",
+          "face_recognition": "Enable face recognition",
+          "manage_context_with_tokens": "Context management method",
+          "max_tokens_in_context": "Max tokens in chat context",
+          "max_messages_in_context": "Max messages in chat context",
+          "critical_action_pin_enabled": "Require critical action PIN",
+          "critical_action_pin": "Critical action PIN (required to unlock/arm/open sensitive devices)",
+          "schema_first_yaml": "Schema-first JSON for YAML requests"
+        },
+        "data_description": {
+          "prompt": "Instruct how the LLM should respond. This can be a template.",
+          "schema_first_yaml": "When enabled, YAML requests are answered with strict JSON that is converted to YAML."
+        }
+      }
+    }
+  }
 }
