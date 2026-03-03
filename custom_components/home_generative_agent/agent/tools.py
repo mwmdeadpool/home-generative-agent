@@ -473,6 +473,18 @@ async def upsert_memory(  # noqa: D417
     if "configurable" not in config:
         return "Configuration not found. Please check your setup."
 
+    # Try Mem0 client first (custom addition)
+    mem0_client = config["configurable"].get("mem0_client")
+    if mem0_client:
+        await mem0_client.tools.save_memory(
+            text=f"Content: {content}\nContext: {context}"
+        )
+        return "Stored memory in mem0."
+
+    # Fallback to postgres store
+    if not store:
+        return "No memory store configured."
+
     mem_id = memory_id or ulid.ulid_now()
 
     user_id = config["configurable"]["user_id"]
