@@ -77,6 +77,8 @@ from .const import (
     CONF_GEMINI_EMBEDDING_MODEL,
     CONF_GEMINI_SUMMARIZATION_MODEL,
     CONF_GEMINI_VLM,
+    CONF_MEM0_ENABLED,
+    CONF_MEM0_SERVER_URL,
     CONF_NOTIFY_SERVICE,
     CONF_OLLAMA_CHAT_CONTEXT_SIZE,
     CONF_OLLAMA_CHAT_KEEPALIVE,
@@ -156,6 +158,7 @@ from .const import (
     RECOMMENDED_OLLAMA_URL,
     RECOMMENDED_OLLAMA_VLM,
     RECOMMENDED_OLLAMA_VLM_KEEPALIVE,
+    RECOMMENDED_MEM0_SERVER_URL,
     RECOMMENDED_OPENAI_CHAT_MODEL,
     RECOMMENDED_OPENAI_COMPATIBLE_CHAT_MODEL,
     RECOMMENDED_OPENAI_COMPATIBLE_EMBEDDING_MODEL,
@@ -922,6 +925,28 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
 
     db_uri = build_database_uri_from_entry(entry)
 
+    # Initialize Mem0 client if enabled (custom addition)
+    mem0_client = None
+    db_subentry = next(
+        (s for s in entry.subentries.values() if s.subentry_type == SUBENTRY_TYPE_DATABASE),
+        None,
+    )
+    if db_subentry and db_subentry.data.get(CONF_MEM0_ENABLED):
+        # Use our wrapper client which handles SSE connection via langchain-mcp-adapters
+        from .core.mem0_client import Mem0Client
+        mem0_client = Mem0Client(
+            db_subentry.data.get(CONF_MEM0_SERVER_URL, RECOMMENDED_MEM0_SERVER_URL),
+            hass
+        )
+        # Connect to the MCP server
+        await mem0_client.connect()
+
+        # Register shutdown handler
+        async def _shutdown_mem0(_event: Any) -> None:
+            await mem0_client.close()
+
+        hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, _shutdown_mem0)
+
     if db_uri is not None:
         pool: AsyncConnectionPool[AsyncConnection[DictRow]] | None = (
             AsyncConnectionPool(
@@ -1328,6 +1353,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         discovery_engine=discovery_engine,
         proposal_store=proposal_store,
         rule_registry=rule_registry,
+        mem0_client=mem0_client,
+        _embedding_model=gemini_embeddings or ollama_embeddings,
     )
 
     if not hass.data[DOMAIN].get("http_registered"):

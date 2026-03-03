@@ -40,23 +40,50 @@ from .const import (
     CONF_CRITICAL_ACTION_PIN_SALT,
     CONF_FACE_API_URL,
     CONF_FACE_RECOGNITION,
+    CONF_FAST_INTENT_COLLECTION,
+    CONF_FAST_INTENT_ENABLED,
+    CONF_FAST_INTENT_QDRANT_URL,
+    CONF_GOOGLE_PLACES_API_KEY,
+    CONF_GOOGLE_PLACES_ENABLED,
+    CONF_LIGHTRAG_API_KEY,
+    CONF_LIGHTRAG_ENABLED,
+    CONF_LIGHTRAG_URL,
     CONF_MANAGE_CONTEXT_WITH_TOKENS,
     CONF_MAX_MESSAGES_IN_CONTEXT,
     CONF_MAX_TOKENS_IN_CONTEXT,
     CONF_NOTIFY_SERVICE,
+    CONF_PLEX_ENABLED,
+    CONF_PLEX_SERVER_URL,
+    CONF_PLEX_TOKEN,
     CONF_PROMPT,
+    CONF_REDDIT_CLIENT_ID,
+    CONF_REDDIT_CLIENT_SECRET,
+    CONF_REDDIT_ENABLED,
+    CONF_REDDIT_USER_AGENT,
     CONF_SCHEMA_FIRST_YAML,
     CONF_VIDEO_ANALYZER_MODE,
+    CONF_WIKIPEDIA_ENABLED,
     CONFIG_ENTRY_VERSION,
     CRITICAL_PIN_MAX_LEN,
     CRITICAL_PIN_MIN_LEN,
     DOMAIN,
     LLM_HASS_API_NONE,
     RECOMMENDED_FACE_RECOGNITION,
+    RECOMMENDED_FAST_INTENT_COLLECTION,
+    RECOMMENDED_FAST_INTENT_ENABLED,
+    RECOMMENDED_FAST_INTENT_QDRANT_URL,
+    RECOMMENDED_GOOGLE_PLACES_ENABLED,
+    RECOMMENDED_LIGHTRAG_API_KEY,
+    RECOMMENDED_LIGHTRAG_ENABLED,
+    RECOMMENDED_LIGHTRAG_URL,
     RECOMMENDED_MANAGE_CONTEXT_WITH_TOKENS,
     RECOMMENDED_MAX_MESSAGES_IN_CONTEXT,
     RECOMMENDED_MAX_TOKENS_IN_CONTEXT,
+    RECOMMENDED_PLEX_ENABLED,
+    RECOMMENDED_REDDIT_ENABLED,
+    RECOMMENDED_REDDIT_USER_AGENT,
     RECOMMENDED_VIDEO_ANALYZER_MODE,
+    RECOMMENDED_WIKIPEDIA_ENABLED,
     SUBENTRY_TYPE_FEATURE,
     SUBENTRY_TYPE_MODEL_PROVIDER,
     SUBENTRY_TYPE_SENTINEL,
@@ -95,6 +122,12 @@ DEFAULT_OPTIONS = {
     CONF_MANAGE_CONTEXT_WITH_TOKENS: RECOMMENDED_MANAGE_CONTEXT_WITH_TOKENS,
     CONF_MAX_TOKENS_IN_CONTEXT: RECOMMENDED_MAX_TOKENS_IN_CONTEXT,
     CONF_MAX_MESSAGES_IN_CONTEXT: RECOMMENDED_MAX_MESSAGES_IN_CONTEXT,
+    CONF_GOOGLE_PLACES_ENABLED: RECOMMENDED_GOOGLE_PLACES_ENABLED,
+    CONF_WIKIPEDIA_ENABLED: RECOMMENDED_WIKIPEDIA_ENABLED,
+    CONF_LIGHTRAG_ENABLED: RECOMMENDED_LIGHTRAG_ENABLED,
+    CONF_REDDIT_ENABLED: RECOMMENDED_REDDIT_ENABLED,
+    CONF_PLEX_ENABLED: RECOMMENDED_PLEX_ENABLED,
+    CONF_FAST_INTENT_ENABLED: RECOMMENDED_FAST_INTENT_ENABLED,
 }
 
 # ---------------------------
@@ -232,6 +265,166 @@ async def _schema_for_options(
                     custom_value=False,
                 )
             )
+
+    # ---- Custom Tool Integrations (custom addition) ----
+    schema[
+        vol.Optional(
+            CONF_GOOGLE_PLACES_ENABLED,
+            description={"suggested_value": opts.get(CONF_GOOGLE_PLACES_ENABLED, False)},
+            default=RECOMMENDED_GOOGLE_PLACES_ENABLED,
+        )
+    ] = BooleanSelector()
+
+    schema[
+        vol.Optional(
+            CONF_WIKIPEDIA_ENABLED,
+            description={"suggested_value": opts.get(CONF_WIKIPEDIA_ENABLED, False)},
+            default=RECOMMENDED_WIKIPEDIA_ENABLED,
+        )
+    ] = BooleanSelector()
+
+    schema[
+        vol.Optional(
+            CONF_LIGHTRAG_ENABLED,
+            description={"suggested_value": opts.get(CONF_LIGHTRAG_ENABLED, False)},
+            default=RECOMMENDED_LIGHTRAG_ENABLED,
+        )
+    ] = BooleanSelector()
+
+    schema[
+        vol.Optional(
+            CONF_REDDIT_ENABLED,
+            description={"suggested_value": opts.get(CONF_REDDIT_ENABLED, False)},
+            default=RECOMMENDED_REDDIT_ENABLED,
+        )
+    ] = BooleanSelector()
+
+    schema[
+        vol.Optional(
+            CONF_PLEX_ENABLED,
+            description={"suggested_value": opts.get(CONF_PLEX_ENABLED, False)},
+            default=RECOMMENDED_PLEX_ENABLED,
+        )
+    ] = BooleanSelector()
+
+    schema[
+        vol.Optional(
+            CONF_FAST_INTENT_ENABLED,
+            description={"suggested_value": opts.get(CONF_FAST_INTENT_ENABLED, False)},
+            default=RECOMMENDED_FAST_INTENT_ENABLED,
+        )
+    ] = BooleanSelector()
+
+    # Conditional fields based on enabled features
+    if opts.get(CONF_FAST_INTENT_ENABLED, False):
+        schema[
+            vol.Optional(
+                CONF_FAST_INTENT_QDRANT_URL,
+                description={
+                    "suggested_value": opts.get(
+                        CONF_FAST_INTENT_QDRANT_URL,
+                        RECOMMENDED_FAST_INTENT_QDRANT_URL,
+                    )
+                },
+                default=RECOMMENDED_FAST_INTENT_QDRANT_URL,
+            )
+        ] = TextSelector()
+        schema[
+            vol.Optional(
+                CONF_FAST_INTENT_COLLECTION,
+                description={
+                    "suggested_value": opts.get(
+                        CONF_FAST_INTENT_COLLECTION,
+                        RECOMMENDED_FAST_INTENT_COLLECTION,
+                    )
+                },
+                default=RECOMMENDED_FAST_INTENT_COLLECTION,
+            )
+        ] = TextSelector()
+
+    if opts.get(CONF_GOOGLE_PLACES_ENABLED, False):
+        schema[
+            vol.Optional(
+                CONF_GOOGLE_PLACES_API_KEY,
+                description={
+                    "suggested_value": opts.get(CONF_GOOGLE_PLACES_API_KEY, ""),
+                    "placeholder": "Google Places API Key",
+                },
+            )
+        ] = TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD))
+
+    if opts.get(CONF_LIGHTRAG_ENABLED, False):
+        schema[
+            vol.Optional(
+                CONF_LIGHTRAG_URL,
+                description={"suggested_value": opts.get(CONF_LIGHTRAG_URL, RECOMMENDED_LIGHTRAG_URL)},
+                default=RECOMMENDED_LIGHTRAG_URL,
+            )
+        ] = TextSelector()
+        schema[
+            vol.Optional(
+                CONF_LIGHTRAG_API_KEY,
+                description={
+                    "suggested_value": opts.get(CONF_LIGHTRAG_API_KEY, RECOMMENDED_LIGHTRAG_API_KEY),
+                    "placeholder": "LightRAG API Key",
+                },
+                default=RECOMMENDED_LIGHTRAG_API_KEY,
+            )
+        ] = TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD))
+
+    if opts.get(CONF_REDDIT_ENABLED, False):
+        schema[
+            vol.Optional(
+                CONF_REDDIT_CLIENT_ID,
+                description={
+                    "suggested_value": opts.get(CONF_REDDIT_CLIENT_ID, ""),
+                    "placeholder": "Reddit Client ID",
+                },
+                default="",
+            )
+        ] = TextSelector()
+        schema[
+            vol.Optional(
+                CONF_REDDIT_CLIENT_SECRET,
+                description={
+                    "suggested_value": opts.get(CONF_REDDIT_CLIENT_SECRET, ""),
+                    "placeholder": "Reddit Client Secret",
+                },
+            )
+        ] = TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD))
+        schema[
+            vol.Optional(
+                CONF_REDDIT_USER_AGENT,
+                description={
+                    "suggested_value": opts.get(
+                        CONF_REDDIT_USER_AGENT, RECOMMENDED_REDDIT_USER_AGENT
+                    ),
+                    "placeholder": "Reddit User Agent",
+                },
+                default=RECOMMENDED_REDDIT_USER_AGENT,
+            )
+        ] = TextSelector()
+
+    if opts.get(CONF_PLEX_ENABLED, False):
+        schema[
+            vol.Optional(
+                CONF_PLEX_SERVER_URL,
+                description={
+                    "suggested_value": opts.get(CONF_PLEX_SERVER_URL, ""),
+                    "placeholder": "http://192.168.1.100:32400",
+                },
+                default="",
+            )
+        ] = TextSelector()
+        schema[
+            vol.Optional(
+                CONF_PLEX_TOKEN,
+                description={
+                    "suggested_value": opts.get(CONF_PLEX_TOKEN, ""),
+                    "placeholder": "Plex Token",
+                },
+            )
+        ] = TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD))
 
     return schema
 

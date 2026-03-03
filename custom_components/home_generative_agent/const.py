@@ -135,25 +135,33 @@ RECOMMENDED_FAST_INTENT_TIER2_THRESHOLD = 0.65
 # Google Places
 CONF_GOOGLE_PLACES_ENABLED = "google_places_enabled"
 CONF_GOOGLE_PLACES_API_KEY = "google_places_api_key"
+RECOMMENDED_GOOGLE_PLACES_ENABLED = False
 
 # Wikipedia
 CONF_WIKIPEDIA_ENABLED = "wikipedia_enabled"
+RECOMMENDED_WIKIPEDIA_ENABLED = False
 
 # LightRAG
 CONF_LIGHTRAG_ENABLED = "lightrag_enabled"
 CONF_LIGHTRAG_URL = "lightrag_url"
 CONF_LIGHTRAG_API_KEY = "lightrag_api_key"
+RECOMMENDED_LIGHTRAG_ENABLED = False
+RECOMMENDED_LIGHTRAG_URL = "http://localhost:9600"
+RECOMMENDED_LIGHTRAG_API_KEY = ""
 
 # Reddit
 CONF_REDDIT_ENABLED = "reddit_enabled"
 CONF_REDDIT_CLIENT_ID = "reddit_client_id"
 CONF_REDDIT_CLIENT_SECRET = "reddit_client_secret"
 CONF_REDDIT_USER_AGENT = "reddit_user_agent"
+RECOMMENDED_REDDIT_ENABLED = False
+RECOMMENDED_REDDIT_USER_AGENT = "HomeAssistant/1.0.0"
 
 # Plex
 CONF_PLEX_ENABLED = "plex_enabled"
 CONF_PLEX_SERVER_URL = "plex_server_url"
 CONF_PLEX_TOKEN = "plex_token"
+RECOMMENDED_PLEX_ENABLED = False
 
 # ---- Audit store ----
 CONF_AUDIT_HOT_MAX_RECORDS = "audit_hot_max_records"

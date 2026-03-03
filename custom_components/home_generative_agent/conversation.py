@@ -25,6 +25,34 @@ from .agent.tools import (
     add_automation,
     alarm_control,
     confirm_sensitive_action,
+    current_time,
+    time_since,
+    add_days,
+    subtract_days,
+    date_diff,
+    next_weekday,
+    is_leap_year,
+    week_number,
+    define,
+    example_usage,
+    synonyms,
+    find_nearby_places,
+    search_wikipedia,
+    get_wikipedia_page,
+    query_lightrag,
+    get_subreddit_posts,
+    get_post_details,
+    search_reddit,
+    get_user_profile,
+    plex_search_movies,
+    plex_get_movie_details,
+    plex_recent_movies,
+    plex_create_playlist,
+    plex_list_playlists,
+    plex_get_playlist_items,
+    plex_delete_playlist,
+    plex_add_to_playlist,
+    plex_get_movie_genres,
     get_and_analyze_camera_image,
     get_camera_last_events,
     get_entity_history,
@@ -34,11 +62,21 @@ from .agent.tools import (
 )
 from .const import (
     CONF_CRITICAL_ACTION_PIN_ENABLED,
+    CONF_FAST_INTENT_ENABLED,
+    CONF_FAST_INTENT_QDRANT_URL,
+    CONF_FAST_INTENT_COLLECTION,
+    CONF_GOOGLE_PLACES_ENABLED,
+    CONF_LIGHTRAG_ENABLED,
+    CONF_PLEX_ENABLED,
     CONF_PROMPT,
+    CONF_REDDIT_ENABLED,
     CONF_SCHEMA_FIRST_YAML,
+    CONF_WIKIPEDIA_ENABLED,
     CRITICAL_ACTION_PROMPT,
     DOMAIN,
     LANGCHAIN_LOGGING_LEVEL,
+    RECOMMENDED_FAST_INTENT_COLLECTION,
+    RECOMMENDED_FAST_INTENT_QDRANT_URL,
     SCHEMA_FIRST_YAML_PROMPT,
     SUBENTRY_TYPE_MODEL_PROVIDER,
     TOOL_CALL_ERROR_SYSTEM_MESSAGE,
@@ -236,9 +274,49 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             "alarm_control": alarm_control,
             "resolve_entity_ids": resolve_entity_ids,
             "write_yaml_file": write_yaml_file,
+            "current_time": current_time,
+            "time_since": time_since,
+            "add_days": add_days,
+            "subtract_days": subtract_days,
+            "date_diff": date_diff,
+            "next_weekday": next_weekday,
+            "is_leap_year": is_leap_year,
+            "week_number": week_number,
+            "define": define,
+            "example_usage": example_usage,
+            "synonyms": synonyms,
         }
         if not options.get(CONF_SCHEMA_FIRST_YAML, False):
             langchain_tools["add_automation"] = add_automation
+
+        # Conditionally add custom integration tools based on config
+        if options.get(CONF_GOOGLE_PLACES_ENABLED, False):
+            langchain_tools["find_nearby_places"] = find_nearby_places
+
+        if options.get(CONF_WIKIPEDIA_ENABLED, False):
+            langchain_tools["search_wikipedia"] = search_wikipedia
+            langchain_tools["get_wikipedia_page"] = get_wikipedia_page
+
+        if options.get(CONF_LIGHTRAG_ENABLED, False):
+            langchain_tools["query_lightrag"] = query_lightrag
+
+        if options.get(CONF_REDDIT_ENABLED, False):
+            langchain_tools["search_reddit"] = search_reddit
+            langchain_tools["get_subreddit_posts"] = get_subreddit_posts
+            langchain_tools["get_post_details"] = get_post_details
+            langchain_tools["get_user_profile"] = get_user_profile
+
+        if options.get(CONF_PLEX_ENABLED, False):
+            langchain_tools["plex_search_movies"] = plex_search_movies
+            langchain_tools["plex_get_movie_details"] = plex_get_movie_details
+            langchain_tools["plex_create_playlist"] = plex_create_playlist
+            langchain_tools["plex_list_playlists"] = plex_list_playlists
+            langchain_tools["plex_get_playlist_items"] = plex_get_playlist_items
+            langchain_tools["plex_delete_playlist"] = plex_delete_playlist
+            langchain_tools["plex_add_to_playlist"] = plex_add_to_playlist
+            langchain_tools["plex_recent_movies"] = plex_recent_movies
+            langchain_tools["plex_get_movie_genres"] = plex_get_movie_genres
+
         tools.extend(langchain_tools.values())
 
         # Conversation ID
