@@ -61,6 +61,11 @@ RECOMMENDED_DB_PARAMS = [{"key": "sslmode", "value": "disable"}]
 CONF_DB_BOOTSTRAPPED = "db_bootstrapped"
 CONF_VECTORS_BOOTSTRAPPED = "vectors_bootstrapped"
 
+# ---- Mem0 server (custom addition) ----
+CONF_MEM0_ENABLED = "mem0_enabled"
+CONF_MEM0_SERVER_URL = "mem0_server_url"
+RECOMMENDED_MEM0_SERVER_URL = "http://192.168.10.2:8673/sse"
+
 # ---- Notify service (for mobile push notifications) ----
 CONF_NOTIFY_SERVICE = "notify_service"
 LLM_HASS_API_NONE = "none"
@@ -113,6 +118,42 @@ CONF_RECOMMENDED = "recommended"
 CONF_PROMPT = "prompt"
 CONF_SCHEMA_FIRST_YAML = "schema_first_yaml"
 CONF_DISABLED_FEATURES = "disabled_features"
+
+# ---- Fast Intent Resolver (3-tier) (custom addition) ----
+CONF_FAST_INTENT_ENABLED = "fast_intent_enabled"
+CONF_FAST_INTENT_QDRANT_URL = "fast_intent_qdrant_url"
+CONF_FAST_INTENT_COLLECTION = "fast_intent_collection"
+CONF_FAST_INTENT_TIER1_THRESHOLD = "fast_intent_tier1_threshold"
+CONF_FAST_INTENT_TIER2_THRESHOLD = "fast_intent_tier2_threshold"
+RECOMMENDED_FAST_INTENT_ENABLED = False
+RECOMMENDED_FAST_INTENT_QDRANT_URL = "http://localhost:6333"
+RECOMMENDED_FAST_INTENT_COLLECTION = "hga_entities"
+RECOMMENDED_FAST_INTENT_TIER1_THRESHOLD = 0.75
+RECOMMENDED_FAST_INTENT_TIER2_THRESHOLD = 0.65
+
+# ---- Custom Tool Integrations (custom addition) ----
+# Google Places
+CONF_GOOGLE_PLACES_ENABLED = "google_places_enabled"
+CONF_GOOGLE_PLACES_API_KEY = "google_places_api_key"
+
+# Wikipedia
+CONF_WIKIPEDIA_ENABLED = "wikipedia_enabled"
+
+# LightRAG
+CONF_LIGHTRAG_ENABLED = "lightrag_enabled"
+CONF_LIGHTRAG_URL = "lightrag_url"
+CONF_LIGHTRAG_API_KEY = "lightrag_api_key"
+
+# Reddit
+CONF_REDDIT_ENABLED = "reddit_enabled"
+CONF_REDDIT_CLIENT_ID = "reddit_client_id"
+CONF_REDDIT_CLIENT_SECRET = "reddit_client_secret"
+CONF_REDDIT_USER_AGENT = "reddit_user_agent"
+
+# Plex
+CONF_PLEX_ENABLED = "plex_enabled"
+CONF_PLEX_SERVER_URL = "plex_server_url"
+CONF_PLEX_TOKEN = "plex_token"
 
 # ---- Audit store ----
 CONF_AUDIT_HOT_MAX_RECORDS = "audit_hot_max_records"

@@ -1,0 +1,1282 @@
+diff --git a/README.md b/README.md
+index 7c95db4..bed430b 100644
+--- a/README.md
++++ b/README.md
+@@ -50,7 +50,7 @@ This integration will set up the `conversation` platform, allowing users to conv
+ 
+ 4. Install all the Blueprints in the `blueprints` directory. You can manually create automations using these that converse directly with the Agent (the Agent can also create automations for you from your your conversations with it, see examples below.)
+ 
+-5. (Optional) Install `ollama` on your edge device by following the instructions [here](https://ollama.com/download).
++5. (Optional) Install `ollama` on your edge device by following the instructions [here](https://ollama.com/download), **or** run any OpenAI-compatible server (vLLM, llama.cpp, LiteLLM, etc.) and add it as an **OpenAI Compatible** edge provider.
+ 
+ - Pull `ollama` models `gpt-oss`, `qwen3:8b`, `qwen3:1.7b`, `qwen2.5vl:7b` and `mxbai-embed-large`.
+ 
+@@ -97,7 +97,7 @@ A "feature" is a discrete capability exposed by the integration (for example Con
+ 
+ Embedding model selection: the integration uses the first model provider that supports embeddings (or the feature’s provider when it advertises embedding capability). If you want a different embedding model, add a provider that supports embeddings and select the desired embedding model name in that provider’s defaults, then re-run Setup or reload the integration.
+ 
+-If you want separate Ollama servers per feature, add multiple Model Provider subentries and assign them in each feature’s settings. For example: create a “Primary Ollama” provider pointing at your chat server and a “Vision Ollama” provider pointing at your camera analysis server, then select the appropriate provider on the feature’s model settings step.
++If you want separate servers per feature, add multiple Model Provider subentries and assign them in each feature’s settings. For example: create a “Primary Ollama” provider pointing at your chat server and a “Vision Ollama” provider pointing at your camera analysis server, then select the appropriate provider on the feature’s model settings step. You can mix provider types — for example a local vLLM server added as an **OpenAI Compatible** provider alongside an Ollama provider.
+ 
+ Global options (prompt, face recognition URL, context management, critical-action PIN, etc.) live in the integration’s **Options** flow. Sentinel settings are configured in the **Sentinel** subentry.
+ 
+@@ -159,12 +159,15 @@ Sentinel is a singleton service per Home Generative Agent config entry. Configur
+ 
+ 1. `snapshot`: Builds an authoritative JSON snapshot (entities, camera activity, derived context).
+ 2. `sentinel`: Runs deterministic rules on that snapshot.
+-3. `discovery` (optional): Uses an LLM to suggest rule candidates (advisory only).
+-4. `proposal` review: User promotes/approves/rejects candidates.
+-5. `rule_registry`: Stores approved generated rules (including active/inactive state) for deterministic runtime evaluation.
+-6. `audit`: Persists findings and user action outcomes.
++3. `triage` (optional): LLM triage pass that evaluates findings and can suppress low-value alerts before notification (autonomy level ≥ 1). Fails open — on error the finding is always notified.
++4. `notifier`: Orchestrates mobile push and persistent notifications with snooze actions and per-area routing.
++5. `baseline` (optional): Background service that writes rolling statistical summaries per entity to a PostgreSQL table and fires temporal anomaly findings (deviation from rolling average or expected hour-of-day pattern).
++6. `discovery` (optional): Uses an LLM to suggest rule candidates (advisory only).
++7. `proposal` review: User promotes/approves/rejects candidates.
++8. `rule_registry`: Stores approved generated rules (including active/inactive state) for deterministic runtime evaluation.
++9. `audit`: Persists findings and user action outcomes.
+ 
+-Important: The LLM never executes actions or directly decides runtime safety behavior. Detection and actuation remain deterministic.
++Important: The LLM never executes actions or directly decides runtime safety behavior. Detection and actuation remain deterministic. Triage can suppress low-value notifications but cannot alter any finding field or gate execution.
+ 
+ ### Sentinel Notification Behavior
+ 
+@@ -177,9 +180,50 @@ When Sentinel notifications are enabled:
+   - `high`: `Urgent: check and secure it now.`
+   - `medium`: `Check soon and secure it if unexpected.`
+   - `low`: `Review when convenient.`
+-- Mobile action buttons are: `Acknowledge`, `Ignore`, `Later`.
+-- `Execute` is shown for non-sensitive findings that include suggested actions.
+-- `Ask Agent` is shown for sensitive findings that include suggested actions. This hands the finding to the conversation agent, which can verify a PIN or alarm code before acting.
++- For `is_sensitive` findings, recognized person names in the explanation text are replaced with `"a recognised person"` before the message is sent.
++- Mobile action buttons (primary action first, then snooze options):
++  - `Execute` — shown for non-sensitive findings with suggested actions. Calls the conversation agent or fires `hga_sentinel_execute_requested`.
++  - `Ask Agent` — shown for sensitive findings with suggested actions. Hands the finding to the conversation agent, which can verify a PIN or alarm code before acting.
++  - `Snooze 24 h` — suppresses this finding type for 24 hours.
++  - `Snooze 7 d` — suppresses this finding type for 7 days.
++  - `Snooze Always` — suppresses this finding type permanently. A confirmation notification is sent first; the snooze is only written after the user taps **Confirm** in the follow-up notification.
++- Per-area routing: when `sentinel_area_notify_map` maps an area name to a notify service, findings whose triggering entities belong to that area are routed to that service instead of the global `notify_service`.
++
++### LLM Triage (Optional)
++
++When `sentinel_triage_enabled` is `true`, each finding passes through an LLM triage step before notification (requires autonomy level ≥ 1).
++
++- The triage prompt uses a restricted input allowlist — only sanitized fields are sent: `type`, `severity`, `confidence`, `is_sensitive`, `entity_count`, `suggested_actions_count`, and a small set of optional derived evidence (`is_night`, `anyone_home`, `recognized_people_count`, `last_changed_age_seconds`). Raw entity state values, attribute strings, area names, and free-form evidence text are never included.
++- Triage returns a `decision` (`notify` or `suppress`) and a `reason_code` for audit.
++- `triage_confidence` is recorded in the audit log but does not gate execution.
++- Triage cannot alter any finding field — it can only gate the notification.
++- Fails open: on timeout or error the decision becomes `notify` with `reason_code: triage_error`.
++
++Configuration options (in the Sentinel subentry):
++
++- `sentinel_triage_enabled` — enable LLM triage (default: `false`)
++- `sentinel_triage_timeout_seconds` — max time to wait for triage LLM response (default: `10`)
++
++### Baseline Detection (Optional)
++
++When `sentinel_baseline_enabled` is `true`, a background `SentinelBaselineUpdater` task writes rolling statistical summaries (per entity, per metric) to a `sentinel_baselines` PostgreSQL table on a configurable cadence.
++
++Two temporal detection helpers can be registered as dynamic-rule evaluators:
++
++- `evaluate_baseline_deviation` — fires when a numeric entity state deviates from its rolling average by more than a configured threshold percent.
++- `evaluate_time_of_day_anomaly` — fires when a numeric entity state differs from the expected hour-of-day rolling average by more than a configured threshold percent.
++
++Baseline freshness states (returned by `check_baseline_freshness`):
++
++- `fresh` — baseline was updated within the freshness threshold
++- `stale` — baseline exists but is older than the freshness threshold
++- `unavailable` — no baseline record exists for this entity/metric
++
++Configuration options (in the Sentinel subentry):
++
++- `sentinel_baseline_enabled` — enable baseline tracking (default: `false`)
++- `sentinel_baseline_update_interval_minutes` — how often baselines are recalculated (default: `15`)
++- `sentinel_baseline_freshness_threshold_seconds` — age after which a baseline is considered stale (default: `3600`)
+ 
+ ### Sentinel Action Flows
+ 
+@@ -370,19 +414,20 @@ Discovery records may include:
+ - `dedupe_reason`: candidate disposition (`novel`, `existing_semantic_key`, `batch_duplicate`)
+ - `filtered_candidates`: candidates removed by dedupe with their reason
+ 
+-### Configuring Discovery
++### Configuring Discovery, Triage, and Baseline
+ 
+-Discovery is configured in the Sentinel subentry:
++These optional features are configured in the Sentinel subentry:
+ 
+ 1. Home Assistant -> `Settings` -> `Devices & Services`
+ 2. Open `Home Generative Agent`
+ 3. Select `+ Sentinel` (or reconfigure the existing Sentinel subentry)
+-4. Set Sentinel discovery options:
+-   - `sentinel_discovery_enabled`
+-   - `sentinel_discovery_interval_seconds`
+-   - `sentinel_discovery_max_records`
++4. Set options:
++   - Discovery: `sentinel_discovery_enabled`, `sentinel_discovery_interval_seconds`, `sentinel_discovery_max_records`
++   - Triage: `sentinel_triage_enabled`, `sentinel_triage_timeout_seconds`
++   - Baseline: `sentinel_baseline_enabled`, `sentinel_baseline_update_interval_minutes`, `sentinel_baseline_freshness_threshold_seconds`
++   - Per-area notifications: `sentinel_area_notify_map` (area name → notify service, e.g. `{"Garage": "notify.mobile_app_garage_tablet"}`)
+ 
+-Discovery requires a configured chat model. If no model is available, the discovery loop is skipped.
++Discovery and triage both require a configured chat model. If no model is available, those loops are skipped.
+ 
+ ### Proposal Lifecycle
+ 
+@@ -706,22 +751,26 @@ Below is a high-level view of the architecture.
+ 
+ The general integration architecture follows the best practices as described in [Home Assistant Core](https://developers.home-assistant.io/docs/development_index/) and is compliant with [Home Assistant Community Store](https://www.hacs.xyz/) (HACS) publishing requirements.
+ 
+-The agent is built using LangGraph and uses the HA `conversation` component to interact with the user. The agent uses the Home Assistant LLM API to fetch the state of the home and understand the HA native tools it has at its disposal. I implemented all other tools available to the agent using LangChain. The agent employs several LLMs, a large and very accurate primary model for high-level reasoning, smaller specialized helper models for camera image analysis, primary model context summarization, and embedding generation for long-term semantic search. The models can be either cloud (best accuracy, highest cost) or edge-based (good accuracy, lowest cost). The edge models run under the [Ollama](https://ollama.com/) framework on a computer located in the home. Recommended defaults and supported models are configurable in the integration UI, with defaults defined in `const.py`.
++The agent is built using LangGraph and uses the HA `conversation` component to interact with the user. The agent uses the Home Assistant LLM API to fetch the state of the home and understand the HA native tools it has at its disposal. I implemented all other tools available to the agent using LangChain. The agent employs several LLMs, a large and very accurate primary model for high-level reasoning, smaller specialized helper models for camera image analysis, primary model context summarization, and embedding generation for long-term semantic search. The models can be either cloud (best accuracy, highest cost) or edge-based (good accuracy, lowest cost). Edge models run under the [Ollama](https://ollama.com/) framework or any OpenAI-compatible server (vLLM, llama.cpp, LiteLLM, etc.) on a computer located in the home. Recommended defaults and supported models are configurable in the integration UI, with defaults defined in `const.py`.
+ 
+ Category | Provider | Default model | Purpose
+ -- | -- | -- | -- |
+ Chat | OpenAI | gpt-5 | High-level reasoning and planning
+ Chat | Ollama | gpt-oss | High-level reasoning and planning
+ Chat | Gemini | gemini-2.5-flash-lite | High-level reasoning and planning
++Chat | OpenAI Compatible | gpt-4o | High-level reasoning and planning
+ VLM | Ollama | qwen3-vl:8b | Image scene analysis
+ VLM | OpenAI | gpt-5-nano | Image scene analysis
+ VLM | Gemini | gemini-2.5-flash-lite | Image scene analysis
++VLM | OpenAI Compatible | gpt-4o | Image scene analysis
+ Summarization | Ollama | qwen3:1.7b | Primary model context summarization
+ Summarization | OpenAI | gpt-5-nano | Primary model context summarization
+ Summarization | Gemini | gemini-2.5-flash-lite | Primary model context summarization
++Summarization | OpenAI Compatible | gpt-4o | Primary model context summarization
+ Embeddings | Ollama | mxbai-embed-large | Embedding generation for semantic search
+ Embeddings | OpenAI | text-embedding-3-small | Embedding generation for semantic search
+ Embeddings | Gemini | gemini-embedding-001 | Embedding generation for semantic search
++Embeddings | OpenAI Compatible | gpt-4o | Embedding generation for semantic search
+ 
+ ### LangGraph-based Agent
+ LangGraph powers the conversation agent, enabling you to create stateful, multi-actor applications utilizing LLMs as quickly as possible. It extends LangChain's capabilities, introducing the ability to create and manage cyclical graphs essential for developing complex agent runtimes. A graph models the agent workflow, as seen in the image below.
+diff --git a/custom_components/home_generative_agent/__init__.py b/custom_components/home_generative_agent/__init__.py
+index c0188a6..f13690e 100644
+--- a/custom_components/home_generative_agent/__init__.py
++++ b/custom_components/home_generative_agent/__init__.py
+@@ -94,6 +94,12 @@ from .const import (
+     CONF_OLLAMA_VLM_KEEPALIVE,
+     CONF_OLLAMA_VLM_URL,
+     CONF_OPENAI_CHAT_MODEL,
++    CONF_OPENAI_COMPATIBLE_API_KEY,
++    CONF_OPENAI_COMPATIBLE_BASE_URL,
++    CONF_OPENAI_COMPATIBLE_CHAT_MODEL,
++    CONF_OPENAI_COMPATIBLE_EMBEDDING_MODEL,
++    CONF_OPENAI_COMPATIBLE_SUMMARIZATION_MODEL,
++    CONF_OPENAI_COMPATIBLE_VLM,
+     CONF_OPENAI_EMBEDDING_MODEL,
+     CONF_OPENAI_SUMMARIZATION_MODEL,
+     CONF_OPENAI_VLM,
+@@ -151,6 +157,10 @@ from .const import (
+     RECOMMENDED_OLLAMA_VLM,
+     RECOMMENDED_OLLAMA_VLM_KEEPALIVE,
+     RECOMMENDED_OPENAI_CHAT_MODEL,
++    RECOMMENDED_OPENAI_COMPATIBLE_CHAT_MODEL,
++    RECOMMENDED_OPENAI_COMPATIBLE_EMBEDDING_MODEL,
++    RECOMMENDED_OPENAI_COMPATIBLE_SUMMARIZATION_MODEL,
++    RECOMMENDED_OPENAI_COMPATIBLE_VLM,
+     RECOMMENDED_OPENAI_EMBEDDING_MODEL,
+     RECOMMENDED_OPENAI_SUMMARIZATION_MODEL,
+     RECOMMENDED_OPENAI_VLM,
+@@ -204,6 +214,7 @@ from .core.utils import (
+     generate_embeddings,
+     ollama_healthy,
+     ollama_url_for_category,
++    openai_compatible_healthy,
+     openai_healthy,
+     reasoning_field,
+ )
+@@ -339,6 +350,19 @@ def _provider_api_key(
+     return None
+ 
+ 
++def _provider_setting(
++    providers: Mapping[str, ModelProviderConfig], provider_type: str, key: str
++) -> str | None:
++    """Return a named setting for the first matching provider type, or None."""
++    for provider in providers.values():
++        if provider.provider_type != provider_type:
++            continue
++        value = provider.data.get("settings", {}).get(key)
++        if value:
++            return str(value)
++    return None
++
++
+ def _resolve_www_dir() -> str | None:
+     www_dir = Path(__file__).resolve().parent / "www"
+     if not www_dir.is_dir():
+@@ -670,6 +694,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
+     openai_secret = SecretStr(api_key) if api_key else None
+     gemini_key = conf.get(CONF_GEMINI_API_KEY) or _provider_api_key(providers, "gemini")
+     gemini_secret = SecretStr(gemini_key) if gemini_key else None
++    openai_compatible_base_url = conf.get(
++        CONF_OPENAI_COMPATIBLE_BASE_URL
++    ) or _provider_setting(providers, "openai_compatible", "base_url")
++    openai_compatible_api_key = (
++        conf.get(CONF_OPENAI_COMPATIBLE_API_KEY)
++        or _provider_setting(providers, "openai_compatible", "api_key")
++        or "none"
++    )
+     base_ollama_url = ensure_http_url(conf.get(CONF_OLLAMA_URL, RECOMMENDED_OLLAMA_URL))
+     ollama_chat_url = (
+         ollama_url_for_category(conf, "chat", fallback=base_ollama_url)
+@@ -699,9 +731,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
+         )
+         ollama_health = dict(zip(ollama_urls, ollama_results, strict=False))
+ 
+-    openai_ok, gemini_ok = await asyncio.gather(
++    openai_ok, gemini_ok, openai_compatible_ok = await asyncio.gather(
+         openai_healthy(hass, api_key, timeout_s=health_timeout),
+         gemini_healthy(hass, gemini_key, timeout_s=health_timeout),
++        openai_compatible_healthy(
++            hass,
++            openai_compatible_base_url,
++            openai_compatible_api_key,
++            timeout_s=health_timeout,
++        ),
+     )
+     ollama_any_ok = any(ollama_health.values())
+ 
+@@ -771,6 +809,27 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
+         except Exception:
+             LOGGER.exception("Gemini provider init failed; continuing without it.")
+ 
++    openai_compatible_provider: (
++        RunnableSerializable[LanguageModelInput, BaseMessage] | None
++    ) = None
++    if openai_compatible_ok and openai_compatible_base_url:
++        try:
++            openai_compatible_provider = ChatOpenAI(
++                api_key=SecretStr(openai_compatible_api_key),
++                base_url=openai_compatible_base_url,
++                timeout=120,
++                http_async_client=http_client,
++            ).configurable_fields(
++                model_name=ConfigurableField(id="model_name"),
++                temperature=ConfigurableField(id="temperature"),
++                top_p=ConfigurableField(id="top_p"),
++                max_tokens=ConfigurableField(id="max_tokens"),
++            )
++        except Exception:
++            LOGGER.exception(
++                "OpenAI-compatible provider init failed; continuing without it."
++            )
++
+     # Embeddings: instantiate both, then select based on provider
+     openai_embeddings: OpenAIEmbeddings | None = None
+     if openai_ok:
+@@ -810,6 +869,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
+         except Exception:
+             LOGGER.exception("Gemini embeddings init failed; continuing without them.")
+ 
++    openai_compatible_embeddings: OpenAIEmbeddings | None = None
++    if openai_compatible_ok and openai_compatible_base_url:
++        try:
++            openai_compatible_embeddings = OpenAIEmbeddings(
++                api_key=SecretStr(openai_compatible_api_key),
++                base_url=openai_compatible_base_url,
++                model=options.get(
++                    CONF_OPENAI_COMPATIBLE_EMBEDDING_MODEL,
++                    RECOMMENDED_OPENAI_COMPATIBLE_EMBEDDING_MODEL,
++                ),
++                dimensions=EMBEDDING_MODEL_DIMS,
++            )
++        except Exception:
++            LOGGER.exception(
++                "OpenAI-compatible embeddings init failed; continuing without them."
++            )
++
+     # Choose active embedding provider
+     embedding_model: (
+         OpenAIEmbeddings | OllamaEmbeddings | GoogleGenerativeAIEmbeddings | None
+@@ -820,6 +896,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
+     index_config: PostgresIndexConfig | None = None
+     if embedding_provider == "openai":
+         embedding_model = openai_embeddings
++    elif embedding_provider == "openai_compatible":
++        embedding_model = openai_compatible_embeddings
+     elif embedding_provider == "gemini":
+         embedding_model = gemini_embeddings
+     else:
+@@ -966,6 +1044,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
+                 }
+             }
+         )
++    elif chat_provider == "openai_compatible":
++        chat_model = (openai_compatible_provider or NullChat()).with_config(
++            config={
++                "configurable": {
++                    "model_name": options.get(
++                        CONF_OPENAI_COMPATIBLE_CHAT_MODEL,
++                        RECOMMENDED_OPENAI_COMPATIBLE_CHAT_MODEL,
++                    ),
++                    "temperature": chat_temp,
++                    "top_p": CHAT_MODEL_TOP_P,
++                }
++            }
++        )
+     elif chat_provider == "gemini":
+         chat_model = (gemini_provider or NullChat()).with_config(
+             config={
+@@ -1012,6 +1103,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
+                 }
+             }
+         )
++    elif vlm_provider == "openai_compatible":
++        vision_model = (openai_compatible_provider or NullChat()).with_config(
++            config={
++                "configurable": {
++                    "model_name": options.get(
++                        CONF_OPENAI_COMPATIBLE_VLM, RECOMMENDED_OPENAI_COMPATIBLE_VLM
++                    ),
++                    "temperature": vlm_temp,
++                    "top_p": VLM_TOP_P,
++                }
++            }
++        )
+     elif vlm_provider == "gemini":
+         vision_model = (gemini_provider or NullChat()).with_config(
+             config={
+@@ -1066,6 +1169,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
+                 }
+             }
+         )
++    elif sum_provider == "openai_compatible":
++        summarization_model = (openai_compatible_provider or NullChat()).with_config(
++            config={
++                "configurable": {
++                    "model_name": options.get(
++                        CONF_OPENAI_COMPATIBLE_SUMMARIZATION_MODEL,
++                        RECOMMENDED_OPENAI_COMPATIBLE_SUMMARIZATION_MODEL,
++                    ),
++                    "temperature": sum_temp,
++                    "top_p": SUMMARIZATION_MODEL_TOP_P,
++                }
++            }
++        )
+     elif sum_provider == "gemini":
+         summarization_model = (gemini_provider or NullChat()).with_config(
+             config={
+diff --git a/custom_components/home_generative_agent/agent/graph.py b/custom_components/home_generative_agent/agent/graph.py
+index 421e02c..fee2046 100644
+--- a/custom_components/home_generative_agent/agent/graph.py
++++ b/custom_components/home_generative_agent/agent/graph.py
+@@ -44,6 +44,7 @@ from ..const import (  # noqa: TID252
+     CONF_MAX_TOKENS_IN_CONTEXT,
+     CONF_OLLAMA_CHAT_MODEL,
+     CONF_OPENAI_CHAT_MODEL,
++    CONF_OPENAI_COMPATIBLE_CHAT_MODEL,
+     EMBEDDING_MODEL_PROMPT_TEMPLATE,
+     RECOMMENDED_CRITICAL_ACTIONS,
+     SUMMARIZATION_INITIAL_PROMPT,
+@@ -81,6 +82,8 @@ def _determine_model_name(provider: str, opts: dict[str, Any]) -> str:
+     """Determine model name based on provider and options."""
+     if provider == "openai":
+         return opts.get(CONF_OPENAI_CHAT_MODEL, "")
++    if provider == "openai_compatible":
++        return opts.get(CONF_OPENAI_COMPATIBLE_CHAT_MODEL, "")
+     if provider == "gemini":
+         return opts.get(CONF_GEMINI_CHAT_MODEL, "")
+     return opts.get(CONF_OLLAMA_CHAT_MODEL, "")
+diff --git a/custom_components/home_generative_agent/agent/token_counter.py b/custom_components/home_generative_agent/agent/token_counter.py
+index 233852d..a26cede 100644
+--- a/custom_components/home_generative_agent/agent/token_counter.py
++++ b/custom_components/home_generative_agent/agent/token_counter.py
+@@ -282,7 +282,7 @@ def count_tokens_cross_provider(
+     ollama  -> If model looks like OpenAI (e.g., gpt-oss), use tiktoken;
+                otherwise /api/tokenize (fast) or /api/generate with (exact)
+     """
+-    if provider == "openai":
++    if provider in ("openai", "openai_compatible"):
+         return _count_tokens_tiktoken(messages, model=model)
+ 
+     if provider == "gemini":
+diff --git a/custom_components/home_generative_agent/const.py b/custom_components/home_generative_agent/const.py
+index ba84a7e..d576b10 100644
+--- a/custom_components/home_generative_agent/const.py
++++ b/custom_components/home_generative_agent/const.py
+@@ -272,7 +272,7 @@ CHAT_MODEL_GEMINI_SUPPORTED = Literal[
+ ]
+ 
+ CONF_CHAT_MODEL_PROVIDER = "chat_model_provider"
+-PROVIDERS = Literal["openai", "ollama", "gemini"]
++PROVIDERS = Literal["openai", "openai_compatible", "ollama", "gemini"]
+ RECOMMENDED_CHAT_MODEL_PROVIDER: PROVIDERS = "ollama"
+ 
+ CONF_OLLAMA_CHAT_MODEL = "ollama_chat_model"
+@@ -286,6 +286,9 @@ CHAT_MODEL_REPEAT_PENALTY = 1.05  # Ollama only
+ CONF_OPENAI_CHAT_MODEL = "openai_chat_model"
+ RECOMMENDED_OPENAI_CHAT_MODEL: CHAT_MODEL_OPENAI_SUPPORTED = "gpt-5"
+ 
++CONF_OPENAI_COMPATIBLE_CHAT_MODEL = "openai_compatible_chat_model"
++RECOMMENDED_OPENAI_COMPATIBLE_CHAT_MODEL = "gpt-4o"
++
+ CONF_GEMINI_CHAT_MODEL = "gemini_chat_model"
+ RECOMMENDED_GEMINI_CHAT_MODEL: CHAT_MODEL_GEMINI_SUPPORTED = "gemini-2.5-flash-lite"
+ 
+@@ -332,6 +335,9 @@ VLM_MIRO_STAT = 0  # Ollama only
+ CONF_OPENAI_VLM = "openai_vlm"
+ RECOMMENDED_OPENAI_VLM: VLM_OPENAI_SUPPORTED = "gpt-5-nano"
+ 
++CONF_OPENAI_COMPATIBLE_VLM = "openai_compatible_vlm"
++RECOMMENDED_OPENAI_COMPATIBLE_VLM = "gpt-4o"
++
+ CONF_GEMINI_VLM = "gemini_vlm"
+ RECOMMENDED_GEMINI_VLM: VLM_GEMINI_SUPPORTED = "gemini-2.5-flash-lite"
+ 
+@@ -422,6 +428,9 @@ RECOMMENDED_OPENAI_SUMMARIZATION_MODEL: SUMMARIZATION_MODEL_OPENAI_SUPPORTED = (
+     "gpt-5-nano"
+ )
+ 
++CONF_OPENAI_COMPATIBLE_SUMMARIZATION_MODEL = "openai_compatible_summarization_model"
++RECOMMENDED_OPENAI_COMPATIBLE_SUMMARIZATION_MODEL = "gpt-4o"
++
+ CONF_GEMINI_SUMMARIZATION_MODEL = "gemini_summarization_model"
+ RECOMMENDED_GEMINI_SUMMARIZATION_MODEL: SUMMARIZATION_MODEL_GEMINI_SUPPORTED = (
+     "gemini-2.5-flash-lite"
+@@ -461,6 +470,9 @@ RECOMMENDED_OPENAI_EMBEDDING_MODEL: EMBEDDING_MODEL_OPENAI_SUPPORTED = (
+     "text-embedding-3-small"
+ )
+ 
++CONF_OPENAI_COMPATIBLE_EMBEDDING_MODEL = "openai_compatible_embedding_model"
++RECOMMENDED_OPENAI_COMPATIBLE_EMBEDDING_MODEL = "gpt-4o"
++
+ CONF_GEMINI_EMBEDDING_MODEL = "gemini_embedding_model"
+ RECOMMENDED_GEMINI_EMBEDDING_MODEL: EMBEDDING_MODEL_GEMINI_SUPPORTED = (
+     "gemini-embedding-001"
+@@ -472,6 +484,10 @@ EMBEDDING_MODEL_PROMPT_TEMPLATE = """
+ Represent this sentence for searching relevant passages: {query}
+ """
+ 
++# ---------------- OpenAI-compatible endpoint (edge) ----------------
++CONF_OPENAI_COMPATIBLE_BASE_URL = "openai_compatible_base_url"
++CONF_OPENAI_COMPATIBLE_API_KEY = "openai_compatible_api_key"
++
+ # ---------------- Camera video analyzer ----------------
+ CONF_VIDEO_ANALYZER_MODE = "video_analyzer_mode"
+ VideoAnalyzerMode = Literal["disable", "notify_on_anomaly", "always_notify"]
+@@ -644,16 +660,19 @@ MODEL_CATEGORY_SPECS: dict[str, dict[str, Any]] = {
+         "recommended_temperature": RECOMMENDED_CHAT_MODEL_TEMPERATURE,
+         "providers": {
+             "openai": list(get_args(CHAT_MODEL_OPENAI_SUPPORTED)),
++            "openai_compatible": list(get_args(CHAT_MODEL_OPENAI_SUPPORTED)),
+             "ollama": list(get_args(CHAT_MODEL_OLLAMA_SUPPORTED)),
+             "gemini": list(get_args(CHAT_MODEL_GEMINI_SUPPORTED)),
+         },
+         "recommended_models": {
+             "openai": RECOMMENDED_OPENAI_CHAT_MODEL,
++            "openai_compatible": RECOMMENDED_OPENAI_COMPATIBLE_CHAT_MODEL,
+             "ollama": RECOMMENDED_OLLAMA_CHAT_MODEL,
+             "gemini": RECOMMENDED_GEMINI_CHAT_MODEL,
+         },
+         "model_keys": {
+             "openai": CONF_OPENAI_CHAT_MODEL,
++            "openai_compatible": CONF_OPENAI_COMPATIBLE_CHAT_MODEL,
+             "ollama": CONF_OLLAMA_CHAT_MODEL,
+             "gemini": CONF_GEMINI_CHAT_MODEL,
+         },
+@@ -665,16 +684,19 @@ MODEL_CATEGORY_SPECS: dict[str, dict[str, Any]] = {
+         "recommended_temperature": RECOMMENDED_VLM_TEMPERATURE,
+         "providers": {
+             "openai": list(get_args(VLM_OPENAI_SUPPORTED)),
++            "openai_compatible": list(get_args(VLM_OPENAI_SUPPORTED)),
+             "ollama": list(get_args(VLM_OLLAMA_SUPPORTED)),
+             "gemini": list(get_args(VLM_GEMINI_SUPPORTED)),
+         },
+         "recommended_models": {
+             "openai": RECOMMENDED_OPENAI_VLM,
++            "openai_compatible": RECOMMENDED_OPENAI_COMPATIBLE_VLM,
+             "ollama": RECOMMENDED_OLLAMA_VLM,
+             "gemini": RECOMMENDED_GEMINI_VLM,
+         },
+         "model_keys": {
+             "openai": CONF_OPENAI_VLM,
++            "openai_compatible": CONF_OPENAI_COMPATIBLE_VLM,
+             "ollama": CONF_OLLAMA_VLM,
+             "gemini": CONF_GEMINI_VLM,
+         },
+@@ -686,16 +708,19 @@ MODEL_CATEGORY_SPECS: dict[str, dict[str, Any]] = {
+         "recommended_temperature": RECOMMENDED_SUMMARIZATION_MODEL_TEMPERATURE,
+         "providers": {
+             "openai": list(get_args(SUMMARIZATION_MODEL_OPENAI_SUPPORTED)),
++            "openai_compatible": list(get_args(SUMMARIZATION_MODEL_OPENAI_SUPPORTED)),
+             "ollama": list(get_args(SUMMARIZATION_MODEL_OLLAMA_SUPPORTED)),
+             "gemini": list(get_args(SUMMARIZATION_MODEL_GEMINI_SUPPORTED)),
+         },
+         "recommended_models": {
+             "openai": RECOMMENDED_OPENAI_SUMMARIZATION_MODEL,
++            "openai_compatible": RECOMMENDED_OPENAI_COMPATIBLE_SUMMARIZATION_MODEL,
+             "ollama": RECOMMENDED_OLLAMA_SUMMARIZATION_MODEL,
+             "gemini": RECOMMENDED_GEMINI_SUMMARIZATION_MODEL,
+         },
+         "model_keys": {
+             "openai": CONF_OPENAI_SUMMARIZATION_MODEL,
++            "openai_compatible": CONF_OPENAI_COMPATIBLE_SUMMARIZATION_MODEL,
+             "ollama": CONF_OLLAMA_SUMMARIZATION_MODEL,
+             "gemini": CONF_GEMINI_SUMMARIZATION_MODEL,
+         },
+@@ -707,16 +732,19 @@ MODEL_CATEGORY_SPECS: dict[str, dict[str, Any]] = {
+         "recommended_temperature": None,
+         "providers": {
+             "openai": list(get_args(EMBEDDING_MODEL_OPENAI_SUPPORTED)),
++            "openai_compatible": list(get_args(EMBEDDING_MODEL_OPENAI_SUPPORTED)),
+             "ollama": list(get_args(EMBEDDING_MODEL_OLLAMA_SUPPORTED)),
+             "gemini": list(get_args(EMBEDDING_MODEL_GEMINI_SUPPORTED)),
+         },
+         "recommended_models": {
+             "openai": RECOMMENDED_OPENAI_EMBEDDING_MODEL,
++            "openai_compatible": RECOMMENDED_OPENAI_COMPATIBLE_EMBEDDING_MODEL,
+             "ollama": RECOMMENDED_OLLAMA_EMBEDDING_MODEL,
+             "gemini": RECOMMENDED_GEMINI_EMBEDDING_MODEL,
+         },
+         "model_keys": {
+             "openai": CONF_OPENAI_EMBEDDING_MODEL,
++            "openai_compatible": CONF_OPENAI_COMPATIBLE_EMBEDDING_MODEL,
+             "ollama": CONF_OLLAMA_EMBEDDING_MODEL,
+             "gemini": CONF_GEMINI_EMBEDDING_MODEL,
+         },
+diff --git a/custom_components/home_generative_agent/core/subentry_resolver.py b/custom_components/home_generative_agent/core/subentry_resolver.py
+index f8038c3..a645407 100644
+--- a/custom_components/home_generative_agent/core/subentry_resolver.py
++++ b/custom_components/home_generative_agent/core/subentry_resolver.py
+@@ -49,6 +49,8 @@ from ..const import (  # noqa: TID252
+     CONF_OLLAMA_VLM_KEEPALIVE,
+     CONF_OLLAMA_VLM_URL,
+     CONF_OPENAI_CHAT_MODEL,
++    CONF_OPENAI_COMPATIBLE_API_KEY,
++    CONF_OPENAI_COMPATIBLE_BASE_URL,
+     CONF_OPENAI_EMBEDDING_MODEL,
+     CONF_OPENAI_SUMMARIZATION_MODEL,
+     CONF_OPENAI_VLM,
+@@ -636,6 +638,11 @@ def _apply_provider_to_category(
+     if provider.provider_type == "openai" and (api_key := settings.get("api_key")):
+         options[CONF_API_KEY] = api_key
+ 
++    if provider.provider_type == "openai_compatible":
++        if base_url := settings.get("base_url"):
++            options[CONF_OPENAI_COMPATIBLE_BASE_URL] = base_url
++        options[CONF_OPENAI_COMPATIBLE_API_KEY] = settings.get("api_key", "none")
++
+     if provider.provider_type == "gemini" and (api_key := settings.get("api_key")):
+         options[CONF_GEMINI_API_KEY] = api_key
+ 
+diff --git a/custom_components/home_generative_agent/core/subentry_types.py b/custom_components/home_generative_agent/core/subentry_types.py
+index b093606..5dda13d 100644
+--- a/custom_components/home_generative_agent/core/subentry_types.py
++++ b/custom_components/home_generative_agent/core/subentry_types.py
+@@ -11,6 +11,7 @@ if TYPE_CHECKING:
+ ProviderType = Literal[
+     "ollama",
+     "openai",
++    "openai_compatible",
+     "gemini",
+     "anthropic",
+     "triton",
+diff --git a/custom_components/home_generative_agent/core/utils.py b/custom_components/home_generative_agent/core/utils.py
+index bc533b3..e31fc7f 100644
+--- a/custom_components/home_generative_agent/core/utils.py
++++ b/custom_components/home_generative_agent/core/utils.py
+@@ -328,6 +328,52 @@ async def validate_openai_key(
+             raise CannotConnectError
+ 
+ 
++async def validate_openai_compatible_url(
++    hass: HomeAssistant,
++    base_url: str,
++    api_key: str | None = None,
++    timeout_s: float = 10.0,
++) -> None:
++    """Validate an OpenAI-compatible endpoint by calling its /v1/models path."""
++    if not base_url:
++        raise CannotConnectError
++    url = urljoin(base_url.rstrip("/") + "/", "v1/models")
++    headers: dict[str, str] = {}
++    if api_key and api_key != "none":
++        headers["Authorization"] = f"Bearer {api_key}"
++    client = get_async_client(hass)
++    try:
++        async with async_timeout.timeout(timeout_s):
++            resp = await client.get(url, headers=headers)
++    except (TimeoutError, httpx.RequestError) as err:
++        LOGGER.debug("OpenAI-compatible connectivity exception: %s", err)
++        raise CannotConnectError from err
++    else:
++        if resp.status_code == HTTP_STATUS_UNAUTHORIZED:
++            raise InvalidAuthError
++        if resp.status_code >= HTTP_STATUS_BAD_REQUEST:
++            raise CannotConnectError
++
++
++async def openai_compatible_healthy(
++    hass: HomeAssistant,
++    base_url: str | None,
++    api_key: str | None = None,
++    timeout_s: float = 2.0,
++) -> bool:
++    """Return True if an OpenAI-compatible endpoint is reachable, False otherwise."""
++    if not base_url:
++        LOGGER.warning("OpenAI-compatible health check skipped: missing base URL.")
++        return False
++    try:
++        await validate_openai_compatible_url(hass, base_url, api_key, timeout_s)
++    except (CannotConnectError, InvalidAuthError) as err:
++        LOGGER.warning("OpenAI-compatible health check failed (%s): %s", base_url, err)
++        return False
++    else:
++        return True
++
++
+ async def validate_gemini_key(
+     hass: HomeAssistant, api_key: str, timeout_s: float = 10.0
+ ) -> None:
+diff --git a/custom_components/home_generative_agent/flows/model_provider_subentry_flow.py b/custom_components/home_generative_agent/flows/model_provider_subentry_flow.py
+index 586fdbf..9ec5290 100644
+--- a/custom_components/home_generative_agent/flows/model_provider_subentry_flow.py
++++ b/custom_components/home_generative_agent/flows/model_provider_subentry_flow.py
+@@ -35,6 +35,7 @@ from ..core.utils import (  # noqa: TID252
+     ensure_http_url,
+     validate_gemini_key,
+     validate_ollama_url,
++    validate_openai_compatible_url,
+     validate_openai_key,
+ )
+ 
+@@ -42,6 +43,7 @@ LOGGER = logging.getLogger(__name__)
+ 
+ ProviderNames = {
+     "ollama": "Primary Ollama",
++    "openai_compatible": "Edge-LLM OpenAI Compatible",
+     "openai": "Cloud-LLM OpenAI",
+     "gemini": "Cloud-LLM Gemini",
+ }
+@@ -103,6 +105,9 @@ class ModelProviderSubentryFlow(ConfigSubentryFlow):
+         opts: list[SelectOptionDict] = []
+         if self._deployment == "edge":
+             opts.append(SelectOptionDict(label="Ollama", value="ollama"))
++            opts.append(
++                SelectOptionDict(label="OpenAI Compatible", value="openai_compatible")
++            )
+         if self._deployment == "cloud":
+             opts.extend(
+                 [
+@@ -197,7 +202,7 @@ class ModelProviderSubentryFlow(ConfigSubentryFlow):
+         )
+         return self.async_show_form(step_id="provider", data_schema=schema)
+ 
+-    async def async_step_settings(  # noqa: PLR0912, PLR0915
++    async def async_step_settings(  # noqa: C901, PLR0912, PLR0915
+         self, user_input: dict[str, Any] | None = None
+     ) -> SubentryFlowResult:
+         """Configure provider-specific settings."""
+@@ -221,6 +226,27 @@ class ModelProviderSubentryFlow(ConfigSubentryFlow):
+                     except Exception:
+                         LOGGER.exception("Unexpected exception validating Ollama URL")
+                         errors["base"] = "unknown"
++            elif provider_type == "openai_compatible":
++                base_url = user_input.get("base_url")
++                if not base_url:
++                    errors["base"] = "cannot_connect"
++                else:
++                    settings["base_url"] = ensure_http_url(str(base_url))
++                    api_key = user_input.get(CONF_API_KEY) or "none"
++                    settings["api_key"] = api_key
++                    try:
++                        await validate_openai_compatible_url(
++                            self.hass, settings["base_url"], api_key
++                        )
++                    except CannotConnectError:
++                        errors["base"] = "cannot_connect"
++                    except InvalidAuthError:
++                        errors["base"] = "invalid_auth"
++                    except Exception:
++                        LOGGER.exception(
++                            "Unexpected exception validating OpenAI-compatible URL"
++                        )
++                        errors["base"] = "unknown"
+             elif provider_type == "openai":
+                 api_key = user_input.get(CONF_API_KEY)
+                 if not api_key:
+@@ -294,6 +320,25 @@ class ModelProviderSubentryFlow(ConfigSubentryFlow):
+                     ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT))
+                 }
+             )
++        elif provider_type == "openai_compatible":
++            schema = vol.Schema(
++                {
++                    vol.Required(
++                        "base_url",
++                        description={
++                            "suggested_value": current_settings.get("base_url")
++                        },
++                        default=current_settings.get("base_url") or "",
++                    ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
++                    vol.Optional(
++                        CONF_API_KEY,
++                        description={
++                            "suggested_value": current_settings.get("api_key")
++                        },
++                        default=current_settings.get("api_key") or "",
++                    ): TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD)),
++                }
++            )
+         elif provider_type == "openai":
+             schema = vol.Schema(
+                 {
+diff --git a/custom_components/home_generative_agent/manifest.json b/custom_components/home_generative_agent/manifest.json
+index 75074c0..26d62ad 100644
+--- a/custom_components/home_generative_agent/manifest.json
++++ b/custom_components/home_generative_agent/manifest.json
+@@ -33,5 +33,5 @@
+     "transformers==4.57.1",
+     "langchain-google-genai==3.1.0"
+   ],
+-  "version": "3.2.3"
++  "version": "3.3.0"
+ }
+\ No newline at end of file
+diff --git a/custom_components/home_generative_agent/strings.json b/custom_components/home_generative_agent/strings.json
+index cc31201..d54928f 100644
+--- a/custom_components/home_generative_agent/strings.json
++++ b/custom_components/home_generative_agent/strings.json
+@@ -76,6 +76,9 @@
+             "base_url": "Base URL",
+             "api_key": "API key",
+             "gemini_api_key": "Gemini API key"
++          },
++          "data_description": {
++            "api_key": "Required for OpenAI. For OpenAI Compatible providers, leave blank or enter 'none' if the endpoint requires no authentication."
+           }
+         }
+       },
+diff --git a/custom_components/home_generative_agent/translations/en.json b/custom_components/home_generative_agent/translations/en.json
+index cc31201..d54928f 100644
+--- a/custom_components/home_generative_agent/translations/en.json
++++ b/custom_components/home_generative_agent/translations/en.json
+@@ -76,6 +76,9 @@
+             "base_url": "Base URL",
+             "api_key": "API key",
+             "gemini_api_key": "Gemini API key"
++          },
++          "data_description": {
++            "api_key": "Required for OpenAI. For OpenAI Compatible providers, leave blank or enter 'none' if the endpoint requires no authentication."
+           }
+         }
+       },
+diff --git a/custom_components/home_generative_agent/translations/tr.json b/custom_components/home_generative_agent/translations/tr.json
+index 7b94573..0307aaf 100644
+--- a/custom_components/home_generative_agent/translations/tr.json
++++ b/custom_components/home_generative_agent/translations/tr.json
+@@ -76,6 +76,9 @@
+             "base_url": "Temel URL",
+             "api_key": "API anahtarı",
+             "gemini_api_key": "Gemini API anahtarı"
++          },
++          "data_description": {
++            "api_key": "OpenAI için zorunludur. OpenAI Uyumlu sağlayıcılarda, uç nokta kimlik doğrulaması gerektirmiyorsa boş bırakın veya 'none' girin."
+           }
+         }
+       },
+diff --git a/tests/custom_components/home_generative_agent/test_setup_pool_timeout.py b/tests/custom_components/home_generative_agent/test_setup_pool_timeout.py
+index 8911de1..75b70c2 100644
+--- a/tests/custom_components/home_generative_agent/test_setup_pool_timeout.py
++++ b/tests/custom_components/home_generative_agent/test_setup_pool_timeout.py
+@@ -85,6 +85,7 @@ async def test_setup_closes_pool_on_migration_failure(
+     monkeypatch.setattr(hga_component, "openai_healthy", _false_health)
+     monkeypatch.setattr(hga_component, "gemini_healthy", _false_health)
+     monkeypatch.setattr(hga_component, "ollama_healthy", _false_health)
++    monkeypatch.setattr(hga_component, "openai_compatible_healthy", _false_health)
+     monkeypatch.setattr(hga_component, "_register_services", lambda *_args: None)
+     monkeypatch.setattr(
+         hga_component, "_ensure_default_feature_subentries", lambda *_args: None
+diff --git a/tests/custom_components/home_generative_agent/test_subentries.py b/tests/custom_components/home_generative_agent/test_subentries.py
+index f0aeeed..1b7b0a3 100644
+--- a/tests/custom_components/home_generative_agent/test_subentries.py
++++ b/tests/custom_components/home_generative_agent/test_subentries.py
+@@ -26,12 +26,15 @@ from custom_components.home_generative_agent.const import (
+     CONF_OLLAMA_SUMMARIZATION_URL,
+     CONF_OLLAMA_URL,
+     CONF_OLLAMA_VLM_URL,
++    CONF_OPENAI_COMPATIBLE_API_KEY,
++    CONF_OPENAI_COMPATIBLE_BASE_URL,
+     CONF_SENTINEL_ENABLED,
+     CONF_SENTINEL_INTERVAL_SECONDS,
+     CONF_SUMMARIZATION_MODEL_PROVIDER,
+     CONF_VLM_PROVIDER,
+     CONFIG_ENTRY_VERSION,
+     DOMAIN,
++    MODEL_CATEGORY_SPECS,
+     SUBENTRY_TYPE_FEATURE,
+     SUBENTRY_TYPE_MODEL_PROVIDER,
+     SUBENTRY_TYPE_SENTINEL,
+@@ -41,6 +44,10 @@ from custom_components.home_generative_agent.core.subentry_resolver import (
+     legacy_model_provider_configs,
+     resolve_runtime_options,
+ )
++from custom_components.home_generative_agent.core.utils import (
++    CannotConnectError,
++    InvalidAuthError,
++)
+ from custom_components.home_generative_agent.flows.feature_subentry_flow import (
+     FeatureSubentryFlow,
+ )
+@@ -512,3 +519,218 @@ async def test_migration_creates_provider_and_feature_subentries(
+     assert features
+     assert sentinel
+     assert entry.version == CONFIG_ENTRY_VERSION
++
++
++# ---------------------------------------------------------------------------
++# openai_compatible provider tests
++# ---------------------------------------------------------------------------
++
++
++def _make_compat_flow(hass: Any, entry: DummyEntry) -> ModelProviderSubentryFlow:
++    """Return a ModelProviderSubentryFlow wired up for testing."""
++    flow = ModelProviderSubentryFlow()
++    flow.hass = hass
++    flow.async_show_form = lambda **kwargs: {  # type: ignore[assignment]
++        "type": "form",
++        "data_schema": kwargs["data_schema"],
++        "errors": kwargs.get("errors"),
++    }
++    flow.async_create_entry = lambda **kwargs: {  # type: ignore[assignment]
++        "type": "create_entry",
++        "title": kwargs.get("title"),
++        "data": kwargs.get("data"),
++    }
++    flow.async_abort = lambda **kwargs: {  # type: ignore[assignment]
++        "type": "abort",
++        "reason": kwargs.get("reason"),
++    }
++    flow._schedule_reload = lambda: None  # type: ignore[assignment]
++    _patch_entry(flow, entry)
++    return flow
++
++
++@pytest.mark.asyncio
++async def test_model_provider_flow_creates_openai_compatible(
++    hass: Any, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    """Model provider flow creates an openai_compatible subentry with base_url and api_key."""
++    entry = DummyEntry()
++    flow = _make_compat_flow(hass, entry)
++
++    async def _noop_validate(*_args: Any, **_kwargs: Any) -> None:
++        return None
++
++    monkeypatch.setattr(
++        "custom_components.home_generative_agent.flows.model_provider_subentry_flow.validate_openai_compatible_url",
++        _noop_validate,
++    )
++
++    first = await flow.async_step_user()
++    assert first.get("type") == "form"
++
++    second = await flow.async_step_deployment({"deployment": "edge"})
++    assert second.get("type") == "form"
++
++    third = await flow.async_step_provider(
++        {"provider_type": "openai_compatible", "name": "Edge-LLM OpenAI Compatible"}
++    )
++    assert third.get("type") == "form"
++
++    result = await flow.async_step_settings(
++        {"base_url": "http://localhost:8000", CONF_API_KEY: "sk-local"}
++    )
++    assert result.get("type") == "create_entry"
++    data = result.get("data")
++    assert data is not None
++    assert data["provider_type"] == "openai_compatible"
++    assert data["deployment"] == "edge"
++    settings = data["settings"]
++    assert settings["base_url"] == "http://localhost:8000"
++    assert settings["api_key"] == "sk-local"
++
++
++@pytest.mark.asyncio
++async def test_model_provider_flow_openai_compatible_defaults_api_key(
++    hass: Any, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    """openai_compatible flow stores 'none' when no api_key is supplied."""
++    entry = DummyEntry()
++    flow = _make_compat_flow(hass, entry)
++
++    async def _noop_validate(*_args: Any, **_kwargs: Any) -> None:
++        return None
++
++    monkeypatch.setattr(
++        "custom_components.home_generative_agent.flows.model_provider_subentry_flow.validate_openai_compatible_url",
++        _noop_validate,
++    )
++
++    await flow.async_step_deployment({"deployment": "edge"})
++    await flow.async_step_provider({"provider_type": "openai_compatible"})
++
++    # Omit api_key entirely — should default to "none"
++    result = await flow.async_step_settings({"base_url": "http://vllm:8000"})
++    assert result.get("type") == "create_entry"
++    result_data = result.get("data")
++    assert result_data is not None
++    assert result_data["settings"]["api_key"] == "none"
++
++
++@pytest.mark.asyncio
++async def test_model_provider_flow_openai_compatible_cannot_connect(
++    hass: Any, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    """Validation failure shows cannot_connect error and re-displays the form."""
++    entry = DummyEntry()
++    flow = _make_compat_flow(hass, entry)
++
++    async def _raise_connect(*_args: Any, **_kwargs: Any) -> None:
++        raise CannotConnectError
++
++    monkeypatch.setattr(
++        "custom_components.home_generative_agent.flows.model_provider_subentry_flow.validate_openai_compatible_url",
++        _raise_connect,
++    )
++
++    await flow.async_step_deployment({"deployment": "edge"})
++    await flow.async_step_provider({"provider_type": "openai_compatible"})
++
++    result = await flow.async_step_settings({"base_url": "http://bad-host:8000"})
++    assert result.get("type") == "form"
++    assert (result.get("errors") or {}).get("base") == "cannot_connect"
++
++
++@pytest.mark.asyncio
++async def test_model_provider_flow_openai_compatible_invalid_auth(
++    hass: Any, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    """Validation 401 shows invalid_auth error and re-displays the form."""
++    entry = DummyEntry()
++    flow = _make_compat_flow(hass, entry)
++
++    async def _raise_auth(*_args: Any, **_kwargs: Any) -> None:
++        raise InvalidAuthError
++
++    monkeypatch.setattr(
++        "custom_components.home_generative_agent.flows.model_provider_subentry_flow.validate_openai_compatible_url",
++        _raise_auth,
++    )
++
++    await flow.async_step_deployment({"deployment": "edge"})
++    await flow.async_step_provider({"provider_type": "openai_compatible"})
++
++    result = await flow.async_step_settings(
++        {"base_url": "http://vllm:8000", CONF_API_KEY: "bad-key"}
++    )
++    assert result.get("type") == "form"
++    assert (result.get("errors") or {}).get("base") == "invalid_auth"
++
++
++def test_model_provider_flow_openai_compatible_only_in_edge() -> None:
++    """openai_compatible must appear in edge options but NOT in cloud options."""
++    flow = ModelProviderSubentryFlow()
++
++    flow._deployment = "edge"
++    edge_values = [opt["value"] for opt in flow._provider_options()]
++    assert "openai_compatible" in edge_values
++    assert "ollama" in edge_values
++    assert "openai" not in edge_values  # openai is cloud-only
++
++    flow._deployment = "cloud"
++    cloud_values = [opt["value"] for opt in flow._provider_options()]
++    assert "openai_compatible" not in cloud_values
++    assert "openai" in cloud_values
++    assert "gemini" in cloud_values
++
++
++def test_resolve_runtime_options_openai_compatible() -> None:
++    """openai_compatible subentry propagates base_url and api_key into runtime options."""
++    provider = DummySubentry(
++        "compat1",
++        SUBENTRY_TYPE_MODEL_PROVIDER,
++        "Edge-LLM OpenAI Compatible",
++        {
++            "provider_type": "openai_compatible",
++            "capabilities": ["chat", "vlm", "summarization", "embedding"],
++            "settings": {
++                "base_url": "http://localhost:8000",
++                "api_key": "sk-local",
++            },
++        },
++    )
++    feature = DummySubentry(
++        "feature1",
++        SUBENTRY_TYPE_FEATURE,
++        "Conversation",
++        {
++            "feature_type": "conversation",
++            "model_provider_id": "compat1",
++            "name": "Conversation",
++            CONF_FEATURE_MODEL: {CONF_FEATURE_MODEL_NAME: "gpt-4o"},
++        },
++    )
++    entry = DummyEntry()
++    entry.subentries = {
++        provider.subentry_id: provider,
++        feature.subentry_id: feature,
++    }
++
++    options = resolve_runtime_options(entry)  # type: ignore[arg-type]
++    assert options[CONF_CHAT_MODEL_PROVIDER] == "openai_compatible"
++    assert options[CONF_OPENAI_COMPATIBLE_BASE_URL] == "http://localhost:8000"
++    assert options[CONF_OPENAI_COMPATIBLE_API_KEY] == "sk-local"
++
++
++def test_provider_capabilities_includes_openai_compatible() -> None:
++    """MODEL_CATEGORY_SPECS includes openai_compatible in all four model categories."""
++    for category in ("chat", "vlm", "summarization", "embedding"):
++        spec = MODEL_CATEGORY_SPECS[category]
++        assert "openai_compatible" in spec["providers"], (
++            f"openai_compatible missing from {category} providers"
++        )
++        assert "openai_compatible" in spec["recommended_models"], (
++            f"openai_compatible missing from {category} recommended_models"
++        )
++        assert "openai_compatible" in spec["model_keys"], (
++            f"openai_compatible missing from {category} model_keys"
++        )
+diff --git a/tests/custom_components/home_generative_agent/test_utils.py b/tests/custom_components/home_generative_agent/test_utils.py
+new file mode 100644
+index 0000000..acbfaf5
+--- /dev/null
++++ b/tests/custom_components/home_generative_agent/test_utils.py
+@@ -0,0 +1,234 @@
++# ruff: noqa: S101
++"""Unit tests for core/utils.py — openai_compatible validation helpers."""
++
++from __future__ import annotations
++
++from typing import TYPE_CHECKING, Any
++
++import httpx
++import pytest
++
++from custom_components.home_generative_agent.core.utils import (
++    CannotConnectError,
++    InvalidAuthError,
++    openai_compatible_healthy,
++    validate_openai_compatible_url,
++)
++
++if TYPE_CHECKING:
++    from homeassistant.core import HomeAssistant
++
++# ---------------------------------------------------------------------------
++# Fake HTTP helpers
++# ---------------------------------------------------------------------------
++
++HTTP_OK = 200
++HTTP_UNAUTHORIZED = 401
++HTTP_SERVER_ERROR = 503
++
++
++class _FakeResponse:
++    """Minimal httpx.Response stand-in."""
++
++    def __init__(self, status_code: int) -> None:
++        self.status_code = status_code
++
++
++class _FakeClient:
++    """Async HTTP client that records calls and returns a canned response."""
++
++    def __init__(
++        self,
++        *,
++        status_code: int = HTTP_OK,
++        exc: Exception | None = None,
++    ) -> None:
++        self.status_code = status_code
++        self.exc = exc
++        self.last_url: str | None = None
++        self.last_headers: dict[str, str] = {}
++
++    async def get(
++        self, url: str, headers: dict[str, str] | None = None, **_: Any
++    ) -> _FakeResponse:
++        self.last_url = url
++        self.last_headers = dict(headers or {})
++        if self.exc is not None:
++            raise self.exc
++        return _FakeResponse(self.status_code)
++
++
++# ---------------------------------------------------------------------------
++# validate_openai_compatible_url tests
++# ---------------------------------------------------------------------------
++
++
++@pytest.mark.asyncio
++async def test_validate_openai_compatible_url_empty_raises(hass: HomeAssistant) -> None:
++    """Empty base_url immediately raises CannotConnectError without any network call."""
++    with pytest.raises(CannotConnectError):
++        await validate_openai_compatible_url(hass, "")
++
++
++@pytest.mark.asyncio
++async def test_validate_openai_compatible_url_success_no_key(
++    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    """200 response with no api_key succeeds and omits Authorization header."""
++    client = _FakeClient(status_code=HTTP_OK)
++    monkeypatch.setattr(
++        "custom_components.home_generative_agent.core.utils.get_async_client",
++        lambda _hass: client,
++    )
++
++    await validate_openai_compatible_url(hass, "http://localhost:8000")
++
++    assert client.last_url == "http://localhost:8000/v1/models"
++    assert "Authorization" not in client.last_headers
++
++
++@pytest.mark.asyncio
++async def test_validate_openai_compatible_url_sends_bearer_token(
++    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    """When api_key is provided the Authorization header is included."""
++    client = _FakeClient(status_code=HTTP_OK)
++    monkeypatch.setattr(
++        "custom_components.home_generative_agent.core.utils.get_async_client",
++        lambda _hass: client,
++    )
++
++    await validate_openai_compatible_url(hass, "http://localhost:8000/", "sk-test")
++
++    assert client.last_headers.get("Authorization") == "Bearer sk-test"
++
++
++@pytest.mark.asyncio
++async def test_validate_openai_compatible_url_none_key_omits_header(
++    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    """api_key='none' (the sentinel default) must not send an Authorization header."""
++    client = _FakeClient(status_code=HTTP_OK)
++    monkeypatch.setattr(
++        "custom_components.home_generative_agent.core.utils.get_async_client",
++        lambda _hass: client,
++    )
++
++    await validate_openai_compatible_url(hass, "http://localhost:8000", "none")
++
++    assert "Authorization" not in client.last_headers
++
++
++@pytest.mark.asyncio
++async def test_validate_openai_compatible_url_network_error(
++    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    """httpx.RequestError is re-raised as CannotConnectError."""
++    request = httpx.Request("GET", "http://localhost:8000/v1/models")
++    client = _FakeClient(exc=httpx.ConnectError("refused", request=request))
++    monkeypatch.setattr(
++        "custom_components.home_generative_agent.core.utils.get_async_client",
++        lambda _hass: client,
++    )
++
++    with pytest.raises(CannotConnectError):
++        await validate_openai_compatible_url(hass, "http://localhost:8000")
++
++
++@pytest.mark.asyncio
++async def test_validate_openai_compatible_url_401_raises_invalid_auth(
++    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    """HTTP 401 is mapped to InvalidAuthError."""
++    client = _FakeClient(status_code=HTTP_UNAUTHORIZED)
++    monkeypatch.setattr(
++        "custom_components.home_generative_agent.core.utils.get_async_client",
++        lambda _hass: client,
++    )
++
++    with pytest.raises(InvalidAuthError):
++        await validate_openai_compatible_url(hass, "http://localhost:8000", "bad-key")
++
++
++@pytest.mark.asyncio
++async def test_validate_openai_compatible_url_5xx_raises_cannot_connect(
++    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    """HTTP 5xx is mapped to CannotConnectError."""
++    client = _FakeClient(status_code=HTTP_SERVER_ERROR)
++    monkeypatch.setattr(
++        "custom_components.home_generative_agent.core.utils.get_async_client",
++        lambda _hass: client,
++    )
++
++    with pytest.raises(CannotConnectError):
++        await validate_openai_compatible_url(hass, "http://localhost:8000")
++
++
++# ---------------------------------------------------------------------------
++# openai_compatible_healthy tests
++# ---------------------------------------------------------------------------
++
++
++@pytest.mark.asyncio
++async def test_openai_compatible_healthy_no_url_returns_false(
++    hass: HomeAssistant,
++) -> None:
++    """Missing base_url returns False immediately without any network call."""
++    result = await openai_compatible_healthy(hass, None)
++    assert result is False
++
++
++@pytest.mark.asyncio
++async def test_openai_compatible_healthy_empty_url_returns_false(
++    hass: HomeAssistant,
++) -> None:
++    """Empty string base_url returns False immediately."""
++    result = await openai_compatible_healthy(hass, "")
++    assert result is False
++
++
++@pytest.mark.asyncio
++async def test_openai_compatible_healthy_returns_true_on_success(
++    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    """Reachable endpoint returns True."""
++    client = _FakeClient(status_code=HTTP_OK)
++    monkeypatch.setattr(
++        "custom_components.home_generative_agent.core.utils.get_async_client",
++        lambda _hass: client,
++    )
++
++    result = await openai_compatible_healthy(hass, "http://localhost:8000")
++    assert result is True
++
++
++@pytest.mark.asyncio
++async def test_openai_compatible_healthy_returns_false_on_connect_error(
++    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    """Network error returns False instead of propagating the exception."""
++    request = httpx.Request("GET", "http://localhost:8000/v1/models")
++    client = _FakeClient(exc=httpx.ConnectError("refused", request=request))
++    monkeypatch.setattr(
++        "custom_components.home_generative_agent.core.utils.get_async_client",
++        lambda _hass: client,
++    )
++
++    result = await openai_compatible_healthy(hass, "http://localhost:8000")
++    assert result is False
++
++
++@pytest.mark.asyncio
++async def test_openai_compatible_healthy_returns_false_on_auth_error(
++    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
++) -> None:
++    """HTTP 401 (InvalidAuthError) returns False instead of propagating."""
++    client = _FakeClient(status_code=HTTP_UNAUTHORIZED)
++    monkeypatch.setattr(
++        "custom_components.home_generative_agent.core.utils.get_async_client",
++        lambda _hass: client,
++    )
++
++    result = await openai_compatible_healthy(hass, "http://localhost:8000", "bad-key")
++    assert result is False
