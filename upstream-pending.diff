@@ -1,0 +1,1779 @@
+diff --git a/Makefile b/Makefile
+index 3bfc524..6195c63 100644
+--- a/Makefile
++++ b/Makefile
+@@ -26,10 +26,11 @@ runtimedeps: venv
+ check: venv
+ 	$(PIP) check
+ 
+-# Non-mutating checks: enforce generated runtime requirements + lint
++# Non-mutating checks: enforce generated runtime requirements + lint + format
+ lint: devdeps
+ 	$(PY) scripts/gen_manifest_requirements.py
+ 	git diff --exit-code -- requirements_runtime_manifest.txt
++	$(RUFF) format --check custom_components tests
+ 	$(RUFF) check custom_components tests
+ 
+ # Mutating formatting
+diff --git a/custom_components/home_generative_agent/audit/store.py b/custom_components/home_generative_agent/audit/store.py
+index 5fec2e7..4ddcc0c 100644
+--- a/custom_components/home_generative_agent/audit/store.py
++++ b/custom_components/home_generative_agent/audit/store.py
+@@ -104,6 +104,7 @@ class AuditStore:
+         rule_version: str | None = None,
+         autonomy_level_at_decision: str | None = None,
+         action_policy_path: str | None = None,
++        action_outcome: dict[str, Any] | None = None,
+     ) -> None:
+         """Append a finding audit record."""
+         record = AuditRecord(
+@@ -114,7 +115,7 @@ class AuditStore:
+                 "notified_at": _now_iso(),
+             },
+             user_response=None,
+-            action_outcome=None,
++            action_outcome=action_outcome,
+             # v2 fields
+             data_quality=data_quality,
+             trigger_source=trigger_source,
+diff --git a/custom_components/home_generative_agent/const.py b/custom_components/home_generative_agent/const.py
+index d576b10..6741883 100644
+--- a/custom_components/home_generative_agent/const.py
++++ b/custom_components/home_generative_agent/const.py
+@@ -178,6 +178,9 @@ CONF_SENTINEL_EXECUTION_IDEMPOTENCY_WINDOW_MINUTES = (
+ )
+ RECOMMENDED_SENTINEL_EXECUTION_IDEMPOTENCY_WINDOW_MINUTES: int = 15
+ 
++CONF_SENTINEL_AUTO_EXEC_CANARY_MODE = "sentinel_auto_exec_canary_mode"
++RECOMMENDED_SENTINEL_AUTO_EXEC_CANARY_MODE: bool = False
++
+ # ---- Sentinel suppression upgrades ----
+ CONF_SENTINEL_QUIET_HOURS_START = "sentinel_quiet_hours_start"
+ CONF_SENTINEL_QUIET_HOURS_END = "sentinel_quiet_hours_end"
+diff --git a/custom_components/home_generative_agent/core/utils.py b/custom_components/home_generative_agent/core/utils.py
+index e31fc7f..0deaed3 100644
+--- a/custom_components/home_generative_agent/core/utils.py
++++ b/custom_components/home_generative_agent/core/utils.py
+@@ -501,4 +501,10 @@ def extract_final(raw: str, max_chars: int | None = None) -> str:
+     # Char-limit (if specified)
+     if max_chars is None:
+         return s
+-    return s[:max_chars].rstrip()
++    if len(s) <= max_chars:
++        return s
++    segment = s[:max_chars]
++    last_space = segment.rfind(" ")
++    if last_space > 0:
++        return segment[:last_space].rstrip(" ,;")
++    return segment.rstrip(" ,;")
+diff --git a/custom_components/home_generative_agent/core/video_analyzer.py b/custom_components/home_generative_agent/core/video_analyzer.py
+index b6cb6fa..d913a76 100644
+--- a/custom_components/home_generative_agent/core/video_analyzer.py
++++ b/custom_components/home_generative_agent/core/video_analyzer.py
+@@ -360,11 +360,12 @@ class VideoAnalyzer:
+                 return
+             domain = "notify"
+ 
++        clean_msg = msg.replace("**", "").replace("`", "")
+         await self.hass.services.async_call(
+             domain,
+             service,
+             {
+-                "message": msg,
++                "message": clean_msg,
+                 "title": f"Camera Alert from {camera_name}!",
+                 "data": {"image": str(notify_img_path)},
+             },
+@@ -439,7 +440,7 @@ class VideoAnalyzer:
+         summary = await model.ainvoke(messages)
+         LOGGER.debug("Raw video analyzer summary: %s", summary)
+ 
+-        text = extract_final(getattr(summary, "content", "") or "")
++        text = extract_final(getattr(summary, "content", "") or "", max_chars=150)
+         if text:
+             return text
+ 
+diff --git a/custom_components/home_generative_agent/core/video_helpers.py b/custom_components/home_generative_agent/core/video_helpers.py
+index 3aabc93..420bfef 100644
+--- a/custom_components/home_generative_agent/core/video_helpers.py
++++ b/custom_components/home_generative_agent/core/video_helpers.py
+@@ -238,10 +238,20 @@ def limit_sentences_and_chars(
+     max_chars: int = _MAX_CHARS,
+     max_sentences: int = _MAX_SENTENCES,
+ ) -> str:
+-    """Split on sentence enders, keep up to 2 sentences, then enforce char cap."""
++    """Keep as many sentences as fit within max_chars; trim at word boundary."""
+     parts = re.split(r"(?<=[.!?])\s+", text)
+-    clipped = " ".join(parts[:max_sentences]).strip()
+-    return clipped[:max_chars].rstrip(" ,;")
++    # Try progressively fewer sentences until one fits.
++    for n in range(min(max_sentences, len(parts)), 0, -1):
++        candidate = " ".join(parts[:n]).strip()
++        if len(candidate) <= max_chars:
++            return candidate
++    # Last resort: trim the first sentence at a word boundary.
++    first = parts[0].strip()
++    segment = first[:max_chars]
++    last_space = segment.rfind(" ")
++    if last_space > 0:
++        return segment[:last_space].rstrip(" ,;")
++    return segment.rstrip(" ,;")
+ 
+ 
+ def has_human_terms(text: str) -> bool:
+diff --git a/custom_components/home_generative_agent/explain/llm_explain.py b/custom_components/home_generative_agent/explain/llm_explain.py
+index e30f20c..bdc1810 100644
+--- a/custom_components/home_generative_agent/explain/llm_explain.py
++++ b/custom_components/home_generative_agent/explain/llm_explain.py
+@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING, Any
+ 
+ from langchain_core.messages import HumanMessage, SystemMessage
+ 
++from custom_components.home_generative_agent.core.utils import extract_final
++
+ from .prompts import SYSTEM_PROMPT, USER_PROMPT_TEMPLATE
+ 
+ if TYPE_CHECKING:
+@@ -47,7 +49,7 @@ class LLMExplainer:
+         content = getattr(result, "content", None)
+         if not content:
+             return None
+-        text = _sanitize_text(str(content))
++        text = extract_final(str(content)).replace("**", "").replace("`", "")
+         if not text:
+             return _compact_fallback(finding)
+         if len(text) > MAX_EXPLANATION_CHARS:
+@@ -55,13 +57,6 @@ class LLMExplainer:
+         return text
+ 
+ 
+-def _sanitize_text(text: str) -> str:
+-    """Normalize model text for mobile notifications."""
+-    normalized = text.replace("**", "").replace("`", "")
+-    normalized = normalized.replace("\r", " ").replace("\n", " ")
+-    return re.sub(r"\s+", " ", normalized).strip()
+-
+-
+ def _friendly_type(anomaly_type: str) -> str:
+     known = {
+         "open_entry_while_away": "Open entry while away",
+diff --git a/custom_components/home_generative_agent/explain/prompts.py b/custom_components/home_generative_agent/explain/prompts.py
+index 6ade83e..355ee9f 100644
+--- a/custom_components/home_generative_agent/explain/prompts.py
++++ b/custom_components/home_generative_agent/explain/prompts.py
+@@ -13,12 +13,12 @@ USER_PROMPT_TEMPLATE = (
+     "Evidence (authoritative): {evidence}.\n"
+     "Suggested actions (semantic only): {suggested_actions}.\n"
+     "Output rules:\n"
++    "- HARD LIMIT: 220 characters total. Stop writing when you reach it.\n"
+     "- Max 2 short sentences.\n"
+-    "- Max 220 characters total.\n"
+     "- No markdown, no backticks.\n"
+     "- No rule IDs or raw entity IDs unless unavoidable.\n"
+     "- Include: what happened, and one immediate action.\n"
+     "- Never mention specific clock times or absolute timestamps; "
+     "use relative phrasing like 'recently' or 'a few minutes ago' instead.\n"
+-    "Return only the final message."
++    "Return only the final message. Do not explain your reasoning."
+ )
+diff --git a/custom_components/home_generative_agent/notify/actions.py b/custom_components/home_generative_agent/notify/actions.py
+index 0c2aba4..6e265ec 100644
+--- a/custom_components/home_generative_agent/notify/actions.py
++++ b/custom_components/home_generative_agent/notify/actions.py
+@@ -9,6 +9,7 @@ from homeassistant.helpers import entity_registry as er
+ from homeassistant.util import dt as dt_util
+ 
+ from custom_components.home_generative_agent.const import DOMAIN
++from custom_components.home_generative_agent.core.utils import extract_final
+ from custom_components.home_generative_agent.sentinel.suppression import (
+     SuppressionManager,
+     resolve_prompt,
+@@ -194,9 +195,12 @@ class ActionHandler:
+             service = self._notify_service
+             domain = "notify"
+         # Add notification data to make it actionable when tapped.
++        cleaned = (
++            extract_final(reply_text, max_chars=220).replace("**", "").replace("`", "")
++        )
+         notification_data = {
+             "title": "Home Generative Agent",
+-            "message": reply_text,
++            "message": cleaned,
+             "data": {
+                 # Tag to group with other HGA notifications
+                 "tag": "hga_sentinel_reply",
+@@ -253,8 +257,9 @@ def _build_execute_prompt(finding: AnomalyFinding) -> str:
+         f"Primary device: {friendly}{entity_clause}.{extra_clause} "
+         f"Suggested action: {suggested}. "
+         f"Use GetLiveContext to check current state.{camera_clause} "
+-        f"Then take appropriate action. "
+-        f"Report what you did or if you need additional information."
++        f"Use your Home Assistant tools to take the suggested action now. "
++        f"After acting, reply in 1-2 plain-text sentences under 220 characters: "
++        f"state what you did, or why you could not and what the user should do."
+     )
+ 
+ 
+@@ -286,11 +291,12 @@ def _build_ask_prompt(finding: AnomalyFinding) -> str:
+         f"Primary device: {friendly}{entity_clause}.{extra_clause} "
+         f"Suggested remediation: {suggested}. "
+         f"Use GetLiveContext to check current state if needed.{camera_clause} "
+-        f"Then act. "
+-        f"Do not ask clarifying questions — proceed autonomously based on available "
+-        f"context. If the action requires a PIN or alarm code that you cannot obtain, "
+-        f"report that you cannot complete the action in this automated alert context "
+-        f"and instruct the user to handle it manually via the Home Assistant app."
++        f"Use your Home Assistant tools to perform the suggested action now. "
++        f"Do not ask clarifying questions — proceed autonomously. "
++        f"If the action requires a PIN or alarm code you cannot obtain, "
++        f"report that you cannot complete it; instruct the user to handle it manually. "
++        f"After acting, reply in 1-2 plain-text sentences under 220 characters: "
++        f"state what you did or could not do."
+     )
+ 
+ 
+diff --git a/custom_components/home_generative_agent/sentinel/engine.py b/custom_components/home_generative_agent/sentinel/engine.py
+index 9ce177f..9191884 100644
+--- a/custom_components/home_generative_agent/sentinel/engine.py
++++ b/custom_components/home_generative_agent/sentinel/engine.py
+@@ -16,6 +16,7 @@ from homeassistant.util import dt as dt_util
+ 
+ from custom_components.home_generative_agent.const import (
+     CONF_EXPLAIN_ENABLED,
++    CONF_SENTINEL_AUTO_EXEC_CANARY_MODE,
+     CONF_SENTINEL_AUTONOMY_LEVEL,
+     CONF_SENTINEL_COOLDOWN_MINUTES,
+     CONF_SENTINEL_ENTITY_COOLDOWN_MINUTES,
+@@ -27,6 +28,7 @@ from custom_components.home_generative_agent.const import (
+     CONF_SENTINEL_QUIET_HOURS_START,
+     CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE,
+     CONF_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES,
++    RECOMMENDED_SENTINEL_AUTO_EXEC_CANARY_MODE,
+     RECOMMENDED_SENTINEL_AUTONOMY_LEVEL,
+     RECOMMENDED_SENTINEL_PENDING_PROMPT_TTL_MINUTES,
+     RECOMMENDED_SENTINEL_PRESENCE_GRACE_MINUTES,
+@@ -40,8 +42,8 @@ from custom_components.home_generative_agent.snapshot.builder import (
+ 
+ from .correlator import SentinelCorrelator
+ from .dynamic_rules import evaluate_dynamic_rules
+-from .execution import SentinelExecutionService
+-from .models import CompoundFinding
++from .execution import ACTION_POLICY_AUTO_EXECUTE, SentinelExecutionService
++from .models import AnomalyFinding, CompoundFinding
+ from .rules.appliance_power_duration import AppliancePowerDurationRule
+ from .rules.camera_entry_unsecured import CameraEntryUnsecuredRule
+ from .rules.open_entry_while_away import OpenEntryWhileAwayRule
+@@ -70,7 +72,6 @@ if TYPE_CHECKING:
+     )
+ 
+     from .baseline import SentinelBaselineUpdater
+-    from .models import AnomalyFinding
+     from .notifier import SentinelNotifier
+     from .rule_registry import RuleRegistry
+ 
+@@ -549,10 +550,42 @@ class SentinelEngine:
+                 return
+ 
+         # Execution policy evaluation.
++        canary_mode = bool(
++            self._options.get(
++                CONF_SENTINEL_AUTO_EXEC_CANARY_MODE,
++                RECOMMENDED_SENTINEL_AUTO_EXEC_CANARY_MODE,
++            )
++        )
+         exec_result = self._execution_service.evaluate(
+             finding, snapshot, effective_autonomy, now
+         )
+ 
++        # Canary: record would_auto_execute without acting.
++        canary_would_execute: bool | None = None
++        if canary_mode:
++            canary_result = self._execution_service.evaluate_canary(
++                finding, snapshot, effective_autonomy, now
++            )
++            canary_would_execute = (
++                canary_result.action_policy_path == ACTION_POLICY_AUTO_EXECUTE
++            )
++            if canary_would_execute:
++                LOGGER.info(
++                    "Canary: would auto-execute finding %s (execution_id=%s).",
++                    finding.anomaly_id,
++                    canary_result.execution_id,
++                )
++
++        # Live auto-execute: call HA services when policy approves and canary is off.
++        action_outcome: dict[str, Any] | None = None
++        if (
++            exec_result.action_policy_path == ACTION_POLICY_AUTO_EXECUTE
++            and not canary_mode
++        ):
++            action_outcome = await _auto_execute_finding(
++                self._hass, finding, exec_result.execution_id
++            )
++
+         register_finding(self._suppression.state, finding, now)
+         register_prompt(self._suppression.state, finding, now)
+         await self._suppression.async_save()
+@@ -580,6 +613,8 @@ class SentinelEngine:
+             data_quality=exec_result.data_quality,
+             action_policy_path=exec_result.action_policy_path,
+             execution_id=exec_result.execution_id,
++            canary_would_execute=canary_would_execute,
++            action_outcome=action_outcome,
+             autonomy_level_at_decision=effective_autonomy,
+         )
+ 
+@@ -644,10 +679,34 @@ class SentinelEngine:
+ 
+         best = max(compound.constituent_findings, key=lambda f: f.confidence)
+ 
++        canary_mode = bool(
++            self._options.get(
++                CONF_SENTINEL_AUTO_EXEC_CANARY_MODE,
++                RECOMMENDED_SENTINEL_AUTO_EXEC_CANARY_MODE,
++            )
++        )
+         exec_result = self._execution_service.evaluate(
+             best, snapshot, effective_autonomy, now
+         )
+ 
++        canary_would_execute: bool | None = None
++        if canary_mode:
++            canary_result = self._execution_service.evaluate_canary(
++                best, snapshot, effective_autonomy, now
++            )
++            canary_would_execute = (
++                canary_result.action_policy_path == ACTION_POLICY_AUTO_EXECUTE
++            )
++
++        action_outcome: dict[str, Any] | None = None
++        if (
++            exec_result.action_policy_path == ACTION_POLICY_AUTO_EXECUTE
++            and not canary_mode
++        ):
++            action_outcome = await _auto_execute_finding(
++                self._hass, best, exec_result.execution_id
++            )
++
+         explanation = None
+         if explain_enabled and self._explainer is not None:
+             explanation = await self._explainer.async_explain(best)
+@@ -665,6 +724,8 @@ class SentinelEngine:
+             data_quality=exec_result.data_quality,
+             action_policy_path=exec_result.action_policy_path,
+             execution_id=exec_result.execution_id,
++            canary_would_execute=canary_would_execute,
++            action_outcome=action_outcome,
+             autonomy_level_at_decision=effective_autonomy,
+         )
+ 
+@@ -674,6 +735,79 @@ class SentinelEngine:
+ # ---------------------------------------------------------------------------
+ 
+ 
++async def _auto_execute_finding(
++    hass: Any,
++    finding: AnomalyFinding,
++    execution_id: str | None,
++) -> dict[str, Any]:
++    """
++    Execute suggested actions for *finding* by calling HA services.
++
++    Only actions in ``domain.service`` format are dispatched.  Actions that
++    are advisory strings (no ``.``) are silently skipped.
++
++    Returns an ``action_outcome`` dict with:
++    - ``status``: ``"success"`` | ``"partial"`` | ``"error"`` | ``"no_actions"``
++    - ``actions``: list of per-action result dicts
++    - ``execution_id``: echoed from the caller
++    """
++    service_actions = [a for a in finding.suggested_actions if "." in a]
++
++    if not service_actions:
++        return {
++            "status": "no_actions",
++            "actions": [],
++            "execution_id": execution_id,
++        }
++
++    results: list[dict[str, Any]] = []
++    for action in service_actions:
++        domain, _, service = action.partition(".")
++        service_data: dict[str, Any] = {}
++        if finding.triggering_entities:
++            service_data["entity_id"] = (
++                finding.triggering_entities[0]
++                if len(finding.triggering_entities) == 1
++                else list(finding.triggering_entities)
++            )
++        try:
++            await hass.services.async_call(
++                domain,
++                service,
++                service_data,
++                blocking=False,
++            )
++            results.append({"service": action, "status": "ok", "error": None})
++            LOGGER.info(
++                "Auto-executed service %s for finding %s (execution_id=%s).",
++                action,
++                finding.anomaly_id,
++                execution_id,
++            )
++        except Exception as exc:  # noqa: BLE001
++            results.append({"service": action, "status": "error", "error": str(exc)})
++            LOGGER.warning(
++                "Auto-execute service %s failed for finding %s: %s.",
++                action,
++                finding.anomaly_id,
++                exc,
++            )
++
++    error_count = sum(1 for r in results if r["status"] == "error")
++    if error_count == 0:
++        status = "success"
++    elif error_count < len(results):
++        status = "partial"
++    else:
++        status = "error"
++
++    return {
++        "status": status,
++        "actions": results,
++        "execution_id": execution_id,
++    }
++
++
+ def _coerce_int(value: object | None, default: int) -> int:
+     """Coerce option values to int with a deterministic fallback."""
+     if isinstance(value, bool):
+@@ -753,6 +887,8 @@ async def _append_finding_audit(  # noqa: PLR0913
+     data_quality: str | None = None,
+     action_policy_path: str | None = None,
+     execution_id: str | None = None,
++    canary_would_execute: bool | None = None,
++    action_outcome: dict | None = None,
+     autonomy_level_at_decision: int | None = None,
+ ) -> None:
+     """Append a finding to audit with suppression reason and execution metadata."""
+@@ -768,6 +904,8 @@ async def _append_finding_audit(  # noqa: PLR0913
+             data_quality={"quality": data_quality} if data_quality else None,
+             action_policy_path=action_policy_path,
+             execution_id=execution_id,
++            canary_would_execute=canary_would_execute,
++            action_outcome=action_outcome,
+             autonomy_level_at_decision=(
+                 str(autonomy_level_at_decision)
+                 if autonomy_level_at_decision is not None
+diff --git a/custom_components/home_generative_agent/sentinel/execution.py b/custom_components/home_generative_agent/sentinel/execution.py
+index 1992822..2366e72 100644
+--- a/custom_components/home_generative_agent/sentinel/execution.py
++++ b/custom_components/home_generative_agent/sentinel/execution.py
+@@ -262,6 +262,162 @@ class SentinelExecutionService:
+             block_reason=None,
+         )
+ 
++    def evaluate_canary(  # noqa: PLR0911
++        self,
++        finding: AnomalyFinding,
++        snapshot: FullStateSnapshot,
++        autonomy_level: int,
++        now: datetime,
++    ) -> ActionPolicyResult:
++        """
++        Evaluate execution policy **without mutating any instance state**.
++
++        Identical logic to ``evaluate()`` but uses snapshot copies of the
++        rate-limit and idempotency state so that canary decisions leave no
++        side effects.  Returns the hypothetical ``ActionPolicyResult`` that
++        *would* have been returned if live execution were enabled.
++        """
++        # 1. Autonomy level gate.
++        if autonomy_level < _MIN_AUTO_EXECUTE_LEVEL:
++            return ActionPolicyResult(
++                action_policy_path=ACTION_POLICY_PROMPT_USER,
++                data_quality=DATA_QUALITY_FRESH,
++                data_quality_details={},
++                execution_id=None,
++                block_reason="autonomy_level_below_2",
++            )
++
++        # 2. Data quality gate.
++        dq, dq_details = self._compute_data_quality(finding, snapshot, now)
++        if dq == DATA_QUALITY_UNAVAILABLE:
++            high_sev = finding.severity == "high"
++            path = ACTION_POLICY_PROMPT_USER if high_sev else ACTION_POLICY_BLOCKED
++            return ActionPolicyResult(
++                action_policy_path=path,
++                data_quality=dq,
++                data_quality_details=dq_details,
++                execution_id=None,
++                block_reason="data_quality_unavailable",
++            )
++        if dq == DATA_QUALITY_STALE:
++            return ActionPolicyResult(
++                action_policy_path=ACTION_POLICY_PROMPT_USER,
++                data_quality=dq,
++                data_quality_details=dq_details,
++                execution_id=None,
++                block_reason="data_quality_stale",
++            )
++
++        # 3. Sensitivity gate.
++        if finding.is_sensitive:
++            return ActionPolicyResult(
++                action_policy_path=ACTION_POLICY_HANDOFF,
++                data_quality=dq,
++                data_quality_details=dq_details,
++                execution_id=None,
++                block_reason="finding_sensitive",
++            )
++
++        # 4. Auto-execution enabled gate.
++        auto_enabled = bool(
++            self._options.get(
++                CONF_SENTINEL_AUTO_EXECUTION_ENABLED,
++                RECOMMENDED_SENTINEL_AUTO_EXECUTION_ENABLED,
++            )
++        )
++        if not auto_enabled:
++            return ActionPolicyResult(
++                action_policy_path=ACTION_POLICY_PROMPT_USER,
++                data_quality=dq,
++                data_quality_details=dq_details,
++                execution_id=None,
++                block_reason="auto_execution_disabled",
++            )
++
++        # 5. Confidence gate.
++        min_confidence = float(
++            self._options.get(
++                CONF_SENTINEL_AUTO_EXECUTE_DEFAULT_MIN_CONFIDENCE,
++                RECOMMENDED_SENTINEL_AUTO_EXECUTE_DEFAULT_MIN_CONFIDENCE,
++            )
++        )
++        if finding.confidence < min_confidence:
++            return ActionPolicyResult(
++                action_policy_path=ACTION_POLICY_PROMPT_USER,
++                data_quality=dq,
++                data_quality_details=dq_details,
++                execution_id=None,
++                block_reason="confidence_below_threshold",
++            )
++
++        # 6. Service allowlist gate.
++        if not self._passes_allowlist(finding):
++            return ActionPolicyResult(
++                action_policy_path=ACTION_POLICY_PROMPT_USER,
++                data_quality=dq,
++                data_quality_details=dq_details,
++                execution_id=None,
++                block_reason="service_not_allowlisted",
++            )
++
++        # 7. Rate limit gate — use a read-only snapshot of the action-time list.
++        window_start = now - timedelta(hours=1)
++        recent_snapshot = [t for t in self._recent_action_times if t > window_start]
++        max_per_hour = int(
++            self._options.get(
++                CONF_SENTINEL_AUTO_EXECUTE_MAX_ACTIONS_PER_HOUR,
++                RECOMMENDED_SENTINEL_AUTO_EXECUTE_MAX_ACTIONS_PER_HOUR,
++            )
++        )
++        if len(recent_snapshot) >= max_per_hour:
++            return ActionPolicyResult(
++                action_policy_path=ACTION_POLICY_PROMPT_USER,
++                data_quality=dq,
++                data_quality_details=dq_details,
++                execution_id=None,
++                block_reason="rate_limit_exceeded",
++            )
++
++        # 8. Idempotency gate — use a read-only snapshot of the seen set.
++        policy_version = self._compute_policy_version(autonomy_level, min_confidence)
++        execution_id = self._compute_execution_id(
++            finding.anomaly_id, ACTION_POLICY_AUTO_EXECUTE, policy_version
++        )
++        # Refresh window check against monotonic clock without mutating state.
++        window_minutes = int(
++            self._options.get(
++                CONF_SENTINEL_EXECUTION_IDEMPOTENCY_WINDOW_MINUTES,
++                RECOMMENDED_SENTINEL_EXECUTION_IDEMPOTENCY_WINDOW_MINUTES,
++            )
++        )
++        window_seconds = window_minutes * 60
++        elapsed = time.monotonic() - self._idempotency_window_reset_at
++        idempotency_snapshot = (
++            set() if elapsed >= window_seconds else set(self._idempotency_seen)
++        )
++        if execution_id in idempotency_snapshot:
++            return ActionPolicyResult(
++                action_policy_path=ACTION_POLICY_PROMPT_USER,
++                data_quality=dq,
++                data_quality_details=dq_details,
++                execution_id=execution_id,
++                block_reason="idempotency_duplicate",
++            )
++
++        # All guardrails pass — hypothetical auto-execute (no state mutation).
++        LOGGER.debug(
++            "Canary: would auto-execute finding %s (execution_id=%s).",
++            finding.anomaly_id,
++            execution_id,
++        )
++        return ActionPolicyResult(
++            action_policy_path=ACTION_POLICY_AUTO_EXECUTE,
++            data_quality=dq,
++            data_quality_details=dq_details,
++            execution_id=execution_id,
++            block_reason=None,
++        )
++
+     # ---------------------------------------------------------------------- #
+     # Data quality / staleness
+     # ---------------------------------------------------------------------- #
+diff --git a/custom_components/home_generative_agent/sentinel/notifier.py b/custom_components/home_generative_agent/sentinel/notifier.py
+index 3680c9b..a5475e1 100644
+--- a/custom_components/home_generative_agent/sentinel/notifier.py
++++ b/custom_components/home_generative_agent/sentinel/notifier.py
+@@ -33,6 +33,7 @@ from custom_components.home_generative_agent.const import (
+     CONF_NOTIFY_SERVICE,
+     CONF_SENTINEL_AREA_NOTIFY_MAP,
+ )
++from custom_components.home_generative_agent.core.utils import extract_final
+ from custom_components.home_generative_agent.sentinel.suppression import (
+     SNOOZE_24H,
+     SNOOZE_PERMANENT,
+@@ -401,9 +402,8 @@ def _get_finding_area(
+ 
+ 
+ def _normalize_text(text: str) -> str:
+-    normalized = text.replace("**", "").replace("`", "")
+-    normalized = normalized.replace("\r", " ").replace("\n", " ")
+-    return re.sub(r"\s+", " ", normalized).strip()
++    text = extract_final(text)  # strips <think> blocks and collapses whitespace
++    return text.replace("**", "").replace("`", "")
+ 
+ 
+ def _friendly_type(anomaly_type: str) -> str:
+diff --git a/custom_components/home_generative_agent/sentinel/proposal_templates.py b/custom_components/home_generative_agent/sentinel/proposal_templates.py
+index 551cceb..d283a39 100644
+--- a/custom_components/home_generative_agent/sentinel/proposal_templates.py
++++ b/custom_components/home_generative_agent/sentinel/proposal_templates.py
+@@ -25,6 +25,8 @@ SUPPORTED_TEMPLATES = {
+     # Issue #265 — baseline-driven detectors
+     "baseline_deviation",
+     "time_of_day_anomaly",
++    # Issue #266 — lambda/expression rules
++    "lambda",
+ }
+ 
+ _PERCENT_THRESHOLD_PATTERN = re.compile(r"(\d+(?:\.\d+)?)\s*%")
+diff --git a/custom_components/home_generative_agent/sentinel/triage.py b/custom_components/home_generative_agent/sentinel/triage.py
+index 0f8fe4e..2bd7f34 100644
+--- a/custom_components/home_generative_agent/sentinel/triage.py
++++ b/custom_components/home_generative_agent/sentinel/triage.py
+@@ -28,6 +28,7 @@ from __future__ import annotations
+ import asyncio
+ import json
+ import logging
++import re
+ import time
+ from dataclasses import dataclass
+ from typing import TYPE_CHECKING, Any
+@@ -40,6 +41,8 @@ if TYPE_CHECKING:
+ 
+ LOGGER = logging.getLogger(__name__)
+ 
++_THINK_BLOCK = re.compile(r"<think>.*?(?:</think>|$)", re.IGNORECASE | re.DOTALL)
++
+ # Triage decision tokens.
+ TRIAGE_NOTIFY = "notify"
+ TRIAGE_SUPPRESS = "suppress"
+@@ -80,8 +83,9 @@ Rules:
+ - "suppress" means the alert is routine or low-value and can be skipped.
+ - "triage_confidence" reflects your confidence in this specific decision
+   (0=uncertain, 1=certain).
+-- Keep "summary" under 120 characters.
+-- If you are uncertain, default to "notify"."""
++- HARD LIMIT: "summary" must be under 120 characters. Stop writing when you reach it.
++- If you are uncertain, default to "notify".
++- Return only the JSON object. Do not explain your reasoning."""
+ 
+ _USER_PROMPT_TEMPLATE = """\
+ Security alert to triage:
+@@ -247,8 +251,8 @@ def _parse_response(result: Any, elapsed_ms: int) -> TriageDecision:  # noqa: AR
+     if not isinstance(content, str):
+         content = str(content)
+ 
+-    # Strip markdown fences if the model wrapped the JSON.
+-    content = content.strip()
++    # Strip think blocks, then markdown fences if the model wrapped the JSON.
++    content = _THINK_BLOCK.sub("", content).strip()
+     if content.startswith("```"):
+         content = content.split("```")[1].lstrip("json").strip()
+ 
+diff --git a/sentinel_plan.md b/sentinel_plan.md
+index e7d28ff..4ed8e14 100644
+--- a/sentinel_plan.md
++++ b/sentinel_plan.md
+@@ -64,13 +64,13 @@ rule_version: "1.0"                    # required on all rules
+ - Level 0 Notify-only: no autonomous execution.
+ - Level 1 LLM triage (notify-only): triage may suppress or enrich notifications; no actions executed.
+ - Level 2 Guarded auto-execute: non-sensitive, allowlisted services, `finding.confidence` gate, rate limits, idempotency, and stale-data block.
+-- Level 3 Broad autonomy: expanded execution scope, but PIN/critical actions still blocked from autonomous path unless explicitly policy-approved.
++- Level 3 Broad autonomy: expanded execution scope, but PIN/critical actions still blocked from autonomous path unless explicitly policy-approved. **Level 3 is intentionally not specified in this plan beyond the KPI gate in Section 17. It requires a dedicated design issue after L2 has completed its 30-day burn-in and all L2→L3 KPI thresholds are met.**
+ 
+ ### Runtime kill switch and override lifecycle
+ 
+ - Service: `home_generative_agent.sentinel_set_autonomy_level`.
+ - `level: 0` is the kill-switch call and must take effect immediately without restart.
+-- Service is admin-only and requires explicit `entry_id`.
++- Service is admin-only. Does not require an explicit `entry_id` in the service call; the engine derives the active entry internally.
+ - Runtime override is in-memory by default. If `CONF_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES` is set, override auto-expires and reverts to config default, with an audit event.
+ - `CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE: true` (default) enforces PIN verification for level increases into 2 or 3. Never required for lowering. This is a declared policy with a fixed default, not optional hardening.
+ 
+@@ -174,6 +174,7 @@ rule_version: "1.0"                    # required on all rules
+ - Attach camera snapshots where available and permissioned.
+ - Digest mode for burst findings.
+ - Structured snooze options (`24h`, `7d`, `always`) shown in notification and written through suppression path (Section 8).
++- False Alarm action button included on every notification; tapping it sets `user_response.false_positive = True` in the audit record. *(Implemented)*
+ - Sensitive finding notifications may include occupant context from `derived.people_away` when policy allows.
+ 
+ ---
+@@ -288,7 +289,7 @@ The following architecture refactors are required before the feature sequence ca
+    - Do not rely on mutating static `options` payload for runtime changes.
+ 2. Autonomy service authorization layer (depends on 1):
+    - Gate `home_generative_agent.sentinel_set_autonomy_level` with admin-only checks.
+-   - Require explicit `entry_id` targeting.
++   - Entry is resolved internally; callers do not pass `entry_id` in the service call.
+    - Enforce PIN verification for increases into levels 2/3 when `CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE=true`.
+ 3. Structured suppression decision model:
+    - Replace boolean suppression outcome with structured result (`suppressed`, `reason_code`, `expires_at`, metadata).
+@@ -354,7 +355,7 @@ Prerequisite: all items in Section 15 are completed.
+ 11. Level 2 guarded auto-execute live mode (allowlist, confidence thresholds, stale-data block, rate limits, idempotency).
+ 12. Temporal/baseline anomaly detectors (depends on step 1).
+ 13. Lambda rule review and approval UI; engine skips `lambda_pending_review`.
+-14. Level 3 expansion only after burn-in KPIs and stability gates are met.
++14. Level 3 expansion only after burn-in KPIs and stability gates are met. *(Not specified in this plan — requires a dedicated design issue once L2 is proven in production.)*
+ 
+ ---
+ 
+@@ -375,7 +376,7 @@ Prerequisite: all items in Section 15 are completed.
+ 
+ - Canary mode (L1 → L2 sub-phase) has no KPI gate. It exists solely for operator confidence - review `canary_would_execute` decisions in the audit log before enabling live execution. The L1 → L2 KPI thresholds apply only to live execution data.
+ - Rolling KPI values are exposed on health entity for operator visibility.
+-- One-click rollback to Level 0 via `sentinel_set_autonomy_level` service call (`level: 0`, explicit `entry_id`).
++- One-click rollback to Level 0 via `sentinel_set_autonomy_level` service call (`level: 0`; no `entry_id` required in call).
+ 
+ ---
+ 
+@@ -427,7 +428,7 @@ Autonomy progression:
+ | 6 | Suppression | Snooze routing, per-person presence grace, quiet-hours, reason codes |
+ | 7 | Triage | Allowlist/sanitized evidence enforcement, timeout fail-open, triage_confidence audit-only |
+ | 8 | Notification UX | Snooze writes to suppression, `always` confirmation required |
+-| 9 | Execution service + runtime overrides | Admin-only level changes, explicit `entry_id`, TTL expiry revert to default |
++| 9 | Execution service + runtime overrides | Admin-only level changes, TTL expiry revert to default |
+ | 10 | Canary mode | `would_auto_execute` accuracy, no side effects |
+ | 11 | Auto-exec guardrails | Allowlist/confidence/stale/rate/idempotency/PIN gate enforcement |
+ | 12 | Temporal/baseline detectors | Deviation trigger correctness, baseline freshness handling |
+@@ -440,11 +441,32 @@ Autonomy progression:
+ 
+ Each issue is a self-contained PR targeting main. Every PR must leave tests green and behavior backward-compatible unless the issue explicitly permits a behavioral change.
+ 
++**Status as of 2026-03-05:** Issues #1–#15 have implementation complete and tests passing. Issues #13 and #15 remain open pending live/production verification. One unplanned issue (#9b, GitHub #269) covered pending-prompt TTL separately. See individual entries below for GitHub issue numbers.
++
++| Plan # | GitHub # | Status | Title |
++|---|---|---|---|
++| #1 | #251 | Done | Structured suppression decision model |
++| #2 | #253 | Done | Snapshot per-person presence |
++| #3 | #254 | Done | Versioned audit schema and config surface |
++| #4 | #255 | Done | Runtime autonomy level and kill-switch service |
++| #5 | #256 | Done | Trigger scheduler |
++| #6 | #257 | Done | Event-driven triggering |
++| #7 | #258 | Done | Correlation pass |
++| #8 | #259 | Done | Decouple execution service |
++| #9 | #260 | Done | Suppression upgrades |
++| #9b | #269 | Done | Pending-prompt TTL (unplanned follow-on) |
++| #10 | #261 | Done | Notification routing and UX |
++| #11 | #262 | Done | Level 1: LLM triage |
++| #12 | #263 | Done | Level 2: Canary mode |
++| #13 | #264 | **Open (pending live test)** | Level 2: Live auto-execute |
++| #14 | #265 | Done | Baseline storage and temporal detectors |
++| #15 | #266 | **Open (pending live test)** | Lambda rule review/approval UI |
++
+ ---
+ 
+ ### Milestone 0 — Parallel Refactors (no external behavioral change; all four may be opened and merged in any order)
+ 
+-**Issue #1 — Structured suppression decision model**
++**Issue #1 — Structured suppression decision model** *(Done — GitHub #251)*
+ 
+ - Plan coverage: Prerequisite 3, Section 8
+ - Scope: Change `should_suppress()` to return a `SuppressionDecision(suppress: bool, reason_code: str, context: dict)` dataclass. Update all call sites in `engine.py`. No change to suppression logic.
+@@ -453,7 +475,7 @@ Each issue is a self-contained PR targeting main. Every PR must leave tests gree
+ - Size: S
+ - Dependencies: none
+ 
+-**Issue #2 — Snapshot per-person presence**
++**Issue #2 — Snapshot per-person presence** *(Done — GitHub #253)*
+ 
+ - Plan coverage: Prerequisite 8, Section 15 (multi-occupant)
+ - Scope: Add `people_home: list[str]` and `people_away: list[str]` to `DerivedContext` TypedDict and `SNAPSHOT_SCHEMA`. Keep `anyone_home` and all existing fields; new fields default to `[]` if person-tracking entities are unavailable. Update `snapshot/builder.py` to populate them.
+@@ -462,7 +484,7 @@ Each issue is a self-contained PR targeting main. Every PR must leave tests gree
+ - Size: S
+ - Dependencies: none
+ 
+-**Issue #3 — Versioned audit schema and config surface**
++**Issue #3 — Versioned audit schema and config surface** *(Done — GitHub #254)*
+ 
+ - Plan coverage: Prerequisite 5 (partial), Prerequisite 6 (partial), Section 12, Section 13
+ - Scope: Expand `AuditRecord` with the full field set from Section 12 (`data_quality`, `trigger_source`, `suppression_reason_code`, `triage_confidence`, `canary_would_execute`, `execution_id`, `rule_version`, `autonomy_level_at_decision`). Add `version: int = 1` field. Implement v1→v2 migration in `audit/store.py`. Add `CONF_AUDIT_HOT_MAX_RECORDS`, `CONF_AUDIT_ARCHIVAL_BACKLOG_MAX`, `CONF_AUDIT_RETENTION_DAYS`, `CONF_AUDIT_HIGH_RETENTION_DAYS` to `const.py`. Populate new fields with `None` / sentinel defaults at all existing call sites.
+@@ -471,10 +493,10 @@ Each issue is a self-contained PR targeting main. Every PR must leave tests gree
+ - Size: M
+ - Dependencies: none
+ 
+-**Issue #4 — Runtime autonomy level and kill-switch service**
++**Issue #4 — Runtime autonomy level and kill-switch service** *(Done — GitHub #255)*
+ 
+ - Plan coverage: Prerequisite 1, Prerequisite 2, Section 3, Section 5 (kill switch)
+-- Scope: Register `home_generative_agent.sentinel_set_autonomy_level` HA service (admin-only, requires `entry_id` and `level: 0|1|2|3`). Read runtime level from in-memory override (TTL-bounded) falling back to `CONF_SENTINEL_AUTONOMY_LEVEL`. Add `CONF_SENTINEL_AUTONOMY_LEVEL`, `CONF_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES`, `CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE` to `const.py`. No behavioral change to detection logic.
++- Scope: Register `home_generative_agent.sentinel_set_autonomy_level` HA service (admin-only, `level: 0|1|2|3`; entry resolved internally, no `entry_id` in call schema). Read runtime level from in-memory override (TTL-bounded) falling back to `CONF_SENTINEL_AUTONOMY_LEVEL`. Add `CONF_SENTINEL_AUTONOMY_LEVEL`, `CONF_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES`, `CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE` to `const.py`. No behavioral change to detection logic.
+ - Files: `__init__.py`, `sentinel/engine.py`, `const.py`, `services.yaml`
+ - Tests: Service call sets level; TTL expiry reverts to config default; level increase blocked without PIN when required; level decrease never requires PIN.
+ - Size: M
+@@ -484,7 +506,7 @@ Each issue is a self-contained PR targeting main. Every PR must leave tests gree
+ 
+ ### Milestone 1 — Pipeline Infrastructure (Issues #5–#8; merge in order)
+ 
+-**Issue #5 — Trigger scheduler**
++**Issue #5 — Trigger scheduler** *(Done — GitHub #256)*
+ 
+ - Plan coverage: Prerequisite 7, Section 6
+ - Scope: Extract `SentinelTriggerScheduler` with bounded queue (max 10), coalescing window (5 s default), TTL (30 s), deterministic drop policy (prefer security-critical), and `asyncio.Lock` single-flight. Wire into `engine._run_loop()` without changing polling behavior.
+@@ -493,7 +515,7 @@ Each issue is a self-contained PR targeting main. Every PR must leave tests gree
+ - Size: M
+ - Dependencies: none (can open alongside Milestone 0 issues)
+ 
+-**Issue #6 — Event-driven triggering**
++**Issue #6 — Event-driven triggering** *(Done — GitHub #257)*
+ 
+ - Plan coverage: Prerequisite 7 (complete), Section 6
+ - Scope: Subscribe to HA state-change events for sentinel-watched entity IDs. On qualifying change, enqueue a trigger via `SentinelTriggerScheduler`. Retain polling as fallback when queue is empty.
+@@ -502,7 +524,7 @@ Each issue is a self-contained PR targeting main. Every PR must leave tests gree
+ - Size: M
+ - Dependencies: Issue #5
+ 
+-**Issue #7 — Correlation pass**
++**Issue #7 — Correlation pass** *(Done — GitHub #258)*
+ 
+ - Plan coverage: Section 7
+ - Scope: Implement `SentinelCorrelator.correlate(findings)` producing `CompoundFinding` for related findings within a single `_run_once()` call. Compound findings are immutable once emitted. Wire into pipeline between rule evaluation and suppression.
+@@ -511,7 +533,7 @@ Each issue is a self-contained PR targeting main. Every PR must leave tests gree
+ - Size: M
+ - Dependencies: none (can open alongside Issue #5)
+ 
+-**Issue #8 — Decouple execution service**
++**Issue #8 — Decouple execution service** *(Done — GitHub #259)*
+ 
+ - Plan coverage: Prerequisite 4, Section 4 (guardrails), Section 2 (staleness validation)
+ - Scope: Extract `SentinelExecutionService` from `engine.py`. Implement idempotency key (`sha256(anomaly_id + action_policy_path + policy_version + window_bucket)`), allowlist enforcement, sensitivity-flag block, stale-data block, rate limiter, and PIN gate stub. `policy_version` computed as `sha256(json.dumps({...}, sort_keys=True))` over global policy config fields including `effective_rule_threshold`. Add staleness validation pass using `CONF_SENTINEL_STALENESS_THRESHOLD_SECONDS`.
+@@ -524,16 +546,16 @@ Each issue is a self-contained PR targeting main. Every PR must leave tests gree
+ 
+ ### Milestone 2 — Suppression and Notification (Issues #9–#10; merge in order)
+ 
+-**Issue #9 — Suppression upgrades**
++**Issue #9 — Suppression upgrades** *(Done — GitHub #260; pending-prompt TTL done separately as GitHub #269)*
+ 
+ - Plan coverage: Section 8 (full), Prerequisite 3 (complete), Prerequisite 8 (consumed)
+-- Scope: Add snooze routing (snooze writes to `SuppressionState` not `pending_prompts`), per-person presence-grace window, quiet-hours enforcement, `SuppressionState.version` with v1→v2 migration, read-only compatibility mode on downgrade. All suppression paths emit `suppression_reason_code` via `SuppressionDecision`.
++- Scope: Add snooze routing (snooze writes to `SuppressionState` not `pending_prompts`), per-person presence-grace window, quiet-hours enforcement, `SuppressionState.version` with v1→v2 migration, read-only compatibility mode on downgrade. All suppression paths emit `suppression_reason_code` via `SuppressionDecision`. Pending-prompt TTL and expiry was implemented as a follow-on PR (GitHub #269/PR #273).
+ - Files: `sentinel/suppression.py`, `sentinel/engine.py`
+ - Tests: Snooze-as-suppression; per-person grace (occupied vs. vacated areas); quiet-hours; reason codes for all paths; migration and downgrade-safe read.
+ - Size: M
+ - Dependencies: Issues #1, #2
+ 
+-**Issue #10 — Notification routing and UX**
++**Issue #10 — Notification routing and UX** *(Done — GitHub #261)*
+ 
+ - Plan coverage: Section 9
+ - Scope: Implement `SentinelNotifier` with `always` confirmation guard, per-area/per-person routing, snooze action that calls suppression, and `is_sensitive` redaction in notification text. Wire into pipeline after suppression pass.
+@@ -546,7 +568,7 @@ Each issue is a self-contained PR targeting main. Every PR must leave tests gree
+ 
+ ### Milestone 3 — Autonomy Features (Issues #11–#13; strictly sequential)
+ 
+-**Issue #11 — Level 1: LLM triage**
++**Issue #11 — Level 1: LLM triage** *(Done — GitHub #262)*
+ 
+ - Plan coverage: Section 7 (triage pass)
+ - Scope: Implement `SentinelTriageService`. Build triage prompt from the Section 6 allowlist only (`type`, `severity`, `confidence`, `is_sensitive`, `entity_count`, `suggested_actions_count`) plus explicitly allowed sanitized evidence fields (`is_night`, `anyone_home`, `recognized_people_count`, `last_changed_age_seconds`) when available. Timeout fail-open (treat as `notify`). Record `triage_confidence` in `AuditRecord` (audit-only; never gates execution). Triage output gates only `notify` vs. `suppress`.
+@@ -555,7 +577,7 @@ Each issue is a self-contained PR targeting main. Every PR must leave tests gree
+ - Size: M
+ - Dependencies: Issues #3, #8
+ 
+-**Issue #12 — Level 2: Canary mode**
++**Issue #12 — Level 2: Canary mode** *(Done — GitHub #263)*
+ 
+ - Plan coverage: Section 3 (canary), Section 17 (KPI)
+ - Scope: When `CONF_SENTINEL_AUTO_EXEC_CANARY_MODE=true`, compute `would_auto_execute` using full guardrail logic and record in `AuditRecord.canary_would_execute`. No action taken. No KPI gate for canary-to-live transition (operator decides). False-positive rate notification-quality KPI still applies during canary.
+@@ -564,7 +586,7 @@ Each issue is a self-contained PR targeting main. Every PR must leave tests gree
+ - Size: S
+ - Dependencies: Issues #8, #11
+ 
+-**Issue #13 — Level 2: Live auto-execute**
++**Issue #13 — Level 2: Live auto-execute** *(Open — GitHub #264)*
+ 
+ - Plan coverage: Section 4, Section 17 (L1→L2 action KPIs)
+ - Scope: Enable live auto-execution behind all guardrails from Issue #8. Idempotency key prevents double-fire. Rate limiter enforced. L1→L2 rollout thresholds from Section 17 (false-positive rate < 10% notification-quality gate; action KPIs N/A during canary) and zero unintended irreversible actions must be met before enabling in production — enforced by rollout process, not code gate.
+@@ -577,7 +599,11 @@ Each issue is a self-contained PR targeting main. Every PR must leave tests gree
+ 
+ ### Milestone 4 — Advanced Rules and Level 3 (Issues #14–#15; merge in order)
+ 
+-**Issue #14 — Baseline storage and temporal detectors**
++> **Note:** Issue #14 was completed alongside Milestone 2/3 work (GitHub #265, merged 2026-03-01), ahead of the original milestone order. This was valid since its only dependency is Issue #8. Issue #15 can proceed since its dependency (#14) is done.
++>
++> **Level 3 is not implemented in this milestone.** The milestone title reflects the original roadmap grouping; Issues #14 and #15 are prerequisites for advanced autonomy but do not constitute Level 3 itself. Level 3 requires a separate design issue that should only be opened after L2 has completed its 30-day minimum stable period and all L2→L3 KPI thresholds from Section 17 are met in production.
++
++**Issue #14 — Baseline storage and temporal detectors** *(Done — GitHub #265)*
+ 
+ - Plan coverage: Section 10 (baseline rules), Section 16 step 1
+ - Scope: Implement `SentinelBaselineUpdater` (15-min cadence) writing rolling stats to `sentinel_baselines` PostgreSQL table. Implement temporal-deviation and time-of-day anomaly detector templates that read from baseline. Add `baseline_freshness` check to staleness validation.
+@@ -586,7 +612,7 @@ Each issue is a self-contained PR targeting main. Every PR must leave tests gree
+ - Size: L
+ - Dependencies: Issue #8
+ 
+-**Issue #15 — Lambda rule review/approval UI**
++**Issue #15 — Lambda rule review/approval UI** *(Open — GitHub #266)*
+ 
+ - Plan coverage: Section 11 (lambda rules), Section 19 (lambda approval gate test)
+ - Scope: Implement lambda rule receipt: AST validation at receipt (reject non-compliant immediately), status set to `pending`. Implement approval service call (`sentinel_approve_rule`) that transitions `pending` → `active` in registry. Pending rules are skipped by the evaluation loop. Add Lovelace card stub for review UI or document manual service-call workflow.
+diff --git a/tests/custom_components/home_generative_agent/test_execution_service.py b/tests/custom_components/home_generative_agent/test_execution_service.py
+index d9ed78d..ca4325f 100644
+--- a/tests/custom_components/home_generative_agent/test_execution_service.py
++++ b/tests/custom_components/home_generative_agent/test_execution_service.py
+@@ -434,3 +434,95 @@ def test_policy_version_changes_on_config_change() -> None:
+     v1 = svc._compute_policy_version(2, 0.70)
+     v2 = svc._compute_policy_version(3, 0.70)  # autonomy level changed
+     assert v1 != v2
++
++
++# ---------------------------------------------------------------------------
++# 10. Canary mode — evaluate_canary() has no side effects
++# ---------------------------------------------------------------------------
++
++
++def test_canary_no_side_effects_when_would_auto_execute() -> None:
++    """evaluate_canary() returns auto_execute but does not mutate rate/idempotency state."""
++    recent = "2025-01-01T00:59:50+00:00"
++    snapshot = _make_snapshot(last_changed=recent)
++    svc = SentinelExecutionService(
++        {
++            **_FULL_OPTIONS,
++            CONF_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES: [],
++        }
++    )
++    finding = _make_finding(
++        anomaly_id="canary_happy",
++        confidence=0.95,
++        suggested_actions=[],
++    )
++
++    # Capture state before canary call.
++    times_before = list(svc._recent_action_times)
++    seen_before = set(svc._idempotency_seen)
++
++    result = svc.evaluate_canary(finding, snapshot, 2, _NOW)
++
++    assert result.action_policy_path == ACTION_POLICY_AUTO_EXECUTE
++    assert result.execution_id is not None
++    # State must be unchanged.
++    assert svc._recent_action_times == times_before
++    assert svc._idempotency_seen == seen_before
++
++
++def test_canary_distinguishable_from_live() -> None:
++    """Live evaluate() mutates state; evaluate_canary() does not."""
++    recent = "2025-01-01T00:59:50+00:00"
++    snapshot = _make_snapshot(last_changed=recent)
++    svc = SentinelExecutionService(
++        {
++            **_FULL_OPTIONS,
++            CONF_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES: [],
++        }
++    )
++    finding = _make_finding(
++        anomaly_id="live_vs_canary",
++        confidence=0.95,
++        suggested_actions=[],
++    )
++
++    # Canary first — no state change.
++    canary = svc.evaluate_canary(finding, snapshot, 2, _NOW)
++    assert canary.action_policy_path == ACTION_POLICY_AUTO_EXECUTE
++    assert not svc._recent_action_times
++    assert not svc._idempotency_seen
++
++    # Live evaluate — mutates state.
++    live = svc.evaluate(finding, snapshot, 2, _NOW)
++    assert live.action_policy_path == ACTION_POLICY_AUTO_EXECUTE
++    assert len(svc._recent_action_times) == 1
++    assert live.execution_id in svc._idempotency_seen
++
++
++def test_canary_rate_limit_is_read_only() -> None:
++    """Canary respects rate limit without consuming the slot."""
++    recent = "2025-01-01T00:59:50+00:00"
++    snapshot = _make_snapshot(last_changed=recent)
++    max_actions = 2
++    svc = SentinelExecutionService(
++        {
++            **_FULL_OPTIONS,
++            CONF_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES: [],
++            CONF_SENTINEL_AUTO_EXECUTE_MAX_ACTIONS_PER_HOUR: max_actions,
++        }
++    )
++    # Fill rate-limit bucket with live calls.
++    for i in range(max_actions):
++        f = _make_finding(anomaly_id=f"fill_{i}", confidence=0.95, suggested_actions=[])
++        svc.evaluate(f, snapshot, 2, _NOW)
++    assert len(svc._recent_action_times) == max_actions
++
++    # Canary on a new finding should report rate_limit_exceeded without mutating.
++    new_finding = _make_finding(
++        anomaly_id="new_canary", confidence=0.95, suggested_actions=[]
++    )
++    result = svc.evaluate_canary(new_finding, snapshot, 2, _NOW)
++    assert result.action_policy_path == ACTION_POLICY_PROMPT_USER
++    assert result.block_reason == "rate_limit_exceeded"
++    # Still the same count — canary didn't add another slot.
++    assert len(svc._recent_action_times) == max_actions
+diff --git a/tests/custom_components/home_generative_agent/test_llm_explain.py b/tests/custom_components/home_generative_agent/test_llm_explain.py
+index 1b0b9a2..c88ba97 100644
+--- a/tests/custom_components/home_generative_agent/test_llm_explain.py
++++ b/tests/custom_components/home_generative_agent/test_llm_explain.py
+@@ -61,6 +61,18 @@ async def test_async_explain_sanitizes_markdown() -> None:
+     assert result == "Door open at night. Close it now."
+ 
+ 
++@pytest.mark.asyncio
++async def test_async_explain_strips_think_blocks() -> None:
++    """<think> reasoning blocks emitted by qwen3/qwen3.5 must be stripped."""
++    content = "<think>reasoning here</think>Door open recently. Close it now."
++    explainer = LLMExplainer(DummyModel(content))
++    result = await explainer.async_explain(_finding())
++    assert result is not None
++    assert "<think>" not in result
++    assert "reasoning here" not in result
++    assert "Door open recently." in result
++
++
+ @pytest.mark.asyncio
+ async def test_async_explain_falls_back_when_too_long() -> None:
+     long_text = "very long explanation " * 30
+diff --git a/tests/custom_components/home_generative_agent/test_sentinel_auto_execute.py b/tests/custom_components/home_generative_agent/test_sentinel_auto_execute.py
+new file mode 100644
+index 0000000..9445350
+--- /dev/null
++++ b/tests/custom_components/home_generative_agent/test_sentinel_auto_execute.py
+@@ -0,0 +1,197 @@
++# ruff: noqa: S101
++"""Tests for Level 2 live auto-execute — Issue #264."""
++
++from __future__ import annotations
++
++from typing import Any
++from unittest.mock import AsyncMock, MagicMock
++
++import pytest
++
++from custom_components.home_generative_agent.sentinel.engine import (
++    _auto_execute_finding,
++)
++from custom_components.home_generative_agent.sentinel.models import AnomalyFinding
++
++# ---------------------------------------------------------------------------
++# Helpers
++# ---------------------------------------------------------------------------
++
++
++def _make_finding(
++    *,
++    anomaly_id: str = "f1",
++    suggested_actions: list[str] | None = None,
++    triggering_entities: list[str] | None = None,
++) -> AnomalyFinding:
++    return AnomalyFinding(
++        anomaly_id=anomaly_id,
++        type="test_rule",
++        severity="medium",
++        confidence=0.9,
++        triggering_entities=(
++            ["lock.front_door"] if triggering_entities is None else triggering_entities
++        ),
++        evidence={},
++        suggested_actions=suggested_actions if suggested_actions is not None else [],
++        is_sensitive=False,
++    )
++
++
++def _make_hass(*, service_raises: Exception | None = None) -> MagicMock:
++    hass = MagicMock()
++    if service_raises is not None:
++        hass.services.async_call = AsyncMock(side_effect=service_raises)
++    else:
++        hass.services.async_call = AsyncMock(return_value=None)
++    return hass
++
++
++# ---------------------------------------------------------------------------
++# _auto_execute_finding helper
++# ---------------------------------------------------------------------------
++
++
++@pytest.mark.asyncio
++async def test_auto_execute_no_actions_returns_no_actions() -> None:
++    """Finding with no suggested_actions yields status='no_actions'."""
++    hass = _make_hass()
++    finding = _make_finding(suggested_actions=[])
++
++    result = await _auto_execute_finding(hass, finding, "exec_001")
++
++    assert result["status"] == "no_actions"
++    assert result["actions"] == []
++    assert result["execution_id"] == "exec_001"
++    hass.services.async_call.assert_not_called()
++
++
++@pytest.mark.asyncio
++async def test_auto_execute_advisory_only_skips_all() -> None:
++    """Actions without '.' are advisory text and should not trigger HA service calls."""
++    hass = _make_hass()
++    finding = _make_finding(suggested_actions=["lock_entity", "close_entry"])
++
++    result = await _auto_execute_finding(hass, finding, "exec_002")
++
++    assert result["status"] == "no_actions"
++    hass.services.async_call.assert_not_called()
++
++
++@pytest.mark.asyncio
++async def test_auto_execute_domain_service_calls_ha() -> None:
++    """'domain.service' actions call hass.services.async_call."""
++    hass = _make_hass()
++    finding = _make_finding(
++        suggested_actions=["lock.lock"],
++        triggering_entities=["lock.front_door"],
++    )
++
++    result = await _auto_execute_finding(hass, finding, "exec_003")
++
++    assert result["status"] == "success"
++    assert len(result["actions"]) == 1
++    assert result["actions"][0]["service"] == "lock.lock"
++    assert result["actions"][0]["status"] == "ok"
++    hass.services.async_call.assert_called_once_with(
++        "lock",
++        "lock",
++        {"entity_id": "lock.front_door"},
++        blocking=False,
++    )
++
++
++@pytest.mark.asyncio
++async def test_auto_execute_multiple_triggering_entities_passed_as_list() -> None:
++    """Multiple triggering entities are passed as a list to the service call."""
++    hass = _make_hass()
++    finding = _make_finding(
++        suggested_actions=["lock.lock"],
++        triggering_entities=["lock.front_door", "lock.back_door"],
++    )
++
++    result = await _auto_execute_finding(hass, finding, "exec_004")
++
++    assert result["status"] == "success"
++    hass.services.async_call.assert_called_once_with(
++        "lock",
++        "lock",
++        {"entity_id": ["lock.front_door", "lock.back_door"]},
++        blocking=False,
++    )
++
++
++@pytest.mark.asyncio
++async def test_auto_execute_service_failure_returns_error() -> None:
++    """Service call failure → status='error'."""
++    hass = _make_hass(service_raises=RuntimeError("HA unavailable"))
++    finding = _make_finding(suggested_actions=["lock.lock"])
++
++    result = await _auto_execute_finding(hass, finding, "exec_005")
++
++    assert result["status"] == "error"
++    assert result["actions"][0]["status"] == "error"
++    assert "HA unavailable" in result["actions"][0]["error"]
++
++
++@pytest.mark.asyncio
++async def test_auto_execute_partial_failure() -> None:
++    """One ok, one error → status='partial'."""
++    call_count = 0
++
++    async def _side_effect(*_args: Any, **_kwargs: Any) -> None:
++        nonlocal call_count
++        call_count += 1
++        if call_count == 2:
++            msg = "second call fails"
++            raise RuntimeError(msg)
++
++    hass = MagicMock()
++    hass.services.async_call = AsyncMock(side_effect=_side_effect)
++    finding = _make_finding(
++        suggested_actions=["lock.lock", "notify.notify"],
++        triggering_entities=["lock.front_door"],
++    )
++
++    result = await _auto_execute_finding(hass, finding, "exec_006")
++
++    assert result["status"] == "partial"
++    assert result["actions"][0]["status"] == "ok"
++    assert result["actions"][1]["status"] == "error"
++
++
++@pytest.mark.asyncio
++async def test_auto_execute_mixed_advisory_and_service() -> None:
++    """Mix of advisory and domain.service actions: only service actions are dispatched."""
++    hass = _make_hass()
++    finding = _make_finding(
++        suggested_actions=["check_entry", "lock.lock", "alert_user"],
++        triggering_entities=["lock.front_door"],
++    )
++
++    result = await _auto_execute_finding(hass, finding, "exec_007")
++
++    assert result["status"] == "success"
++    assert len(result["actions"]) == 1
++    assert result["actions"][0]["service"] == "lock.lock"
++    hass.services.async_call.assert_called_once()
++
++
++@pytest.mark.asyncio
++async def test_auto_execute_no_triggering_entities_omits_entity_id() -> None:
++    """Finding with empty triggering_entities calls service without entity_id."""
++    hass = _make_hass()
++    finding = _make_finding(
++        suggested_actions=["lock.lock"],
++        triggering_entities=[],
++    )
++
++    result = await _auto_execute_finding(hass, finding, "exec_008")
++
++    assert result["status"] == "success"
++    hass.services.async_call.assert_called_once_with(
++        "lock",
++        "lock",
++        {},
++        blocking=False,
++    )
+diff --git a/tests/custom_components/home_generative_agent/test_sentinel_end_to_end.py b/tests/custom_components/home_generative_agent/test_sentinel_end_to_end.py
+index 1802dd4..fc7aeff 100644
+--- a/tests/custom_components/home_generative_agent/test_sentinel_end_to_end.py
++++ b/tests/custom_components/home_generative_agent/test_sentinel_end_to_end.py
+@@ -3,11 +3,23 @@
+ 
+ from __future__ import annotations
+ 
++from datetime import UTC, datetime
+ from typing import TYPE_CHECKING, Any, cast
++from unittest.mock import AsyncMock, MagicMock
+ 
+ import pytest
+ 
++from custom_components.home_generative_agent.const import (
++    CONF_SENTINEL_AUTO_EXEC_CANARY_MODE,
++    CONF_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES,
++    CONF_SENTINEL_AUTO_EXECUTE_DEFAULT_MIN_CONFIDENCE,
++    CONF_SENTINEL_AUTO_EXECUTE_MAX_ACTIONS_PER_HOUR,
++    CONF_SENTINEL_AUTO_EXECUTION_ENABLED,
++    CONF_SENTINEL_PENDING_PROMPT_TTL_MINUTES,
++    CONF_SENTINEL_STALENESS_THRESHOLD_SECONDS,
++)
+ from custom_components.home_generative_agent.sentinel.engine import SentinelEngine
++from custom_components.home_generative_agent.sentinel.models import AnomalyFinding
+ from custom_components.home_generative_agent.sentinel.suppression import (
+     SuppressionManager,
+     SuppressionState,
+@@ -69,6 +81,9 @@ class DummyAudit:
+                 "finding": finding,
+                 "snapshot": snapshot,
+                 "suppression_reason_code": kwargs.get("suppression_reason_code"),
++                "canary_would_execute": kwargs.get("canary_would_execute"),
++                "action_policy_path": kwargs.get("action_policy_path"),
++                "action_outcome": kwargs.get("action_outcome"),
+             }
+         )
+ 
+@@ -134,3 +149,279 @@ async def test_sentinel_end_to_end(monkeypatch: pytest.MonkeyPatch) -> None:
+     assert notifier.calls
+     assert audit_store.calls
+     assert audit_store.calls[0]["suppression_reason_code"] == "not_suppressed"
++
++
++@pytest.mark.asyncio
++async def test_sentinel_canary_mode_records_would_execute(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    """Canary mode records canary_would_execute=True without executing services."""
++    snapshot: FullStateSnapshot = validate_snapshot(
++        {
++            "schema_version": 1,
++            "generated_at": "2025-01-01T01:00:00+00:00",
++            "entities": [
++                {
++                    "entity_id": "binary_sensor.front_door",
++                    "domain": "binary_sensor",
++                    "state": "on",
++                    "friendly_name": "Front Door",
++                    "area": "Front",
++                    "attributes": {"device_class": "door"},
++                    "last_changed": "2025-01-01T00:59:50+00:00",
++                    "last_updated": "2025-01-01T00:59:50+00:00",
++                }
++            ],
++            "camera_activity": [],
++            "derived": {
++                "now": "2025-01-01T01:00:00+00:00",
++                "timezone": "UTC",
++                "is_night": False,
++                "anyone_home": False,
++                "people_home": [],
++                "people_away": [],
++                "last_motion_by_area": {},
++            },
++        }
++    )
++
++    async def _fake_build(_hass: HomeAssistant) -> FullStateSnapshot:
++        return snapshot
++
++    monkeypatch.setattr(
++        "custom_components.home_generative_agent.sentinel.engine.async_build_full_state_snapshot",
++        _fake_build,
++    )
++
++    engine = SentinelEngine(
++        hass=cast("HomeAssistant", object()),
++        options={
++            "sentinel_cooldown_minutes": 0,
++            "sentinel_entity_cooldown_minutes": 0,
++            "sentinel_interval_seconds": 60,
++            "explain_enabled": False,
++            CONF_SENTINEL_AUTO_EXEC_CANARY_MODE: True,
++            CONF_SENTINEL_AUTO_EXECUTION_ENABLED: True,
++            CONF_SENTINEL_AUTO_EXECUTE_DEFAULT_MIN_CONFIDENCE: 0.0,
++            CONF_SENTINEL_AUTO_EXECUTE_MAX_ACTIONS_PER_HOUR: 10,
++            CONF_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES: [],
++            CONF_SENTINEL_STALENESS_THRESHOLD_SECONDS: 3600,
++            "sentinel_autonomy_level": 2,
++        },
++        suppression=DummySuppression(),
++        notifier=cast("SentinelNotifier", DummyNotifier()),
++        audit_store=cast("AuditStore", DummyAudit()),
++        explainer=None,
++    )
++
++    # Patch get_autonomy_level so the engine uses level 2.
++    monkeypatch.setattr(engine, "get_autonomy_level", lambda _entry_id: 2)
++    engine._entry_id = "test_entry"
++
++    await engine._run_once()
++
++    audit_store = cast("DummyAudit", cast("Any", engine)._audit_store)
++    assert audit_store.calls
++    # At least one finding should have canary_would_execute recorded (True or False).
++    canary_values = [c["canary_would_execute"] for c in audit_store.calls]
++    assert any(v is not None for v in canary_values)
++
++
++# ---------------------------------------------------------------------------
++# Issue #264 — Level 2 live auto-execute integration tests
++# ---------------------------------------------------------------------------
++
++_AE_SNAPSHOT: FullStateSnapshot = validate_snapshot(
++    {
++        "schema_version": 1,
++        "generated_at": "2025-01-01T01:00:00+00:00",
++        "entities": [
++            {
++                "entity_id": "lock.front_door",
++                "domain": "lock",
++                "state": "unlocked",
++                "friendly_name": "Front Door Lock",
++                "area": "Front",
++                "attributes": {},
++                "last_changed": "2025-01-01T00:59:50+00:00",
++                "last_updated": "2025-01-01T00:59:50+00:00",
++            }
++        ],
++        "camera_activity": [],
++        "derived": {
++            "now": "2025-01-01T01:00:00+00:00",
++            "timezone": "UTC",
++            "is_night": False,
++            "anyone_home": False,
++            "people_home": [],
++            "people_away": [],
++            "last_motion_by_area": {},
++        },
++    }
++)
++
++
++class StubAutoExecRule:
++    """Rule that always emits a finding with a lock.lock service action."""
++
++    rule_id = "stub_auto_exec"
++
++    def evaluate(self, snapshot: FullStateSnapshot) -> list[AnomalyFinding]:  # type: ignore[override]
++        """Return a fixed finding with a service-type suggested action."""
++        return [
++            AnomalyFinding(
++                anomaly_id="stub-ae-finding",
++                type="stub_auto_exec",
++                severity="medium",
++                confidence=0.9,
++                triggering_entities=["lock.front_door"],
++                evidence={},
++                suggested_actions=["lock.lock"],
++                is_sensitive=False,
++            )
++        ]
++
++
++_AE_FROZEN_NOW = datetime(2025, 1, 1, 1, 0, 0, tzinfo=UTC)
++
++
++def _make_ae_engine(
++    monkeypatch: pytest.MonkeyPatch,
++    *,
++    autonomy_level: int = 2,
++    max_actions_per_hour: int = 5,
++) -> tuple[SentinelEngine, MagicMock]:
++    """
++    Build a live-auto-execute engine backed by a MagicMock hass.
++
++    ``dt_util.utcnow`` is frozen to ``_AE_FROZEN_NOW`` so that the snapshot
++    entity (last_changed 10 s before now) is always considered fresh, and
++    time-sensitive guardrails (rate limit, idempotency) behave deterministically.
++    ``CONF_SENTINEL_PENDING_PROMPT_TTL_MINUTES`` is set to 0 so that pending
++    prompts expire immediately — allowing consecutive ``_run_once()`` calls to
++    reach the execution-policy layer without being short-circuited by suppression.
++    """
++    hass = MagicMock()
++    hass.services.async_call = AsyncMock(return_value=None)
++
++    # Freeze time so snapshot entities are always fresh and guardrails are deterministic.
++    monkeypatch.setattr(
++        "homeassistant.util.dt.utcnow",
++        lambda: _AE_FROZEN_NOW,
++    )
++
++    async def _fake_build(_hass: Any) -> FullStateSnapshot:
++        return _AE_SNAPSHOT
++
++    monkeypatch.setattr(
++        "custom_components.home_generative_agent.sentinel.engine.async_build_full_state_snapshot",
++        _fake_build,
++    )
++
++    engine = SentinelEngine(
++        hass=hass,
++        options={
++            "sentinel_cooldown_minutes": 0,
++            "sentinel_entity_cooldown_minutes": 0,
++            "sentinel_interval_seconds": 60,
++            "explain_enabled": False,
++            CONF_SENTINEL_AUTO_EXEC_CANARY_MODE: False,
++            CONF_SENTINEL_AUTO_EXECUTION_ENABLED: True,
++            CONF_SENTINEL_AUTO_EXECUTE_DEFAULT_MIN_CONFIDENCE: 0.0,
++            CONF_SENTINEL_AUTO_EXECUTE_MAX_ACTIONS_PER_HOUR: max_actions_per_hour,
++            CONF_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES: ["lock.lock"],
++            CONF_SENTINEL_STALENESS_THRESHOLD_SECONDS: 3600,
++            CONF_SENTINEL_PENDING_PROMPT_TTL_MINUTES: 0,
++            "sentinel_autonomy_level": autonomy_level,
++        },
++        suppression=DummySuppression(),
++        notifier=cast("SentinelNotifier", DummyNotifier()),
++        audit_store=cast("AuditStore", DummyAudit()),
++        explainer=None,
++    )
++    engine._rules = [StubAutoExecRule()]  # type: ignore[assignment]
++    monkeypatch.setattr(engine, "get_autonomy_level", lambda _entry_id: autonomy_level)
++    engine._entry_id = "test_entry"
++    return engine, hass
++
++
++@pytest.mark.asyncio
++async def test_live_auto_execute_calls_ha_service(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    """Engine dispatches auto-execute finding and calls hass.services.async_call."""
++    engine, hass = _make_ae_engine(monkeypatch)
++
++    await engine._run_once()
++
++    hass.services.async_call.assert_called_once_with(
++        "lock",
++        "lock",
++        {"entity_id": "lock.front_door"},
++        blocking=False,
++    )
++
++
++@pytest.mark.asyncio
++async def test_live_auto_execute_audit_outcome_populated(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    """Audit record includes action_policy_path=auto_execute and action_outcome."""
++    engine, _hass = _make_ae_engine(monkeypatch)
++
++    await engine._run_once()
++
++    audit = cast("DummyAudit", cast("Any", engine)._audit_store)
++    ae_calls = [c for c in audit.calls if c["action_policy_path"] == "auto_execute"]
++    assert ae_calls, "Expected at least one auto_execute audit record"
++    assert cast("dict[str, str]", ae_calls[0]["action_outcome"])["status"] == "success"
++
++
++@pytest.mark.asyncio
++async def test_live_auto_execute_blocked_below_level_2(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    """Autonomy level < 2 prevents hass.services.async_call from being invoked."""
++    engine, hass = _make_ae_engine(monkeypatch, autonomy_level=1)
++
++    await engine._run_once()
++
++    hass.services.async_call.assert_not_called()
++    audit = cast("DummyAudit", cast("Any", engine)._audit_store)
++    assert audit.calls, "Expected audit records"
++    assert all(c["action_policy_path"] != "auto_execute" for c in audit.calls)
++
++
++@pytest.mark.asyncio
++async def test_live_auto_execute_idempotency_prevents_double_fire(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    """Same finding in two consecutive runs triggers hass.services.async_call only once."""
++    # Use a high rate limit so only idempotency can block the second run.
++    engine, hass = _make_ae_engine(monkeypatch, max_actions_per_hour=100)
++
++    await engine._run_once()
++    await engine._run_once()
++
++    assert hass.services.async_call.call_count == 1
++    audit = cast("DummyAudit", cast("Any", engine)._audit_store)
++    paths = [c["action_policy_path"] for c in audit.calls]
++    assert "auto_execute" in paths
++    assert "prompt_user" in paths
++
++
++@pytest.mark.asyncio
++async def test_live_auto_execute_rate_limit_blocks(
++    monkeypatch: pytest.MonkeyPatch,
++) -> None:
++    """Rate limiter blocks auto-execution once max_actions_per_hour is exhausted."""
++    engine, hass = _make_ae_engine(monkeypatch, max_actions_per_hour=1)
++
++    await engine._run_once()
++    await engine._run_once()
++
++    assert hass.services.async_call.call_count == 1
++    audit = cast("DummyAudit", cast("Any", engine)._audit_store)
++    paths = [c["action_policy_path"] for c in audit.calls]
++    assert "auto_execute" in paths
++    assert "prompt_user" in paths
+diff --git a/tests/custom_components/home_generative_agent/test_sentinel_notifier.py b/tests/custom_components/home_generative_agent/test_sentinel_notifier.py
+index c1815a5..c1fbb0a 100644
+--- a/tests/custom_components/home_generative_agent/test_sentinel_notifier.py
++++ b/tests/custom_components/home_generative_agent/test_sentinel_notifier.py
+@@ -379,6 +379,31 @@ async def test_async_notify_redacts_sensitive_message() -> None:
+     assert "a recognised person" in message
+ 
+ 
++# ---------------------------------------------------------------------------
++# 3b. _normalize_text strips think blocks
++# ---------------------------------------------------------------------------
++
++
++@pytest.mark.asyncio
++async def test_async_notify_strips_think_blocks_from_explanation() -> None:
++    """<think> blocks in explanation text must be stripped before the notification is sent."""
++    options = {CONF_NOTIFY_SERVICE: "notify.mobile_app_phone"}
++    notifier, hass, _suppression, _action_handler = _make_notifier(options)
++    snapshot = _minimal_snapshot()
++    finding = _finding(anomaly_id="think1")
++
++    explanation = (
++        "<think>internal reasoning</think>Front door open recently. Close it now."
++    )
++    await notifier.async_notify(finding, snapshot, explanation)  # type: ignore[arg-type]
++
++    assert len(hass.services.calls) == 1
++    message = hass.services.calls[0]["data"]["message"]
++    assert "<think>" not in message
++    assert "internal reasoning" not in message
++    assert "Front door open recently." in message
++
++
+ # ---------------------------------------------------------------------------
+ # 4. Per-area routing
+ # ---------------------------------------------------------------------------
+diff --git a/tests/custom_components/home_generative_agent/test_sentinel_triage.py b/tests/custom_components/home_generative_agent/test_sentinel_triage.py
+index ae5f6a2..8f4eeca 100644
+--- a/tests/custom_components/home_generative_agent/test_sentinel_triage.py
++++ b/tests/custom_components/home_generative_agent/test_sentinel_triage.py
+@@ -504,6 +504,30 @@ async def test_markdown_wrapped_json_is_parsed_correctly() -> None:
+     assert result.reason_code == "routine_state"
+ 
+ 
++@pytest.mark.asyncio
++async def test_think_block_before_json_is_stripped() -> None:
++    """<think> block preceding JSON (qwen3/qwen3.5 output) must be stripped before parsing."""
++    finding = _finding()
++    snapshot = _snapshot()
++
++    think_content = (
++        "<think>evaluating risk level for open entry</think>\n"
++        '{"decision": "suppress", "reason_code": "routine_state", '
++        '"triage_confidence": 0.9, "summary": "Routine door open."}'
++    )
++
++    class ThinkingLLM:
++        async def ainvoke(self, messages: list[Any]) -> Any:
++            return type("Result", (), {"content": think_content})()
++
++    svc = SentinelTriageService(ThinkingLLM())
++    result = await svc.triage(finding, snapshot)
++
++    assert result.decision == TRIAGE_SUPPRESS
++    assert result.reason_code == "routine_state"
++    assert result.triage_confidence == pytest.approx(0.9)
++
++
+ @pytest.mark.asyncio
+ async def test_unknown_decision_value_defaults_to_notify() -> None:
+     """Unrecognised decision tokens in LLM response default to notify."""
+diff --git a/tests/custom_components/home_generative_agent/test_utils.py b/tests/custom_components/home_generative_agent/test_utils.py
+index acbfaf5..8b13cf8 100644
+--- a/tests/custom_components/home_generative_agent/test_utils.py
++++ b/tests/custom_components/home_generative_agent/test_utils.py
+@@ -11,6 +11,7 @@ import pytest
+ from custom_components.home_generative_agent.core.utils import (
+     CannotConnectError,
+     InvalidAuthError,
++    extract_final,
+     openai_compatible_healthy,
+     validate_openai_compatible_url,
+ )
+@@ -18,6 +19,36 @@ from custom_components.home_generative_agent.core.utils import (
+ if TYPE_CHECKING:
+     from homeassistant.core import HomeAssistant
+ 
++# ---------------------------------------------------------------------------
++# extract_final tests
++# ---------------------------------------------------------------------------
++
++
++def test_extract_final_strips_think_block() -> None:
++    assert extract_final("<think>reasoning</think>answer") == "answer"
++
++
++def test_extract_final_no_max_chars_returns_full() -> None:
++    text = "word " * 50
++    assert extract_final(text.strip()) == text.strip()
++
++
++def test_extract_final_max_chars_fits_exactly() -> None:
++    assert extract_final("hello world", max_chars=11) == "hello world"
++
++
++def test_extract_final_max_chars_truncates_at_word_boundary() -> None:
++    # 20 chars would cut mid-word in "boundary"
++    result = extract_final("truncate at word boundary here", max_chars=20)
++    assert result == "truncate at word"
++    assert len(result) <= 20
++
++
++def test_extract_final_max_chars_no_space_falls_back_to_hard_cut() -> None:
++    result = extract_final("superlongwordwithoutspaces", max_chars=10)
++    assert len(result) <= 10
++
++
+ # ---------------------------------------------------------------------------
+ # Fake HTTP helpers
+ # ---------------------------------------------------------------------------
+diff --git a/tests/custom_components/home_generative_agent/test_video_helpers.py b/tests/custom_components/home_generative_agent/test_video_helpers.py
+new file mode 100644
+index 0000000..96904c6
+--- /dev/null
++++ b/tests/custom_components/home_generative_agent/test_video_helpers.py
+@@ -0,0 +1,60 @@
++# ruff: noqa: S101
++"""Tests for core/video_helpers.py text helpers."""
++
++from __future__ import annotations
++
++from custom_components.home_generative_agent.core.video_helpers import (
++    limit_sentences_and_chars,
++)
++
++# ---------------------------------------------------------------------------
++# limit_sentences_and_chars tests
++# ---------------------------------------------------------------------------
++
++_LONG_S1 = (
++    "A paved patio area leads up to a closed white picket gate that overlooks "
++    "a street where two vehicles are parked in the distance."
++)  # 124 chars
++_LONG_S2 = (
++    "To the right of the gate, a dog is sitting near a planter and looking "
++    "toward the camera."
++)  # 90 chars
++_TWO_SENTENCE_TEXT = f"{_LONG_S1} {_LONG_S2}"
++
++
++def test_first_sentence_fits_when_combined_exceeds_limit() -> None:
++    """When two sentences together exceed max_chars, only the first is returned."""
++    result = limit_sentences_and_chars(_TWO_SENTENCE_TEXT, max_chars=150)
++    assert result == _LONG_S1
++    assert len(result) <= 150
++
++
++def test_both_sentences_returned_when_both_fit() -> None:
++    short = "Dog seen. Gate closed."
++    result = limit_sentences_and_chars(short, max_chars=150)
++    assert result == short
++
++
++def test_single_long_sentence_truncated_at_word_boundary() -> None:
++    single = "a " * 100  # 200 chars, no sentence ender
++    result = limit_sentences_and_chars(single.strip(), max_chars=50)
++    assert len(result) <= 50
++    # Should end at a word boundary, not mid-word
++    assert not result.endswith("a ")
++    assert " " not in result[-1:]  # last char isn't a space
++
++
++def test_short_text_returned_unchanged() -> None:
++    text = "Motion detected."
++    result = limit_sentences_and_chars(text, max_chars=150)
++    assert result == text
++
++
++def test_no_mid_word_truncation() -> None:
++    """Regression: truncation must not cut mid-word (the original bug)."""
++    # Build text where hard truncation at 150 would cut mid-word
++    result = limit_sentences_and_chars(_TWO_SENTENCE_TEXT, max_chars=150)
++    # Result must be a complete word — no trailing partial word
++    words = result.split()
++    assert all(w == words[-1] or w for w in words)
++    assert len(result) <= 150
