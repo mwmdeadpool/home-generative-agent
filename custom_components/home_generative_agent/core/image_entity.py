@@ -158,27 +158,25 @@ class LastEventImage(ImageEntity):
     @callback
     def _on_new_latest(self, *args: Any) -> None:
         """Handle SIGNAL_HGA_NEW_LATEST."""
-        if not args or cast("str", args[IDX_RECOGNIZED_CAMERA_ID]) != self._camera_id:
+        if not args or cast("str", args[IDX_CAMERA_ID]) != self._camera_id:
             return
 
         latest_path = (
-            cast("str | None", args[IDX_RECOGNIZED_PEOPLE])
-            if len(args) > IDX_RECOGNIZED_PEOPLE
+            cast("str | None", args[IDX_LATEST_PATH])
+            if len(args) > IDX_LATEST_PATH
             else None
         )
         summary = (
-            cast("str | None", args[IDX_RECOGNIZED_SUMMARY])
-            if len(args) > IDX_RECOGNIZED_SUMMARY
-            else None
+            cast("str | None", args[IDX_SUMMARY]) if len(args) > IDX_SUMMARY else None
         )
         people = (
-            cast("Sequence[str] | None", args[IDX_RECOGNIZED_LAST_EVENT_ISO])
-            if len(args) > IDX_RECOGNIZED_LAST_EVENT_ISO
+            cast("Sequence[str] | None", args[IDX_PEOPLE])
+            if len(args) > IDX_PEOPLE
             else None
         )
         last_event_iso = (
-            cast("str | None", args[IDX_RECOGNIZED_LATEST_PATH])
-            if len(args) > IDX_RECOGNIZED_LATEST_PATH
+            cast("str | None", args[IDX_LAST_EVENT_ISO])
+            if len(args) > IDX_LAST_EVENT_ISO
             else None
         )
 
