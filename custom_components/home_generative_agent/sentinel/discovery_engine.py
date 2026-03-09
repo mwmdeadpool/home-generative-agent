@@ -141,9 +141,16 @@ class SentinelDiscoveryEngine:
             return
 
         try:
-            payload = json.loads(content)
+            if isinstance(content, (dict, list)):
+                payload = content
+            else:
+                payload = json.loads(content)
         except json.JSONDecodeError:
             LOGGER.warning("Discovery output was not valid JSON.")
+            return
+
+        if not isinstance(payload, dict):
+            LOGGER.warning("Discovery output was not a JSON object (got %s).", type(payload).__name__)
             return
 
         payload.setdefault("schema_version", DISCOVERY_SCHEMA_VERSION)
