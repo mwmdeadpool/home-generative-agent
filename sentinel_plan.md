@@ -9,7 +9,7 @@
 - Human override and kill switch are always available as runtime operations (not config-file edits).
 - Detection rule configs are version-controlled and reviewed before deployment. Rule schema versions are stored in every audit record.
 
-## Current Status Snapshot (as of 2026-03-07)
+## Current Status Snapshot (as of 2026-03-09)
 
 - This document mixes current implementation, accepted design targets, and remaining work. Unless a section explicitly says `Implemented`, treat it as target-state design rather than current behavior.
 - Implemented in code today:
@@ -21,7 +21,7 @@
   - LLM triage with a strict prompt allowlist and fail-open behavior.
   - Execution policy service with stale/unavailable handling at the execution gate (autonomy level 2+), plus allowlist, confidence threshold, rate limit, idempotency, canary mode, and live auto-execute.
   - Baseline updater and temporal/baseline detector support.
-  - Discovery pipeline improvements from Milestone 5 except rule preview: service-mapped suggested actions, on-demand discovery trigger service, immediate rule activation on proposal approval, structured normalization failure reasons, overlap metadata, and richer draft notifications.
+  - Discovery pipeline improvements from Milestone 5: service-mapped suggested actions, on-demand discovery trigger service, immediate rule activation on proposal approval, structured normalization failure reasons, overlap metadata, richer draft notifications, and rule preview before commit.
 - Partially implemented or still open (see Known Current Gaps below for the summary list):
   - Rule/suppression-state-suppressed findings are not written to the audit store (engine silently returns at the suppression gate). Triage-suppressed findings *are* written to audit.
   - `ACTION_POLICY_BLOCKED` blocks execution but does not suppress notification dispatch.
@@ -524,7 +524,7 @@ Each issue is a self-contained PR targeting main. Every PR must leave tests gree
 
 Historical note: the issue-status details below mix repository history with current main-branch state. Milestone 5 statuses below reflect the latest implementation work merged in PR #296, even where the corresponding GitHub issues may still need manual status cleanup on GitHub.
 
-**Status as of 2026-03-07:** All 15 original issues were closed on GitHub, but “closed” here means implementation work landed, not that every target-state behavior in Sections 2-19 is complete. Remaining known gaps include suppressed-finding audit coverage, blocked-vs-notified behavior, audit retention/archival, and stable person identifiers in derived presence. One unplanned issue (#9b, GitHub #269) covered pending-prompt TTL separately. Issue #15 (lambda rule review/approval UI) was implemented then removed — lambda rules were detection-only (no service-type suggested actions), invisible from `get_dynamic_rules`, and added no value for full autonomy; see PR #285 and Milestone 5. In Milestone 5, issues #16, #17, #18, #19, #20, and #22 are now implemented in code; only #21 remains open.
+**Status as of 2026-03-09:** All 15 original issues were closed on GitHub, but “closed” here means implementation work landed, not that every target-state behavior in Sections 2-19 is complete. Remaining known gaps include suppressed-finding audit coverage, blocked-vs-notified behavior, audit retention/archival, and stable person identifiers in derived presence. One unplanned issue (#9b, GitHub #269) covered pending-prompt TTL separately. Issue #15 (lambda rule review/approval UI) was implemented then removed — lambda rules were detection-only (no service-type suggested actions), invisible from `get_dynamic_rules`, and added no value for full autonomy; see PR #285 and Milestone 5. In Milestone 5, all issues #16–#22 are implemented in code and merged to main.
 
 | Plan # | GitHub # | Status | Title |
 | --- | --- | --- | --- |
@@ -549,7 +549,7 @@ Historical note: the issue-status details below mix repository history with curr
 | #18 | #290 | Done (PR #296) | Immediate rule activation on approval |
 | #19 | #291 | Done (PR #296) | Explain normalization failures |
 | #20 | #292 | Done (PR #296) | Richer proposal draft notifications |
-| #21 | TBD | Open | Rule preview before commit |
+| #21 | #293 | Done (PR #297) | Rule preview before commit |
 | #22 | #294 | Done (PR #296) | PIN validation for autonomy level increase |
 
 ---
@@ -723,7 +723,7 @@ The original Issue #15 (lambda rule review/approval UI) was implemented and subs
 - Size: S
 - Dependencies: none
 - **This is the single highest-value change for full autonomy — without it, no discovered rule can ever trigger auto-execute.**
- - Implemented outcome: normalized proposals now emit service-mapped `suggested_actions` where safe deterministic actions exist.
+- Implemented outcome: normalized proposals now emit service-mapped `suggested_actions` where safe deterministic actions exist.
 
 **Issue #17 — On-demand discovery trigger** *(Done — [GitHub #289](https://github.com/goruck/home-generative-agent/issues/289), merged in PR #296)*
 
@@ -733,7 +733,7 @@ The original Issue #15 (lambda rule review/approval UI) was implemented and subs
 - Tests: Service call triggers a discovery run and stores results; duplicate candidates are filtered; timer interval unchanged.
 - Size: S
 - Dependencies: none
- - Implemented outcome: `home_generative_agent.trigger_sentinel_discovery` runs one discovery cycle immediately when called.
+- Implemented outcome: `home_generative_agent.trigger_sentinel_discovery` runs one discovery cycle immediately when called.
 
 **Issue #18 — Immediate rule activation on approval** *(Done — [GitHub #290](https://github.com/goruck/home-generative-agent/issues/290), merged in PR #296)*
 
@@ -743,7 +743,7 @@ The original Issue #15 (lambda rule review/approval UI) was implemented and subs
 - Tests: Approval triggers an immediate evaluation run; new rule fires on current snapshot if conditions met; no double-run if engine is already mid-cycle.
 - Size: S
 - Dependencies: none
- - Implemented outcome: successful proposal approval now triggers an immediate Sentinel evaluation cycle through the scheduler's single-flight path.
+- Implemented outcome: successful proposal approval now triggers an immediate Sentinel evaluation cycle through the scheduler's single-flight path.
 
 **Issue #19 — Explain normalization failures** *(Done — [GitHub #291](https://github.com/goruck/home-generative-agent/issues/291), merged in PR #296)*
 
@@ -753,7 +753,7 @@ The original Issue #15 (lambda rule review/approval UI) was implemented and subs
 - Tests: Each normalization failure path returns a distinct reason code; `promote` and `approve` service responses include reason; `already_active` response includes covering rule ID and overlapping entities.
 - Size: S
 - Dependencies: none
- - Implemented outcome: promote/approve responses now return structured `reason_code`, `details`, `covered_rule_id`, and `overlapping_entity_ids` when applicable.
+- Implemented outcome: promote/approve responses now return structured `reason_code`, `details`, `covered_rule_id`, and `overlapping_entity_ids` when applicable.
 
 **Issue #20 — Richer proposal draft notifications** *(Done — [GitHub #292](https://github.com/goruck/home-generative-agent/issues/292), merged in PR #296)*
 
@@ -763,9 +763,9 @@ The original Issue #15 (lambda rule review/approval UI) was implemented and subs
 - Tests: Notification payload includes template_id, severity, confidence, and actionable service call hint.
 - Size: XS
 - Dependencies: none
- - Implemented outcome: draft notifications now include template context and actionable approval guidance instead of a generic message.
+- Implemented outcome: draft notifications now include template context and actionable approval guidance instead of a generic message.
 
-**Issue #21 — Rule preview before commit** *(Open — [GitHub #293](https://github.com/goruck/home-generative-agent/issues/293))*
+**Issue #21 — Rule preview before commit** *(Done — [GitHub #293](https://github.com/goruck/home-generative-agent/issues/293), merged in PR #297)*
 
 - Plan coverage: Section 16 (operator control)
 - Scope: Add `preview_rule_proposal` HA service that evaluates the normalized rule spec against the current snapshot without writing to the registry. Returns whether the rule would trigger right now, and against which entities. Intended as a dry-run step before calling `approve_rule_proposal`.
@@ -773,7 +773,7 @@ The original Issue #15 (lambda rule review/approval UI) was implemented and subs
 - Tests: Preview evaluates rule correctly; no registry mutation; returns trigger status and matching entities; behaves identically to a live evaluation for the same snapshot.
 - Size: M
 - Dependencies: Issue #18 (shares immediate-snapshot evaluation path)
- - Current note: Issue #18 is now implemented, so the immediate-snapshot evaluation path exists and this is the primary remaining Milestone 5 item.
+- Implemented outcome: `home_generative_agent.preview_rule_proposal` performs a read-only evaluation of a stored proposal draft against the current snapshot, reusing the dynamic rule evaluation path so preview behavior matches live deterministic evaluation.
 
 **Issue #22 — PIN validation for autonomy level increase** *(Done — [GitHub #294](https://github.com/goruck/home-generative-agent/issues/294), merged in PR #296)*
 
@@ -783,7 +783,7 @@ The original Issue #15 (lambda rule review/approval UI) was implemented and subs
 - Tests: Correct PIN allows increase; wrong PIN rejected; no PIN required for decrease; kill-switch (`level=0`) never gated; PIN stored as hash not plaintext.
 - Size: M
 - Dependencies: none
- - Implemented outcome: Sentinel now persists hashed level-increase PIN material in subentry config and validates the provided PIN on autonomy increases.
+- Implemented outcome: Sentinel now persists hashed level-increase PIN material in subentry config and validates the provided PIN on autonomy increases.
 
 ---
 
