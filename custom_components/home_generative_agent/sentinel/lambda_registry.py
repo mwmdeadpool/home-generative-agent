@@ -61,7 +61,7 @@ _ALLOWED_NODE_TYPES: frozenset[type[ast.AST]] = frozenset(
         ast.Name,
         ast.Load,
         ast.Store,
-        # Attribute access (read-only use; write-side still guarded by eval sandbox)
+        # Attribute access (read-only use; private attrs blocked in _validate_expression)
         ast.Attribute,
         ast.Subscript,
         ast.Index,
@@ -147,9 +147,18 @@ def _validate_expression(expression: str) -> str | None:
 
     Returns ``None`` on success, or a human-readable rejection reason string
     on failure.  Never raises.
+
+    Additional safety checks:
+    - Private attribute access (names starting with '_') is blocked
+    - Expression length is limited to prevent resource exhaustion
     """
     if not isinstance(expression, str) or not expression.strip():
         return "expression must be a non-empty string"
+
+    # Resource limit: expression length
+    MAX_EXPRESSION_LENGTH = 1000
+    if len(expression) > MAX_EXPRESSION_LENGTH:
+        return f"expression exceeds maximum length of {MAX_EXPRESSION_LENGTH} characters"
 
     try:
         tree = ast.parse(expression, mode="eval")
@@ -162,6 +171,16 @@ def _validate_expression(expression: str) -> str | None:
             return f"disallowed AST node type: {node_type.__name__}"
         if node_type not in _ALLOWED_NODE_TYPES:
             return f"unrecognized AST node type: {node_type.__name__}"
+        # Block private attribute access (defense in depth)
+        if isinstance(node, ast.Attribute):
+            if node.attr.startswith("_"):
+                return f"accessing private attributes is forbidden: {node.attr}"
+        # Block numeric literals that could cause resource exhaustion
+        if isinstance(node, ast.Constant):
+            if isinstance(node.value, (int, float)):
+                # Limit numeric literals to reasonable range
+                if isinstance(node.value, int) and abs(node.value) > 10**9:
+                    return "numeric literal exceeds maximum allowed value"
 
     return None
 
