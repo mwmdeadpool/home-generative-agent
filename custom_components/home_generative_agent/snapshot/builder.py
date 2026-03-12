@@ -11,6 +11,7 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.util import dt as dt_util
 
+from ..const import sanitize_for_prompt, sanitize_entity_for_prompt
 from .camera_activity import extract_camera_activity
 from .derived import derive_context
 from .schema import (
@@ -43,11 +44,17 @@ def _jsonify(value: Any) -> Any:
 
 
 def _build_entity_snapshot(state: State, area_name: str | None) -> SnapshotEntity:
+    # Sanitize user-controlled strings to prevent prompt injection
+    friendly_name = state.attributes.get("friendly_name")
+    if friendly_name is not None:
+        friendly_name = sanitize_for_prompt(friendly_name)
+    if area_name is not None:
+        area_name = sanitize_for_prompt(area_name)
     return {
         "entity_id": state.entity_id,
         "domain": state.domain,
-        "state": state.state,
-        "friendly_name": state.attributes.get("friendly_name"),
+        "state": sanitize_for_prompt(state.state),
+        "friendly_name": friendly_name,
         "area": area_name,
         "attributes": _jsonify(state.attributes),
         "last_changed": _as_iso(state.last_changed),
@@ -59,7 +66,11 @@ def _build_area_lookup(hass: HomeAssistant) -> dict[str, str | None]:
     entity_registry = er.async_get(hass)
     device_registry = dr.async_get(hass)
     area_registry = ar.async_get(hass)
-    area_names = {area_id: area.name for area_id, area in area_registry.areas.items()}
+    # Sanitize area names to prevent prompt injection
+    area_names = {
+        area_id: sanitize_for_prompt(area.name)
+        for area_id, area in area_registry.areas.items()
+    }
 
     lookup: dict[str, str | None] = {}
     for entity_id, entry in entity_registry.entities.items():

@@ -72,6 +72,7 @@ from ..const import (  # noqa: TID252
     VLM_SYSTEM_PROMPT,
     VLM_USER_KW_TEMPLATE,
     VLM_USER_PROMPT,
+    sanitize_for_prompt,
 )
 from ..core.conversation_helpers import _resolve_entity_id  # noqa: TID252
 from ..core.utils import extract_final, verify_pin  # noqa: TID252
@@ -361,9 +362,11 @@ def _prompt_func(data: dict[str, Any]) -> list[AnyMessage]:
 
     # OPTIONAL: previous frame's one-line description to aid motion/direction grounding
     if prev_text:
+        # Sanitize prev_text to prevent prompt injection from VLM-generated content
+        sanitized_prev = sanitize_for_prompt(prev_text)
         # Keep it short and explicit that it is text-only context, not metadata
         content_parts.append(
-            {"type": "text", "text": f'Previous frame (text only): "{prev_text}"'}
+            {"type": "text", "text": f'Previous frame (text only): "{sanitized_prev}"'}
         )
 
     # Image payload last

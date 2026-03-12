@@ -1,5 +1,6 @@
 """Constants for Home Generative Agent."""
 
+import re
 from typing import Annotated, Any, Literal, get_args
 
 from annotated_types import Ge, Le
@@ -806,3 +807,143 @@ MODEL_CATEGORY_SPECS: dict[str, dict[str, Any]] = {
         },
     },
 }
+
+
+# ---------------------------------------------------------------------------
+# Prompt Injection Sanitization
+# ---------------------------------------------------------------------------
+
+# Maximum length for sanitized prompt input (prevents token abuse)
+MAX_PROMPT_INPUT_LENGTH: int = 500
+
+# Regex patterns for common prompt injection attacks
+_PROMPT_INJECTION_PATTERNS: list[re.Pattern[str]] = [
+    # Ignore/disregard instructions patterns
+    re.compile(
+        r"(?i)(ignore|disregard|forget|override|bypass).{0,30}(all|previous|above|prior|prior|system|instruction|prompt|rule)",
+        re.IGNORECASE,
+    ),
+    # Role prefix patterns (system:, assistant:, user:)
+    re.compile(r"(?i)^(system|assistant|user|developer|model)\s*[:\-]\s*"),
+    # Newline-based injection attempts
+    re.compile(r"[\n\r]+(?:system|assistant|user|developer|model)\s*[:\-]", re.IGNORECASE),
+    # XML tag injection patterns
+    re.compile(r"(?i)</?(?:system|assistant|user|instruction|prompt)[^>]*>"),
+    # Delimiter injection patterns
+    re.compile(r"(?i)(<\|(?:im|end|start|system|user|assistant).*?\|>|\[\[|\]\]|<<<|>>>)"),
+]
+
+# Valid entity_id format pattern
+_ENTITY_ID_PATTERN: re.Pattern[str] = re.compile(r"^[a-z_][a-z0-9_]*\.[a-z0-9_]+$")
+
+
+def sanitize_for_prompt(text: str | None) -> str:
+    """
+    Remove prompt injection patterns from user-controlled strings.
+
+    This function sanitizes entity names, friendly_names, state attributes,
+    and other user-controlled data before inclusion in LLM prompts.
+
+    Sanitization steps:
+    1. Convert None to empty string
+    2. Strip common injection patterns (ignore/disregard instructions, role prefixes)
+    3. Escape or remove newlines in entity names
+    4. Truncate to reasonable length
+    5. Remove control characters
+
+    Args:
+        text: The user-controlled string to sanitize.
+
+    Returns:
+        A sanitized string safe for inclusion in LLM prompts.
+    """
+    if text is None:
+        return ""
+
+    if not isinstance(text, str):
+        text = str(text)
+
+    # Remove control characters except normal whitespace
+    text = "".join(
+        char for char in text if char == "\t" or char == "\n" or char == "\r" or (ord(char) >= 32 and ord(char) != 127)
+    )
+
+    # Replace newlines with spaces to prevent injection via line breaks
+    text = text.replace("\n", " ").replace("\r", " ")
+
+    # Replace quotes with single quotes to prevent escaping
+    text = text.replace('"', "'")
+
+    # Strip injection patterns
+    for pattern in _PROMPT_INJECTION_PATTERNS:
+        text = pattern.sub("[REDACTED]", text)
+
+    # Truncate to maximum length
+    if len(text) > MAX_PROMPT_INPUT_LENGTH:
+        text = text[:MAX_PROMPT_INPUT_LENGTH] + "..."
+
+    return text.strip()
+
+
+def validate_entity_id(entity_id: str | None) -> bool:
+    """
+    Validate entity_id format according to Home Assistant conventions.
+
+    Valid format: domain.object_id where:
+    - domain: lowercase letters and underscores, cannot start with underscore
+    - object_id: lowercase letters, numbers, and underscores
+
+    Args:
+        entity_id: The entity_id to validate.
+
+    Returns:
+        True if the entity_id format is valid, False otherwise.
+    """
+    if not entity_id or not isinstance(entity_id, str):
+        return False
+    return bool(_ENTITY_ID_PATTERN.match(entity_id))
+
+
+def sanitize_entity_for_prompt(entity: dict[str, Any]) -> dict[str, Any]:
+    """
+    Sanitize an entity dictionary for inclusion in LLM prompts.
+
+    Sanitizes entity_id, friendly_name, state, and string attributes.
+
+    Args:
+        entity: The entity dictionary to sanitize.
+
+    Returns:
+        A new dictionary with sanitized values.
+    """
+    if not isinstance(entity, dict):
+        return {}
+
+    sanitized: dict[str, Any] = {}
+
+    for key, value in entity.items():
+        if key == "entity_id":
+            # Validate and sanitize entity_id
+            if validate_entity_id(value):
+                sanitized[key] = value
+            else:
+                sanitized[key] = "invalid.entity_id"
+        elif key == "friendly_name":
+            sanitized[key] = sanitize_for_prompt(value)
+        elif key == "state":
+            sanitized[key] = sanitize_for_prompt(value)
+        elif key == "attributes" and isinstance(value, dict):
+            # Sanitize string attributes
+            sanitized_attrs: dict[str, Any] = {}
+            for attr_key, attr_value in value.items():
+                if isinstance(attr_value, str):
+                    sanitized_attrs[attr_key] = sanitize_for_prompt(attr_value)
+                else:
+                    sanitized_attrs[attr_key] = attr_value
+            sanitized[key] = sanitized_attrs
+        elif isinstance(value, str):
+            sanitized[key] = sanitize_for_prompt(value)
+        else:
+            sanitized[key] = value
+
+    return sanitized

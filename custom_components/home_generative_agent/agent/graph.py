@@ -48,6 +48,7 @@ from ..const import (  # noqa: TID252
     EMBEDDING_MODEL_PROMPT_TEMPLATE,
     RECOMMENDED_CRITICAL_ACTIONS,
     SUMMARIZATION_INITIAL_PROMPT,
+    sanitize_for_prompt,
     SUMMARIZATION_PROMPT_TEMPLATE,
     SUMMARIZATION_SYSTEM_PROMPT,
     TOOL_CALL_ERROR_TEMPLATE,
@@ -509,7 +510,8 @@ def _parse_open_entries_from_live_context(raw: str) -> list[str]:
             continue
 
     if current_name and is_on and is_opening:
-        open_entries.append(current_name)
+        # Sanitize to prevent prompt injection via entity names
+        open_entries.append(sanitize_for_prompt(current_name))
     return open_entries
 
 
@@ -534,7 +536,8 @@ async def _find_open_entries(
         if str(state_obj.state).lower() not in {"on", "open", "opening"}:
             continue
         friendly = state_obj.attributes.get("friendly_name") or entity_id
-        open_entries.append(str(friendly))
+        # Sanitize to prevent prompt injection via entity names
+        open_entries.append(sanitize_for_prompt(str(friendly)))
     return open_entries
 
 
