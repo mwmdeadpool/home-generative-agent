@@ -65,6 +65,29 @@ def test_extract_final_handles_normal_string() -> None:
     assert extract_final("normal string") == "normal string"
 
 
+def test_extract_final_handles_empty_list() -> None:
+    assert extract_final([]) == ""
+
+
+def test_extract_final_ignores_non_text_blocks() -> None:
+    payload = [
+        {"type": "tool_use", "name": "test"},
+        {"type": "image_url", "url": "http://example.com"},
+    ]
+    assert extract_final(payload) == ""
+
+
+def test_extract_final_handles_none_text_value() -> None:
+    assert extract_final([{"type": "text", "text": None}]) == ""
+
+
+def test_extract_final_with_think_blocks_in_list() -> None:
+    assert (
+        extract_final([{"type": "text", "text": "<think>reasoning</think>answer"}])
+        == "answer"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Fake HTTP helpers
 # ---------------------------------------------------------------------------

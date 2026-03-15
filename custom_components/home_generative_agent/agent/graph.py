@@ -683,7 +683,9 @@ async def _summarize_and_remove_messages(
     raw_response = await model.ainvoke(messages)
     LOGGER.debug("Raw summary response: %s", raw_response)
 
-    response = extract_final(getattr(raw_response, "content", "") or "")
+    response = extract_final(
+        getattr(raw_response, "content", "") or ""
+    )  # content may be list
 
     return {
         "summary": response,

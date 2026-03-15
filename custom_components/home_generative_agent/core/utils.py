@@ -502,7 +502,9 @@ def extract_final(raw: str | list[Any], max_chars: int | None = None) -> str:
             if isinstance(block, str):
                 parts.append(block)
             elif isinstance(block, dict) and block.get("type") == "text":
-                parts.append(str(block.get("text", "")))
+                text_value = block.get("text")
+                if text_value is not None:
+                    parts.append(str(text_value))
         raw = " ".join(parts)
 
     if not raw:
