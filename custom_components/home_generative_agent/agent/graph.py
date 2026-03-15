@@ -48,10 +48,10 @@ from ..const import (  # noqa: TID252
     EMBEDDING_MODEL_PROMPT_TEMPLATE,
     RECOMMENDED_CRITICAL_ACTIONS,
     SUMMARIZATION_INITIAL_PROMPT,
-    sanitize_for_prompt,
     SUMMARIZATION_PROMPT_TEMPLATE,
     SUMMARIZATION_SYSTEM_PROMPT,
     TOOL_CALL_ERROR_TEMPLATE,
+    sanitize_for_prompt,
 )
 from ..core.utils import extract_final  # noqa: TID252
 from .camera_activity import get_recent_camera_activity
@@ -627,7 +627,8 @@ async def _call_model(
     raw_response = await model.ainvoke(trimmed_messages)
     LOGGER.debug("Raw chat model response: %s", raw_response)
 
-    response = extract_final(getattr(raw_response, "content", "") or "")
+    content = getattr(raw_response, "content", "") or ""
+    response = extract_final(content)
 
     # Create AI message, no need to include tool call metadata if there's none.
     if hasattr(raw_response, "tool_calls"):

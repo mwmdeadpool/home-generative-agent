@@ -49,6 +49,22 @@ def test_extract_final_max_chars_no_space_falls_back_to_hard_cut() -> None:
     assert len(result) <= 10
 
 
+def test_extract_final_handles_list_of_strings() -> None:
+    assert extract_final(["text block"]) == "text block"
+
+
+def test_extract_final_handles_list_of_text_blocks() -> None:
+    payload = [
+        {"type": "text", "text": "hello"},
+        {"type": "tool_use", "name": "noop"},
+    ]
+    assert extract_final(payload) == "hello"
+
+
+def test_extract_final_handles_normal_string() -> None:
+    assert extract_final("normal string") == "normal string"
+
+
 # ---------------------------------------------------------------------------
 # Fake HTTP helpers
 # ---------------------------------------------------------------------------

@@ -490,10 +490,24 @@ def reasoning_field(
     return {"reasoning": value} if supported else {}
 
 
-def extract_final(raw: str, max_chars: int | None = None) -> str:
+def extract_final(raw: str | list[Any], max_chars: int | None = None) -> str:
     """Return plain text with <think> blocks removed."""
     if not raw:
         return ""
+
+    # Handle list content blocks (e.g. from tool-calling models).
+    if isinstance(raw, list):
+        parts: list[str] = []
+        for block in raw:
+            if isinstance(block, str):
+                parts.append(block)
+            elif isinstance(block, dict) and block.get("type") == "text":
+                parts.append(str(block.get("text", "")))
+        raw = " ".join(parts)
+
+    if not raw:
+        return ""
+
     # Remove any leaked reasoning
     s = _THINK_BLOCK.sub("", raw)
     # Collapse whitespace
