@@ -4,10 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import inspect
 import logging
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from homeassistant.const import EVENT_STATE_CHANGED
 from homeassistant.core import callback
@@ -45,7 +44,11 @@ from custom_components.home_generative_agent.snapshot.builder import (
 
 from .correlator import SentinelCorrelator
 from .dynamic_rules import evaluate_dynamic_rules
-from .execution import ACTION_POLICY_AUTO_EXECUTE, SentinelExecutionService
+from .execution import (
+    ACTION_POLICY_AUTO_EXECUTE,
+    ACTION_POLICY_BLOCKED,
+    SentinelExecutionService,
+)
 from .models import AnomalyFinding, CompoundFinding
 from .rules.alarm_disarmed_external_threat import AlarmDisarmedDuringExternalThreatRule
 from .rules.appliance_power_duration import AppliancePowerDurationRule
@@ -339,10 +342,12 @@ class SentinelEngine:
             # under the same single-flight guard so concurrent runs are
             # prevented regardless of the execution path taken.
             triggered = await self._trigger_scheduler.run_once_if_triggered(
-                self._run_once
+                lambda: self._run_once("event")
             )
             if not triggered:
-                await self._trigger_scheduler.run_polling(self._run_once)
+                await self._trigger_scheduler.run_polling(
+                    lambda: self._run_once("poll")
+                )
             try:
                 # Wait for a new trigger or the polling interval — whichever
                 # comes first.  Using wait_for_trigger() means the loop wakes
@@ -356,9 +361,11 @@ class SentinelEngine:
 
     async def async_run_now(self) -> bool:
         """Run one sentinel evaluation cycle immediately if idle."""
-        return await self._trigger_scheduler.run_now(self._run_once)
+        return await self._trigger_scheduler.run_now(
+            lambda: self._run_once("on_demand")
+        )
 
-    async def _run_once(self) -> None:
+    async def _run_once(self, trigger_source: str = "poll") -> None:
         try:
             snapshot = await async_build_full_state_snapshot(self._hass)
         except (ValueError, TypeError, KeyError):
@@ -460,7 +467,13 @@ class SentinelEngine:
 
         for item in correlated:
             await self._dispatch_item(
-                item, snapshot, now, cooldown_type, cooldown_entity, explain_enabled
+                item,
+                snapshot,
+                now,
+                cooldown_type,
+                cooldown_entity,
+                explain_enabled,
+                trigger_source=trigger_source,
             )
         LOGGER.debug("Sentinel cycle completed with %s finding(s).", len(all_findings))
 
@@ -513,11 +526,19 @@ class SentinelEngine:
         cooldown_type: timedelta,
         cooldown_entity: timedelta,
         explain_enabled: bool,  # noqa: FBT001
+        *,
+        trigger_source: str = "poll",
     ) -> None:
         """Route a finding or compound finding through suppression and dispatch."""
         if isinstance(item, CompoundFinding):
             await self._dispatch_compound(
-                item, snapshot, now, cooldown_type, cooldown_entity, explain_enabled
+                item,
+                snapshot,
+                now,
+                cooldown_type,
+                cooldown_entity,
+                explain_enabled,
+                trigger_source=trigger_source,
             )
             return
 
@@ -541,6 +562,14 @@ class SentinelEngine:
                 finding.anomaly_id,
                 finding.type,
                 suppression_decision.reason_code,
+            )
+            await _append_finding_audit(
+                self._audit_store,
+                snapshot,
+                finding,
+                None,
+                suppression_decision.reason_code,
+                trigger_source=trigger_source,
             )
             return
 
@@ -579,6 +608,7 @@ class SentinelEngine:
                     triage_reason_code=triage_reason_code_value,
                     triage_confidence=triage_confidence_value,
                     autonomy_level_at_decision=effective_autonomy,
+                    trigger_source=trigger_source,
                 )
                 return
 
@@ -625,7 +655,32 @@ class SentinelEngine:
                     exec_result.execution_id, now
                 )
 
+        # Always register the finding for cooldown tracking, regardless of policy.
         register_finding(self._suppression.state, finding, now)
+
+        # BLOCKED findings: audit and skip notification — no pending user action.
+        if exec_result.action_policy_path == ACTION_POLICY_BLOCKED:
+            await self._suppression.async_save()
+            LOGGER.debug(
+                "Finding %s blocked by execution policy; no notification dispatched.",
+                finding.anomaly_id,
+            )
+            await _append_finding_audit(
+                self._audit_store,
+                snapshot,
+                finding,
+                None,
+                suppression_decision.reason_code,
+                triage_decision=triage_decision_value,
+                triage_reason_code=triage_reason_code_value,
+                triage_confidence=triage_confidence_value,
+                data_quality=exec_result.data_quality,
+                action_policy_path=exec_result.action_policy_path,
+                autonomy_level_at_decision=effective_autonomy,
+                trigger_source=trigger_source,
+            )
+            return
+
         register_prompt(self._suppression.state, finding, now)
         await self._suppression.async_save()
         LOGGER.info(
@@ -655,6 +710,7 @@ class SentinelEngine:
             canary_would_execute=canary_would_execute,
             action_outcome=action_outcome,
             autonomy_level_at_decision=effective_autonomy,
+            trigger_source=trigger_source,
         )
 
     async def _dispatch_compound(  # noqa: PLR0913
@@ -665,6 +721,8 @@ class SentinelEngine:
         cooldown_type: timedelta,
         cooldown_entity: timedelta,
         explain_enabled: bool,  # noqa: FBT001
+        *,
+        trigger_source: str = "poll",
     ) -> None:
         """
         Apply suppression to a CompoundFinding and dispatch it when appropriate.
@@ -702,19 +760,15 @@ class SentinelEngine:
                 compound.compound_id,
                 len(compound.constituent_findings),
             )
+            await _append_finding_audit(
+                self._audit_store,
+                snapshot,
+                compound,
+                None,
+                "suppressed",
+                trigger_source=trigger_source,
+            )
             return
-
-        for constituent, _reason in passing:
-            register_finding(self._suppression.state, constituent, now)
-            register_prompt(self._suppression.state, constituent, now)
-        await self._suppression.async_save()
-
-        LOGGER.info(
-            "Dispatching compound finding %s (%d constituents, %d passed suppression).",
-            compound.compound_id,
-            len(compound.constituent_findings),
-            len(passing),
-        )
 
         best = max(compound.constituent_findings, key=lambda f: f.confidence)
 
@@ -728,6 +782,42 @@ class SentinelEngine:
         # committed only after the HA service call actually succeeds.
         exec_result = self._execution_service.evaluate_canary(
             best, snapshot, effective_autonomy, now
+        )
+
+        # Always register cooldown for passing constituents.
+        for constituent, _reason in passing:
+            register_finding(self._suppression.state, constituent, now)
+
+        # BLOCKED findings: audit and skip notification — no pending user action.
+        if exec_result.action_policy_path == ACTION_POLICY_BLOCKED:
+            await self._suppression.async_save()
+            LOGGER.debug(
+                "Compound finding %s blocked by execution policy; "
+                "no notification dispatched.",
+                compound.compound_id,
+            )
+            await _append_finding_audit(
+                self._audit_store,
+                snapshot,
+                compound,
+                None,
+                "not_suppressed",
+                data_quality=exec_result.data_quality,
+                action_policy_path=exec_result.action_policy_path,
+                autonomy_level_at_decision=effective_autonomy,
+                trigger_source=trigger_source,
+            )
+            return
+
+        for constituent, _reason in passing:
+            register_prompt(self._suppression.state, constituent, now)
+        await self._suppression.async_save()
+
+        LOGGER.info(
+            "Dispatching compound finding %s (%d constituents, %d passed suppression).",
+            compound.compound_id,
+            len(compound.constituent_findings),
+            len(passing),
         )
 
         canary_would_execute: bool | None = None
@@ -772,6 +862,7 @@ class SentinelEngine:
             canary_would_execute=canary_would_execute,
             action_outcome=action_outcome,
             autonomy_level_at_decision=effective_autonomy,
+            trigger_source=trigger_source,
         )
 
 
@@ -903,22 +994,6 @@ def _build_suppress_kwargs(
     }
 
 
-def _supports_suppression_reason_code(callable_obj: object) -> bool:
-    """Check whether an audit append callable can accept suppression reason metadata."""
-    try:
-        signature = inspect.signature(cast("Any", callable_obj))
-    except (TypeError, ValueError):
-        return False
-
-    if "suppression_reason_code" in signature.parameters:
-        return True
-
-    for parameter in signature.parameters.values():
-        if parameter.kind == inspect.Parameter.VAR_KEYWORD:
-            return True
-    return False
-
-
 async def _append_finding_audit(  # noqa: PLR0913
     audit_store: AuditStore,
     snapshot: FullStateSnapshot,
@@ -935,27 +1010,26 @@ async def _append_finding_audit(  # noqa: PLR0913
     canary_would_execute: bool | None = None,
     action_outcome: dict | None = None,
     autonomy_level_at_decision: int | None = None,
+    trigger_source: str | None = None,
 ) -> None:
     """Append a finding to audit with suppression reason and execution metadata."""
-    if _supports_suppression_reason_code(audit_store.async_append_finding):
-        await cast("Any", audit_store).async_append_finding(
-            snapshot,
-            finding,
-            explanation,
-            suppression_reason_code=suppression_reason_code,
-            triage_decision=triage_decision,
-            triage_reason_code=triage_reason_code,
-            triage_confidence=triage_confidence,
-            data_quality={"quality": data_quality} if data_quality else None,
-            action_policy_path=action_policy_path,
-            execution_id=execution_id,
-            canary_would_execute=canary_would_execute,
-            action_outcome=action_outcome,
-            autonomy_level_at_decision=(
-                str(autonomy_level_at_decision)
-                if autonomy_level_at_decision is not None
-                else None
-            ),
-        )
-        return
-    await cast("Any", audit_store).async_append_finding(snapshot, finding, explanation)
+    await audit_store.async_append_finding(
+        snapshot,
+        finding,
+        explanation,
+        suppression_reason_code=suppression_reason_code,
+        triage_decision=triage_decision,
+        triage_reason_code=triage_reason_code,
+        triage_confidence=triage_confidence,
+        data_quality={"quality": data_quality} if data_quality else None,
+        action_policy_path=action_policy_path,
+        execution_id=execution_id,
+        canary_would_execute=canary_would_execute,
+        action_outcome=action_outcome,
+        autonomy_level_at_decision=(
+            str(autonomy_level_at_decision)
+            if autonomy_level_at_decision is not None
+            else None
+        ),
+        trigger_source=trigger_source,
+    )
