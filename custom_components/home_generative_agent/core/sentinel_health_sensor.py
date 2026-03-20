@@ -27,6 +27,10 @@ _DESC = SensorEntityDescription(
     icon="mdi:shield-check",
 )
 
+# Maximum audit records to fetch per health-sensor refresh.  Using a value well
+# above any realistic hot-store size ensures all records contribute to KPI accuracy.
+_MAX_AUDIT_RECORDS = 1000
+
 # action_outcome statuses that represent a completed autonomous-execute attempt.
 _AUTO_EXEC_TERMINAL: frozenset[str] = frozenset(
     {"success", "partial", "error", "no_actions"}
