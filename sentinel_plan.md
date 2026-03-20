@@ -1,4 +1,4 @@
-# Sentinel - Proactive Deterministic Anomaly Detection
+# Sentinel — Proactive Deterministic Anomaly Detection
 
 ## 1. Non-Negotiable Principles
 
@@ -20,19 +20,20 @@
   - Suppression reason codes, quiet hours, pending-prompt TTL, snooze (`24h`, permanent), and presence-grace windows.
   - LLM triage with a strict prompt allowlist and fail-open behavior.
   - Execution policy service with stale/unavailable handling at the execution gate (autonomy level 2+), plus allowlist, confidence threshold, rate limit, idempotency, canary mode, and live auto-execute.
-  - Baseline updater and temporal/baseline detector support - fully wired end-to-end (2026-03-12): `async_fetch_baselines()` added to `SentinelBaselineUpdater`; engine now calls it each cycle and passes the result to `evaluate_dynamic_rules()`; baseline config fields (`sentinel_baseline_enabled`, `sentinel_baseline_update_interval_minutes`, `sentinel_baseline_freshness_threshold_seconds`) exposed in the Sentinel subentry flow. Prior to this fix the `baseline_deviation` and `time_of_day_anomaly` evaluators always received an empty baselines dict and never fired.
+  - Baseline updater and temporal/baseline detector support — fully wired end-to-end (2026-03-12): `async_fetch_baselines()` added to `SentinelBaselineUpdater`; engine now calls it each cycle and passes the result to `evaluate_dynamic_rules()`; baseline config fields (`sentinel_baseline_enabled`, `sentinel_baseline_update_interval_minutes`, `sentinel_baseline_freshness_threshold_seconds`) exposed in the Sentinel subentry flow. Prior to this fix the `baseline_deviation` and `time_of_day_anomaly` evaluators always received an empty baselines dict and never fired.
   - `sentinel_enabled` is now a true master switch (2026-03-14, PR #330): discovery (`SentinelDiscoveryEngine`) and baseline collection (`SentinelBaselineUpdater`) no longer start when `sentinel_enabled` is `false`, regardless of their individual flags. UI labels updated to "Enable anomaly alerting", "Enable discovery (requires anomaly alerting)", and "Enable baseline collection (requires anomaly alerting)" to make the dependency explicit.
   - Discovery pipeline improvements from Milestone 5: service-mapped suggested actions, on-demand discovery trigger service, immediate rule activation on proposal approval, structured normalization failure reasons, overlap metadata, richer draft notifications, and rule preview before commit.
   - Portable dynamic rule templates (PR #321, merged 2026-03-11) plus follow-on normalization fixes (2026-03-13): six new templates (`unlocked_lock_while_away`, `alarm_state_mismatch`, `entity_state_duration`, `sensor_threshold_condition`, `entity_staleness`, `multiple_entries_open_count`) cover the most common discovery-generated candidate patterns across arbitrary HA configurations. The normalization/evidence-path parser now handles `entities[entity_id=...]`, `entities[entity_ids contains ...]`, and LLM-emitted dot-notation paths like `sensor.foo.state` / `lock.foo.battery_level`; lock battery-low candidates route to `low_battery_sensors`; text-signal fallbacks now cover `high_energy_consumption_night`, `alarm_disarmed_during_external_threat`, and selector-based window-duration candidates; built-in coverage detection now accepts `frontgate` / `backgarage` substrings even when the LLM omits the domain prefix.
-  - The four remaining Rule issues called out in the 2026-03-12 snapshot are now closed in code via new static rules (2026-03-12/13): `alarm_disarmed_during_external_threat` (#309), `camera_backgarage_missing_snapshot_night_home` (#311), `vehicle_parked_near_frontgate_home` (#312), and `unknown_person_frontporch_night_home` (#318).
-  - No Rule issues remain open from the #298-#320 coverage sweep. Remaining gaps are infrastructure/behavioral rather than missing detector patterns: suppressed-finding audit coverage, blocked-vs-notified policy behavior, audit retention/archival wiring, `trigger_source` population, and stable person identifiers in derived presence.
+  - The four remaining Rule issues called out in the 2026-03-12 snapshot are now closed in code via new static rules (2026-03-12/13): `alarm_disarmed_during_external_threat` (#309), `camera_missing_snapshot_night_home` (#311, generalized from `camera_backgarage_missing_snapshot_night_home`), `vehicle_detected_near_camera_home` (#312, generalized from `vehicle_parked_near_frontgate_home`), and `unknown_person_frontporch_night_home` (#318).
+  - No Rule issues remain open from the #298–#320 coverage sweep. Remaining gaps are infrastructure/behavioral rather than missing detector patterns: suppressed-finding audit coverage, blocked-vs-notified policy behavior, audit retention/archival wiring, and `trigger_source` population.
+  - Discovery dedup noise fixed (fix/discovery-dedup-noise, 2026-03-20): four bugs in `_existing_semantic_context()` corrected — (1) rejected proposals now add their candidate key to the exclusion set; (2) null-key candidates (unknown subject/predicate) fall back to a title+summary SHA-256 hash so they are suppressed across cycles; (3) `ProposalStore.cleanup_unsupported_ttl()` auto-expires unsupported proposals after 30 days each discovery cycle; (4) static built-in rule IDs are seeded into `active_rule_ids` sent to the LLM so it knows which topics are already covered.
 - Partially implemented or still open (see Known Current Gaps below for the summary list):
   - Rule/suppression-state-suppressed findings are not written to the audit store (engine silently returns at the suppression gate). Triage-suppressed findings *are* written to audit.
   - `ACTION_POLICY_BLOCKED` blocks execution but does not suppress notification dispatch.
   - Audit schema/retention/archival health in this document is ahead of the current `audit/store.py` implementation. `CONF_AUDIT_HOT_MAX_RECORDS` is now wired: the store default is 500 records with priority eviction (suppressed records evicted before `not_suppressed`); severity-aware eviction and archival backend remain unimplemented.
   - `trigger_source` field exists in `AuditRecord` and migration defaults but is never populated by any engine call — it is always `None` in practice.
   - `action_policy_path` is present in `AuditRecord` and `async_append_finding` but is absent from `_V2_FIELD_DEFAULTS` in `audit/store.py` — v1→v2 migration does not backfill this field.
-  - `derived.people_home` / `derived.people_away` currently contain friendly names when available, not stable person entity IDs.
+  - `derived.people_home` / `derived.people_away` use stable entity IDs (fixed v3.5.3, PR #333).
 
 ### Known Current Gaps
 
@@ -41,7 +42,7 @@
 - `trigger_source` is never populated in audit records.
 - `CONF_AUDIT_HOT_MAX_RECORDS` is wired and the default is 500. Eviction is priority-based (suppressed evicted before `not_suppressed`). Severity-aware eviction (P3) and the archival backend remain unimplemented.
 - `action_policy_path` is not backfilled during v1→v2 audit migration.
-- Presence-grace identity currently uses display-name-derived values, not stable person entity IDs.
+- Presence-grace identity uses stable person entity IDs (fixed v3.5.3, PR #333).
 
 ---
 
@@ -131,8 +132,8 @@ Status: `Mostly implemented`, with open gaps around per-rule thresholds and exac
 - Rate limiter: max actions per time window (per-hour counter, burst-protected).
 - Idempotency key required for autonomous actions:
   - `execution_id = sha256(anomaly_id + action_policy_path + policy_version + window_bucket)`
-  - `policy_version = sha256(json.dumps({"allowed_services": sorted(CONF_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES), "autonomy_level": autonomy_level_at_decision, "min_confidence": CONF_SENTINEL_AUTO_EXECUTE_DEFAULT_MIN_CONFIDENCE, "max_actions_per_hour": CONF_SENTINEL_AUTO_EXECUTE_MAX_ACTIONS_PER_HOUR, "require_pin_for_increase": CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE, "effective_rule_threshold": effective_rule_threshold}, sort_keys=True))` - captures global execution policy and effective rule-level threshold. Structured serialization prevents hash collisions from string concatenation. Changes automatically when any execution-relevant policy changes.
-  - `window_bucket = floor(utc_epoch_seconds / (CONF_SENTINEL_EXECUTION_IDEMPOTENCY_WINDOW_MINUTES * 60))` - default 15 min window; align with the entity's cooldown period when possible.
+  - `policy_version = sha256(json.dumps({"allowed_services": sorted(CONF_SENTINEL_AUTO_EXECUTE_ALLOWED_SERVICES), "autonomy_level": autonomy_level_at_decision, "min_confidence": CONF_SENTINEL_AUTO_EXECUTE_DEFAULT_MIN_CONFIDENCE, "max_actions_per_hour": CONF_SENTINEL_AUTO_EXECUTE_MAX_ACTIONS_PER_HOUR, "require_pin_for_increase": CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE, "effective_rule_threshold": effective_rule_threshold}, sort_keys=True))` — captures global execution policy and effective rule-level threshold. Structured serialization prevents hash collisions from string concatenation. Changes automatically when any execution-relevant policy changes.
+  - `window_bucket = floor(utc_epoch_seconds / (CONF_SENTINEL_EXECUTION_IDEMPOTENCY_WINDOW_MINUTES * 60))` — default 15 min window; align with the entity's cooldown period when possible.
   - Duplicate `execution_id` attempts are blocked and audited.
 - Runtime kill switch disables all autonomous execution immediately.
 - If policy evaluation fails for any reason, default to notify (safe fallback).
@@ -169,8 +170,8 @@ Status: `Implemented, minus some audit metadata`.
   - Optional sanitized evidence: a named allowlist of safe derived fields only:
     - `is_night: bool`
     - `anyone_home: bool`
-    - `recognized_people_count: int` - count only, never names or identifiers
-    - `last_changed_age_seconds: float` - derived elapsed time, not raw timestamp
+    - `recognized_people_count: int` — count only, never names or identifiers
+    - `last_changed_age_seconds: float` — derived elapsed time, not raw timestamp
     - Any field not in this list is stripped before prompt construction.
   - Never allowed: raw entity state values, attribute strings, area names, free-form text from `evidence`.
 - Output schema: `decision=notify|suppress`, `reason_code`, `triage_confidence` (audit-only), `summary`.
@@ -219,7 +220,7 @@ Status: `Mostly implemented`.
   - Reason codes: `user_snooze_24h`, `user_snooze_permanent`.
 - Pending-prompt TTL and auto-resolution states.
 - Target state: every suppressed finding gets explicit `suppression_reason_code` in audit.
-- Current code computes reason codes. Triage-suppressed findings are appended to audit with their reason code. Rule/suppression-state-suppressed findings return before the audit append - they are not yet written to the audit store.
+- Current code computes reason codes. Triage-suppressed findings are appended to audit with their reason code. Rule/suppression-state-suppressed findings return before the audit append — they are not yet written to the audit store.
 
 ---
 
@@ -235,7 +236,7 @@ Status: `Partially implemented`.
 - Current code supports push via configured notify service or persistent notifications, plus per-area routing; it does not yet implement digest mode or severity-tiered audit-only behavior.
 - Attach camera snapshots where available and permissioned. `Planned`.
 - Digest mode for burst findings. `Planned`.
-- Structured snooze options (`24h`, `always`) shown in notification and written through suppression path (Section 8). `7d` is not offered - the action button slot it would occupy is reserved for the False Alarm button due to iOS action button count limits (see Section 8 for the design constraint).
+- Structured snooze options (`24h`, `always`) shown in notification and written through suppression path (Section 8). `7d` is not offered — the action button slot it would occupy is reserved for the False Alarm button due to iOS action button count limits (see Section 8 for the design constraint).
   - Current code exposes `24h` and permanent snooze with confirmation.
 - False Alarm action button included on every notification; tapping it sets `user_response.false_positive = True` in the audit record. *(Implemented)*
 - Sensitive finding notifications may include occupant context from `derived.people_away` when policy allows. `Planned`.
@@ -249,7 +250,7 @@ Status: `Partially implemented`.
   - Frequency rules (N in T)
   - Baseline deviation rules (moving averages, bounded windows) - requires baseline storage from implementation step 1
   - Composite AND/OR templates
-- User-defined custom conditions are addressed through discovery pipeline improvements (see Milestone 5). Lambda/expression rules were considered and removed - they were detection-only (no service-type suggested actions), invisible from `get_dynamic_rules`, and duplicated the pipeline without enabling full autonomy.
+- User-defined custom conditions are addressed through discovery pipeline improvements (see Milestone 5). Lambda/expression rules were considered and removed — they were detection-only (no service-type suggested actions), invisible from `get_dynamic_rules`, and duplicated the pipeline without enabling full autonomy.
 
 ---
 
@@ -439,8 +440,8 @@ Status note: this sequence is historical. Steps 1-12 have substantial implementa
 10. Level 2 canary mode (no execution): compute and audit `would_auto_execute`.
 11. Level 2 guarded auto-execute live mode (allowlist, confidence thresholds, stale-data block, rate limits, idempotency).
 12. Temporal/baseline anomaly detectors (depends on step 1).
-13. Discovery pipeline improvements: service-mapped suggested actions, on-demand discovery trigger, immediate rule activation, normalization transparency, richer draft notifications, and level-increase PIN validation (see Milestone 5, Issues #16-#22).
-14. Level 3 expansion only after burn-in KPIs and stability gates are met. *(Not specified in this plan - requires a dedicated design issue once L2 is proven in production.)*
+13. Discovery pipeline improvements: service-mapped suggested actions, on-demand discovery trigger, immediate rule activation, normalization transparency, richer draft notifications, and level-increase PIN validation (see Milestone 5, Issues #16–#22).
+14. Level 3 expansion only after burn-in KPIs and stability gates are met. *(Not specified in this plan — requires a dedicated design issue once L2 is proven in production.)*
 
 ---
 
@@ -531,7 +532,7 @@ Each issue is a self-contained PR targeting main. Every PR must leave tests gree
 
 Historical note: the issue-status details below mix repository history with current main-branch state. Milestone 5 statuses below include the original PR #296 work plus the follow-on rule/template/evidence-path fixes that landed on 2026-03-12/13.
 
-**Status as of 2026-03-13:** All 15 original issues were closed on GitHub, and the later Sentinel rule/template gaps from the #298–#320 sweep are now also implemented in code. "Closed" here still means implementation work landed, not that every target-state behavior in Sections 2-19 is complete. Remaining known gaps include suppressed-finding audit coverage, blocked-vs-notified behavior, audit retention/archival, `trigger_source` population, and stable person identifiers in derived presence. One unplanned issue (#9b, GitHub #269) covered pending-prompt TTL separately. Issue #15 (lambda rule review/approval UI) was implemented then removed — lambda rules were detection-only (no service-type suggested actions), invisible from `get_dynamic_rules`, and added no value for full autonomy; see PR #285 and Milestone 5. Milestone 5 plus its 2026-03-12/13 follow-on fixes now cover the discovery/rule work reflected in the current repo.
+**Status as of 2026-03-13:** All 15 original issues were closed on GitHub, and the later Sentinel rule/template gaps from the #298–#320 sweep are now also implemented in code. “Closed” here still means implementation work landed, not that every target-state behavior in Sections 2-19 is complete. Remaining known gaps include suppressed-finding audit coverage, blocked-vs-notified behavior, audit retention/archival, `trigger_source` population, and stable person identifiers in derived presence. One unplanned issue (#9b, GitHub #269) covered pending-prompt TTL separately. Issue #15 (lambda rule review/approval UI) was implemented then removed — lambda rules were detection-only (no service-type suggested actions), invisible from `get_dynamic_rules`, and added no value for full autonomy; see PR #285 and Milestone 5. Milestone 5 plus its 2026-03-12/13 follow-on fixes now cover the discovery/rule work reflected in the current repo.
 
 | Plan # | GitHub # | Status | Title |
 | --- | --- | --- | --- |
@@ -561,9 +562,9 @@ Historical note: the issue-status details below mix repository history with curr
 
 ---
 
-### Milestone 0 - Parallel Refactors (no external behavioral change; all four may be opened and merged in any order)
+### Milestone 0 — Parallel Refactors (no external behavioral change; all four may be opened and merged in any order)
 
-**Issue #1 - Structured suppression decision model** *(Done - GitHub #251)*
+**Issue #1 — Structured suppression decision model** *(Done — GitHub #251)*
 
 - Plan coverage: Prerequisite 3, Section 8
 - Scope: Change `should_suppress()` to return a `SuppressionDecision(suppress: bool, reason_code: str, context: dict)` dataclass. Update all call sites in `engine.py`. No change to suppression logic.
@@ -572,7 +573,7 @@ Historical note: the issue-status details below mix repository history with curr
 - Size: S
 - Dependencies: none
 
-**Issue #2 - Snapshot per-person presence** *(Done - GitHub #253)*
+**Issue #2 — Snapshot per-person presence** *(Done — GitHub #253)*
 
 - Plan coverage: Prerequisite 8, Section 15 (multi-occupant)
 - Scope: Add `people_home: list[str]` and `people_away: list[str]` to `DerivedContext` TypedDict and `SNAPSHOT_SCHEMA`. Keep `anyone_home` and all existing fields; new fields default to `[]` if person-tracking entities are unavailable. Update `snapshot/builder.py` to populate them.
@@ -581,7 +582,7 @@ Historical note: the issue-status details below mix repository history with curr
 - Size: S
 - Dependencies: none
 
-**Issue #3 - Versioned audit schema and config surface** *(Done - GitHub #254)*
+**Issue #3 — Versioned audit schema and config surface** *(Done — GitHub #254)*
 
 - Plan coverage: Prerequisite 5 (partial), Prerequisite 6 (partial), Section 12, Section 13
 - Scope: Expand `AuditRecord` with the full field set from Section 12 (`data_quality`, `trigger_source`, `suppression_reason_code`, `triage_confidence`, `canary_would_execute`, `execution_id`, `rule_version`, `autonomy_level_at_decision`). Add `version: int = 1` field. Implement v1→v2 migration in `audit/store.py`. Add `CONF_AUDIT_HOT_MAX_RECORDS`, `CONF_AUDIT_ARCHIVAL_BACKLOG_MAX`, `CONF_AUDIT_RETENTION_DAYS`, `CONF_AUDIT_HIGH_RETENTION_DAYS` to `const.py`. Populate new fields with `None` / sentinel defaults at all existing call sites.
@@ -590,7 +591,7 @@ Historical note: the issue-status details below mix repository history with curr
 - Size: M
 - Dependencies: none
 
-**Issue #4 - Runtime autonomy level and kill-switch service** *(Done - GitHub #255)*
+**Issue #4 — Runtime autonomy level and kill-switch service** *(Done — GitHub #255)*
 
 - Plan coverage: Prerequisite 1, Prerequisite 2, Section 3, Section 5 (kill switch)
 - Scope: Register `home_generative_agent.sentinel_set_autonomy_level` HA service (admin-only, `level: 0|1|2|3`; entry resolved internally, no `entry_id` in call schema). Read runtime level from in-memory override (TTL-bounded) falling back to `CONF_SENTINEL_AUTONOMY_LEVEL`. Add `CONF_SENTINEL_AUTONOMY_LEVEL`, `CONF_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES`, `CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE` to `const.py`. No behavioral change to detection logic.
@@ -601,9 +602,9 @@ Historical note: the issue-status details below mix repository history with curr
 
 ---
 
-### Milestone 1 - Pipeline Infrastructure (Issues #5-#8; merge in order)
+### Milestone 1 — Pipeline Infrastructure (Issues #5–#8; merge in order)
 
-**Issue #5 - Trigger scheduler** *(Done - GitHub #256)*
+**Issue #5 — Trigger scheduler** *(Done — GitHub #256)*
 
 - Plan coverage: Prerequisite 7, Section 6
 - Scope: Extract `SentinelTriggerScheduler` with bounded queue (max 10), coalescing window (5 s default), TTL (30 s), deterministic drop policy (prefer security-critical), and `asyncio.Lock` single-flight. Wire into `engine._run_loop()` without changing polling behavior.
@@ -612,7 +613,7 @@ Historical note: the issue-status details below mix repository history with curr
 - Size: M
 - Dependencies: none (can open alongside Milestone 0 issues)
 
-**Issue #6 - Event-driven triggering** *(Done - GitHub #257)*
+**Issue #6 — Event-driven triggering** *(Done — GitHub #257)*
 
 - Plan coverage: Prerequisite 7 (complete), Section 6
 - Scope: Subscribe to HA state-change events for sentinel-watched entity IDs. On qualifying change, enqueue a trigger via `SentinelTriggerScheduler`. Retain polling as fallback when queue is empty.
@@ -621,7 +622,7 @@ Historical note: the issue-status details below mix repository history with curr
 - Size: M
 - Dependencies: Issue #5
 
-**Issue #7 - Correlation pass** *(Done - GitHub #258)*
+**Issue #7 — Correlation pass** *(Done — GitHub #258)*
 
 - Plan coverage: Section 7
 - Scope: Implement `SentinelCorrelator.correlate(findings)` producing `CompoundFinding` for related findings within a single `_run_once()` call. Compound findings are immutable once emitted. Wire into pipeline between rule evaluation and suppression.
@@ -630,7 +631,7 @@ Historical note: the issue-status details below mix repository history with curr
 - Size: M
 - Dependencies: none (can open alongside Issue #5)
 
-**Issue #8 - Decouple execution service** *(Done - GitHub #259)*
+**Issue #8 — Decouple execution service** *(Done — GitHub #259)*
 
 - Plan coverage: Prerequisite 4, Section 4 (guardrails), Section 2 (staleness validation)
 - Scope: Extract `SentinelExecutionService` from `engine.py`. Implement idempotency key (`sha256(anomaly_id + action_policy_path + policy_version + window_bucket)`), allowlist enforcement, sensitivity-flag block, stale-data block, rate limiter, and PIN gate stub. `policy_version` computed as `sha256(json.dumps({...}, sort_keys=True))` over global policy config fields including `effective_rule_threshold`. Add staleness validation pass using `CONF_SENTINEL_STALENESS_THRESHOLD_SECONDS`.
@@ -641,9 +642,9 @@ Historical note: the issue-status details below mix repository history with curr
 
 ---
 
-### Milestone 2 - Suppression and Notification (Issues #9-#10; merge in order)
+### Milestone 2 — Suppression and Notification (Issues #9–#10; merge in order)
 
-**Issue #9 - Suppression upgrades** *(Done - GitHub #260; pending-prompt TTL done separately as GitHub #269)*
+**Issue #9 — Suppression upgrades** *(Done — GitHub #260; pending-prompt TTL done separately as GitHub #269)*
 
 - Plan coverage: Section 8 (full), Prerequisite 3 (complete), Prerequisite 8 (consumed)
 - Scope: Add snooze routing (snooze writes to `SuppressionState` not `pending_prompts`), per-person presence-grace window, quiet-hours enforcement, `SuppressionState.version` with v1→v2 migration, read-only compatibility mode on downgrade. All suppression paths emit `suppression_reason_code` via `SuppressionDecision`. Pending-prompt TTL and expiry was implemented as a follow-on PR (GitHub #269/PR #273).
@@ -652,7 +653,7 @@ Historical note: the issue-status details below mix repository history with curr
 - Size: M
 - Dependencies: Issues #1, #2
 
-**Issue #10 - Notification routing and UX** *(Done - GitHub #261)*
+**Issue #10 — Notification routing and UX** *(Done — GitHub #261)*
 
 - Plan coverage: Section 9
 - Scope: Implement `SentinelNotifier` with `always` confirmation guard, per-area/per-person routing, snooze action that calls suppression, and `is_sensitive` redaction in notification text. Wire into pipeline after suppression pass.
@@ -663,9 +664,9 @@ Historical note: the issue-status details below mix repository history with curr
 
 ---
 
-### Milestone 3 - Autonomy Features (Issues #11-#13; strictly sequential)
+### Milestone 3 — Autonomy Features (Issues #11–#13; strictly sequential)
 
-**Issue #11 - Level 1: LLM triage** *(Done - GitHub #262)*
+**Issue #11 — Level 1: LLM triage** *(Done — GitHub #262)*
 
 - Plan coverage: Section 7 (triage pass)
 - Scope: Implement `SentinelTriageService`. Build triage prompt from the Section 6 allowlist only (`type`, `severity`, `confidence`, `is_sensitive`, `entity_count`, `suggested_actions_count`) plus explicitly allowed sanitized evidence fields (`is_night`, `anyone_home`, `recognized_people_count`, `last_changed_age_seconds`) when available. Timeout fail-open (treat as `notify`). Record `triage_confidence` in `AuditRecord` (audit-only; never gates execution). Triage output gates only `notify` vs. `suppress`.
@@ -674,7 +675,7 @@ Historical note: the issue-status details below mix repository history with curr
 - Size: M
 - Dependencies: Issues #3, #8
 
-**Issue #12 - Level 2: Canary mode** *(Done - GitHub #263)*
+**Issue #12 — Level 2: Canary mode** *(Done — GitHub #263)*
 
 - Plan coverage: Section 3 (canary), Section 17 (KPI)
 - Scope: When `CONF_SENTINEL_AUTO_EXEC_CANARY_MODE=true`, compute `would_auto_execute` using full guardrail logic and record in `AuditRecord.canary_would_execute`. No action taken. No KPI gate for canary-to-live transition (operator decides). False-positive rate notification-quality KPI still applies during canary.
@@ -683,10 +684,10 @@ Historical note: the issue-status details below mix repository history with curr
 - Size: S
 - Dependencies: Issues #8, #11
 
-**Issue #13 - Level 2: Live auto-execute** *(Done - GitHub #264, closed 2026-03-05)*
+**Issue #13 — Level 2: Live auto-execute** *(Done — GitHub #264, closed 2026-03-05)*
 
 - Plan coverage: Section 4, Section 17 (L1→L2 action KPIs)
-- Scope: Enable live auto-execution behind all guardrails from Issue #8. Idempotency key prevents double-fire. Rate limiter enforced. L1→L2 rollout thresholds from Section 17 (false-positive rate < 10% notification-quality gate; action KPIs N/A during canary) and zero unintended irreversible actions must be met before enabling in production - enforced by rollout process, not code gate.
+- Scope: Enable live auto-execution behind all guardrails from Issue #8. Idempotency key prevents double-fire. Rate limiter enforced. L1→L2 rollout thresholds from Section 17 (false-positive rate < 10% notification-quality gate; action KPIs N/A during canary) and zero unintended irreversible actions must be met before enabling in production — enforced by rollout process, not code gate.
 - Files: `sentinel/execution.py`, `sentinel/engine.py`
 - Tests: Full guardrail integration test; idempotency; rate limit; audit outcome populated; level < 2 blocks execution.
 - Size: M
@@ -694,13 +695,13 @@ Historical note: the issue-status details below mix repository history with curr
 
 ---
 
-### Milestone 4 - Advanced Rules and Level 3 (Issues #14-#15; merge in order)
+### Milestone 4 — Advanced Rules and Level 3 (Issues #14–#15; merge in order)
 
 > **Note:** Issue #14 was completed alongside Milestone 2/3 work (GitHub #265, merged 2026-03-01), ahead of the original milestone order. This was valid since its only dependency is Issue #8. Issue #15 can proceed since its dependency (#14) is done.
 >
 > **Level 3 is not implemented in this milestone.** The milestone title reflects the original roadmap grouping; Issues #14 and #15 are prerequisites for advanced autonomy but do not constitute Level 3 itself. Level 3 requires a separate design issue that should only be opened after L2 has completed its 30-day minimum stable period and all L2→L3 KPI thresholds from Section 17 are met in production.
 
-**Issue #14 - Baseline storage and temporal detectors** *(Done - GitHub #265)*
+**Issue #14 — Baseline storage and temporal detectors** *(Done — GitHub #265)*
 
 - Plan coverage: Section 10 (baseline rules), Section 16 step 1
 - Scope: Implement `SentinelBaselineUpdater` (15-min cadence) writing rolling stats to `sentinel_baselines` PostgreSQL table. Implement temporal-deviation and time-of-day anomaly detector templates that read from baseline. Add `baseline_freshness` check to staleness validation.
@@ -709,26 +710,26 @@ Historical note: the issue-status details below mix repository history with curr
 - Size: L
 - Dependencies: Issue #8
 - Post-merge fixes (2026-03-12, PR #323, branch `feat/sentinel-baseline-detection-complete`):
-  - Added `async_fetch_baselines()` to `SentinelBaselineUpdater` - bulk-reads all `sentinel_baselines` rows into `{entity_id: {metric: float}}`.
+  - Added `async_fetch_baselines()` to `SentinelBaselineUpdater` — bulk-reads all `sentinel_baselines` rows into `{entity_id: {metric: float}}`.
   - Wired `engine.py` `_run_once()` to call `async_fetch_baselines()` and forward the result to `evaluate_dynamic_rules()`; previously the `baselines` argument was always an empty dict so neither template ever fired.
-  - Added the three baseline config constants to `SentinelSubentryFlow`: `CONF_SENTINEL_BASELINE_ENABLED`, `CONF_SENTINEL_BASELINE_UPDATE_INTERVAL_MINUTES`, `CONF_SENTINEL_BASELINE_FRESHNESS_THRESHOLD_SECONDS` - they were defined in `const.py` but never imported or shown in the UI.
+  - Added the three baseline config constants to `SentinelSubentryFlow`: `CONF_SENTINEL_BASELINE_ENABLED`, `CONF_SENTINEL_BASELINE_UPDATE_INTERVAL_MINUTES`, `CONF_SENTINEL_BASELINE_FRESHNESS_THRESHOLD_SECONDS` — they were defined in `const.py` but never imported or shown in the UI.
   - Added translations for the three new fields in `strings.json`, `translations/en.json`, and `translations/tr.json`.
   - Added 4 unit tests for `async_fetch_baselines` (dict rows, tuple rows, DB error, empty result).
   - Updated README Baseline Detection section: correct method name (`check_freshness`), accurate `threshold_pct` per-rule description, removed "can be registered" phrasing.
 
-**Issue #15 - Lambda rule review/approval UI** *(Done → Removed - GitHub #266, closed 2026-03-05; feature removed in PR #285)*
+**Issue #15 — Lambda rule review/approval UI** *(Done → Removed — GitHub #266, closed 2026-03-05; feature removed in PR #285)*
 
 - Originally implemented: AST-validated expression rules with `pending → active` lifecycle and two service calls (`sentinel_receive_lambda_rule`, `sentinel_approve_lambda_rule`).
 - Removed because: lambda rules were detection-only (no `suggested_actions` field exposed in the service, so `_auto_execute_finding` always returned `no_actions`); pending rules were invisible from `get_dynamic_rules` (stored in a separate registry); the feature added a third rule lifecycle alongside built-in rules and the discovery pipeline without enabling full autonomy.
-- Successor: Milestone 5 (Issues #16-#22) addresses the underlying need through discovery pipeline improvements.
+- Successor: Milestone 5 (Issues #16–#22) addresses the underlying need through discovery pipeline improvements.
 
 ---
 
-## Milestone 5 - Discovery Pipeline Improvements (Issues #16-#22)
+## Milestone 5 — Discovery Pipeline Improvements (Issues #16–#22)
 
 The original Issue #15 (lambda rule review/approval UI) was implemented and subsequently removed (PR #285) because lambda rules were detection-only, invisible from the review UI, and provided no path to full autonomy. Milestone 5 addresses the underlying need properly: making the discovery pipeline fast, transparent, and capable of producing rules that can trigger autonomous action.
 
-**Issue #16 - Service-mapped suggested actions** *(Done - [GitHub #288](https://github.com/goruck/home-generative-agent/issues/288), merged in PR #296)*
+**Issue #16 — Service-mapped suggested actions** *(Done — [GitHub #288](https://github.com/goruck/home-generative-agent/issues/288), merged in PR #296)*
 
 - Plan coverage: Section 4 (auto-execute guardrails), Section 3 (Level 2/3 autonomy)
 - Scope: Update `normalize_candidate()` in `proposal_templates.py` to produce HA service calls (e.g. `lock.lock`) as `suggested_actions` for templates where a safe, deterministic action exists. `is_sensitive=True` templates remain blocked from auto-execute by execution guardrail #3 regardless of suggested actions. Templates with no safe automated action continue to produce advisory text only.
@@ -736,10 +737,10 @@ The original Issue #15 (lambda rule review/approval UI) was implemented and subs
 - Tests: `normalize_candidate()` produces `domain.service` format for applicable lock/entry templates; `is_sensitive=True` templates still blocked at execution guardrail; advisory-only templates produce no service-type actions; existing auto-execute integration tests pass unchanged.
 - Size: S
 - Dependencies: none
-- **This is the single highest-value change for full autonomy - without it, no discovered rule can ever trigger auto-execute.**
+- **This is the single highest-value change for full autonomy — without it, no discovered rule can ever trigger auto-execute.**
 - Implemented outcome: normalized proposals now emit service-mapped `suggested_actions` where safe deterministic actions exist.
 
-**Issue #17 - On-demand discovery trigger** *(Done - [GitHub #289](https://github.com/goruck/home-generative-agent/issues/289), merged in PR #296)*
+**Issue #17 — On-demand discovery trigger** *(Done — [GitHub #289](https://github.com/goruck/home-generative-agent/issues/289), merged in PR #296)*
 
 - Plan coverage: Section 16 (discovery latency)
 - Scope: Add `trigger_sentinel_discovery` HA service that runs the LLM discovery cycle against the current snapshot immediately, bypassing the periodic timer. Deduplication and semantic key filtering still apply. Periodic timer is unaffected.
@@ -749,7 +750,7 @@ The original Issue #15 (lambda rule review/approval UI) was implemented and subs
 - Dependencies: none
 - Implemented outcome: `home_generative_agent.trigger_sentinel_discovery` runs one discovery cycle immediately when called.
 
-**Issue #18 - Immediate rule activation on approval** *(Done - [GitHub #290](https://github.com/goruck/home-generative-agent/issues/290), merged in PR #296)*
+**Issue #18 — Immediate rule activation on approval** *(Done — [GitHub #290](https://github.com/goruck/home-generative-agent/issues/290), merged in PR #296)*
 
 - Plan coverage: Section 16 (approval latency)
 - Scope: After `approve_rule_proposal` successfully adds a rule to `RuleRegistry`, trigger a single `_run_once()` against the current snapshot. Rule becomes live in seconds rather than waiting up to one hour for the next scheduled cycle.
@@ -759,7 +760,7 @@ The original Issue #15 (lambda rule review/approval UI) was implemented and subs
 - Dependencies: none
 - Implemented outcome: successful proposal approval now triggers an immediate Sentinel evaluation cycle through the scheduler's single-flight path.
 
-**Issue #19 - Explain normalization failures** *(Done - [GitHub #291](https://github.com/goruck/home-generative-agent/issues/291), merged in PR #296)*
+**Issue #19 — Explain normalization failures** *(Done — [GitHub #291](https://github.com/goruck/home-generative-agent/issues/291), merged in PR #296)*
 
 - Plan coverage: Section 16 (transparency)
 - Scope: When `normalize_candidate()` returns `None`, return a structured reason to the caller (e.g. `no_matching_entity_types`, `unsupported_pattern`, `missing_required_entities`). Surface this reason in the `promote_discovery_candidate` and `approve_rule_proposal` service responses. When `promote` or `approve` returns `already_active`, include the covering rule ID and which entity IDs overlapped.
@@ -769,17 +770,17 @@ The original Issue #15 (lambda rule review/approval UI) was implemented and subs
 - Dependencies: none
 - Implemented outcome: promote/approve responses now return structured `reason_code`, `details`, `covered_rule_id`, and `overlapping_entity_ids` when applicable.
 
-**Issue #20 - Richer proposal draft notifications** *(Done - [GitHub #292](https://github.com/goruck/home-generative-agent/issues/292), merged in PR #296)*
+**Issue #20 — Richer proposal draft notifications** *(Done — [GitHub #292](https://github.com/goruck/home-generative-agent/issues/292), merged in PR #296)*
 
 - Plan coverage: Section 9 (notification UX)
-- Scope: Include `template_id`, `severity`, and `confidence` in the notification sent when a proposal draft is created. Example: *"New HIGH-severity proposal: alarm disarmed + entry open (80% confident) - call approve_rule_proposal to activate."*
+- Scope: Include `template_id`, `severity`, and `confidence` in the notification sent when a proposal draft is created. Example: *"New HIGH-severity proposal: alarm disarmed + entry open (80% confident) — call approve_rule_proposal to activate."*
 - Files: `__init__.py` (promote handler)
 - Tests: Notification payload includes template_id, severity, confidence, and actionable service call hint.
 - Size: XS
 - Dependencies: none
 - Implemented outcome: draft notifications now include template context and actionable approval guidance instead of a generic message.
 
-**Issue #21 - Rule preview before commit** *(Done - [GitHub #293](https://github.com/goruck/home-generative-agent/issues/293), merged in PR #297)*
+**Issue #21 — Rule preview before commit** *(Done — [GitHub #293](https://github.com/goruck/home-generative-agent/issues/293), merged in PR #297)*
 
 - Plan coverage: Section 16 (operator control)
 - Scope: Add `preview_rule_proposal` HA service that evaluates the normalized rule spec against the current snapshot without writing to the registry. Returns whether the rule would trigger right now, and against which entities. Intended as a dry-run step before calling `approve_rule_proposal`.
@@ -789,7 +790,7 @@ The original Issue #15 (lambda rule review/approval UI) was implemented and subs
 - Dependencies: Issue #18 (shares immediate-snapshot evaluation path)
 - Implemented outcome: `home_generative_agent.preview_rule_proposal` performs a read-only evaluation of a stored proposal draft against the current snapshot, reusing the dynamic rule evaluation path so preview behavior matches live deterministic evaluation.
 
-**Issue #22 - PIN validation for autonomy level increase** *(Done - [GitHub #294](https://github.com/goruck/home-generative-agent/issues/294), merged in PR #296)*
+**Issue #22 — PIN validation for autonomy level increase** *(Done — [GitHub #294](https://github.com/goruck/home-generative-agent/issues/294), merged in PR #296)*
 
 - Plan coverage: Section 3 (runtime kill switch and override lifecycle), Section 15 (Prerequisite 2)
 - Scope: `sentinel_set_autonomy_level` now validates `pin` on level increases. Sentinel stores salted hash material in config (not plaintext) and compares the provided PIN when `CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE=true`. Level decreases and level 0 (kill switch) never require PIN.
@@ -802,7 +803,7 @@ The original Issue #15 (lambda rule review/approval UI) was implemented and subs
 Post-merge follow-on fixes now also landed in the repo (2026-03-12/13):
 
 - Baseline detection wiring fix: `SentinelBaselineUpdater.async_fetch_baselines()` is now called from `engine.py`, and the baseline config fields are exposed in the Sentinel subentry flow. Before this, `baseline_deviation` / `time_of_day_anomaly` always saw an empty baselines dict.
-- Static rule coverage expansion: four new built-in rules closed the remaining novel-pattern issues from the #298–#320 sweep: `alarm_disarmed_during_external_threat` (#309), `camera_backgarage_missing_snapshot_night_home` (#311), `vehicle_parked_near_frontgate_home` (#312), and `unknown_person_frontporch_night_home` (#318).
+- Static rule coverage expansion: four new built-in rules closed the remaining novel-pattern issues from the #298–#320 sweep: `alarm_disarmed_during_external_threat` (#309), `camera_missing_snapshot_night_home` (#311, generalized from `camera_backgarage_missing_snapshot_night_home`), `vehicle_detected_near_camera_home` (#312, generalized from `vehicle_parked_near_frontgate_home`), and `unknown_person_frontporch_night_home` (#318).
 - Proposal normalization gap fixes: discovery candidates for high-energy-at-night, alarm-disarmed-during-threat, and window-duration cases now normalize to supported deterministic templates instead of returning `unsupported`.
 - Evidence-path parsing now accepts dot-notation entity references like `sensor.foo.state` and `lock.foo.battery_level`, which matches the LLM output seen in discovery records and fixes several false `unsupported` approvals.
 - Built-in rule overlap detection is more tolerant of LLM evidence paths that omit the domain prefix (`frontgate`, `backgarage`), and battery-low lock candidates no longer misroute to unlocked-lock templates.
@@ -860,8 +861,8 @@ Declared issue dependencies (authoritative):
 
 - Each issue should reference the relevant plan sections in its description body.
 - Milestone 0 issues can be merged in any order and independently reviewed.
-- Milestone 1-4 issues should be merged in the numbered order within each milestone.
-- The `execution_id` idempotency implementation in Issue #8 must be complete before any auto-execution work in Issues #12-#13.
+- Milestone 1–4 issues should be merged in the numbered order within each milestone.
+- The `execution_id` idempotency implementation in Issue #8 must be complete before any auto-execution work in Issues #12–#13.
 - Canary mode (Issue #12) must be run in production for a minimum observation period before Issue #13 is enabled; this gate is a rollout process control, not a code gate.
 - Issue #14 requires a PostgreSQL instance; it is safely skippable if that dependency is not available in the deployment environment.
-- Milestone 5 issues (#16-#22) are independent of each other except #21 (preview depends on #18 for the immediate-activation path) and can be opened and merged in any order.
+- Milestone 5 issues (#16–#22) are independent of each other except #21 (preview depends on #18 for the immediate-activation path) and can be opened and merged in any order.
