@@ -160,12 +160,20 @@
             "sentinel_baseline_enabled": "Enable baseline collection (requires anomaly alerting)",
             "sentinel_baseline_update_interval_minutes": "Baseline update interval (minutes)",
             "sentinel_baseline_freshness_threshold_seconds": "Baseline freshness threshold (seconds)",
+            "sentinel_baseline_weekly_patterns": "Enable day-of-week baselines (reduces weekend false positives)",
+            "sentinel_baseline_dow_min_samples": "DOW baseline minimum samples (weeks of data per slot)",
             "explain_enabled": "Enable LLM explanations for sentinel findings",
             "sentinel_require_pin_for_level_increase": "Require PIN for autonomy level increases",
+            "sentinel_daily_digest_enabled": "Enable daily digest notification",
+            "sentinel_daily_digest_time": "Daily digest time (HH:MM:SS)",
+            "sentinel_camera_entry_links": "Camera entry links (JSON, optional)",
             "critical_action_pin": "Sentinel level-increase PIN (optional)",
             "notify_service": "Sentinel Notify Service (optional)"
           }
         }
+      },
+      "error": {
+        "invalid_camera_entry_links": "Must be a JSON object mapping camera entity IDs to lists of entry entity IDs, e.g. {{\"camera.driveway\": [\"lock.front_door\"]}}."
       }
     },
     "feature": {

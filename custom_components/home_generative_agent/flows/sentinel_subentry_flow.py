@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 import voluptuous as vol
@@ -23,16 +24,22 @@ from homeassistant.helpers.selector import (
     TextSelector,
     TextSelectorConfig,
     TextSelectorType,
+    TimeSelector,
 )
 
 from ..const import (  # noqa: TID252
     CONF_CRITICAL_ACTION_PIN,
     CONF_EXPLAIN_ENABLED,
     CONF_NOTIFY_SERVICE,
+    CONF_SENTINEL_BASELINE_DOW_MIN_SAMPLES,
     CONF_SENTINEL_BASELINE_ENABLED,
     CONF_SENTINEL_BASELINE_FRESHNESS_THRESHOLD_SECONDS,
     CONF_SENTINEL_BASELINE_UPDATE_INTERVAL_MINUTES,
+    CONF_SENTINEL_BASELINE_WEEKLY_PATTERNS,
+    CONF_SENTINEL_CAMERA_ENTRY_LINKS,
     CONF_SENTINEL_COOLDOWN_MINUTES,
+    CONF_SENTINEL_DAILY_DIGEST_ENABLED,
+    CONF_SENTINEL_DAILY_DIGEST_TIME,
     CONF_SENTINEL_DISCOVERY_ENABLED,
     CONF_SENTINEL_DISCOVERY_INTERVAL_SECONDS,
     CONF_SENTINEL_DISCOVERY_MAX_RECORDS,
@@ -46,10 +53,15 @@ from ..const import (  # noqa: TID252
     CRITICAL_PIN_MAX_LEN,
     CRITICAL_PIN_MIN_LEN,
     RECOMMENDED_EXPLAIN_ENABLED,
+    RECOMMENDED_SENTINEL_BASELINE_DOW_MIN_SAMPLES,
     RECOMMENDED_SENTINEL_BASELINE_ENABLED,
     RECOMMENDED_SENTINEL_BASELINE_FRESHNESS_THRESHOLD_SECONDS,
     RECOMMENDED_SENTINEL_BASELINE_UPDATE_INTERVAL_MINUTES,
+    RECOMMENDED_SENTINEL_BASELINE_WEEKLY_PATTERNS,
+    RECOMMENDED_SENTINEL_CAMERA_ENTRY_LINKS,
     RECOMMENDED_SENTINEL_COOLDOWN_MINUTES,
+    RECOMMENDED_SENTINEL_DAILY_DIGEST_ENABLED,
+    RECOMMENDED_SENTINEL_DAILY_DIGEST_TIME,
     RECOMMENDED_SENTINEL_DISCOVERY_ENABLED,
     RECOMMENDED_SENTINEL_DISCOVERY_INTERVAL_SECONDS,
     RECOMMENDED_SENTINEL_DISCOVERY_MAX_RECORDS,
@@ -61,6 +73,15 @@ from ..const import (  # noqa: TID252
     SUBENTRY_TYPE_SENTINEL,
 )
 from ..core.utils import hash_pin, list_mobile_notify_services  # noqa: TID252
+
+
+def _camera_entry_links_json(raw: dict[str, list[str]] | str) -> str:
+    """Serialize camera-entry links to a JSON string for the form field."""
+    if isinstance(raw, str):
+        return raw
+    if not raw:
+        return ""
+    return json.dumps(raw, separators=(",", ":"))
 
 
 def _current_subentry(flow: ConfigSubentryFlow) -> ConfigSubentry | None:
@@ -107,9 +128,12 @@ def _default_payload() -> dict[str, Any]:
             RECOMMENDED_SENTINEL_BASELINE_FRESHNESS_THRESHOLD_SECONDS
         ),
         CONF_EXPLAIN_ENABLED: RECOMMENDED_EXPLAIN_ENABLED,
+        CONF_SENTINEL_DAILY_DIGEST_ENABLED: RECOMMENDED_SENTINEL_DAILY_DIGEST_ENABLED,
+        CONF_SENTINEL_DAILY_DIGEST_TIME: RECOMMENDED_SENTINEL_DAILY_DIGEST_TIME,
         CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE: (
             RECOMMENDED_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE
         ),
+        CONF_SENTINEL_CAMERA_ENTRY_LINKS: RECOMMENDED_SENTINEL_CAMERA_ENTRY_LINKS,
     }
 
 
@@ -222,11 +246,59 @@ class SentinelSubentryFlow(ConfigSubentryFlow):
                 ),
             ): NumberSelector(NumberSelectorConfig(min=60, max=86400, step=60)),
             vol.Required(
+                CONF_SENTINEL_BASELINE_WEEKLY_PATTERNS,
+                default=bool(
+                    payload.get(
+                        CONF_SENTINEL_BASELINE_WEEKLY_PATTERNS,
+                        RECOMMENDED_SENTINEL_BASELINE_WEEKLY_PATTERNS,
+                    )
+                ),
+            ): BooleanSelector(),
+            vol.Required(
+                CONF_SENTINEL_BASELINE_DOW_MIN_SAMPLES,
+                default=int(
+                    payload.get(
+                        CONF_SENTINEL_BASELINE_DOW_MIN_SAMPLES,
+                        RECOMMENDED_SENTINEL_BASELINE_DOW_MIN_SAMPLES,
+                    )
+                ),
+            ): NumberSelector(NumberSelectorConfig(min=1, max=52, step=1)),
+            vol.Required(
                 CONF_EXPLAIN_ENABLED,
                 default=bool(
                     payload.get(CONF_EXPLAIN_ENABLED, RECOMMENDED_EXPLAIN_ENABLED)
                 ),
             ): BooleanSelector(),
+            vol.Required(
+                CONF_SENTINEL_DAILY_DIGEST_ENABLED,
+                default=bool(
+                    payload.get(
+                        CONF_SENTINEL_DAILY_DIGEST_ENABLED,
+                        RECOMMENDED_SENTINEL_DAILY_DIGEST_ENABLED,
+                    )
+                ),
+            ): BooleanSelector(),
+            vol.Required(
+                CONF_SENTINEL_DAILY_DIGEST_TIME,
+                default=str(
+                    payload.get(
+                        CONF_SENTINEL_DAILY_DIGEST_TIME,
+                        RECOMMENDED_SENTINEL_DAILY_DIGEST_TIME,
+                    )
+                ),
+            ): TimeSelector(),
+            vol.Optional(
+                CONF_SENTINEL_CAMERA_ENTRY_LINKS,
+                description={
+                    "suggested_value": _camera_entry_links_json(
+                        payload.get(
+                            CONF_SENTINEL_CAMERA_ENTRY_LINKS,
+                            RECOMMENDED_SENTINEL_CAMERA_ENTRY_LINKS,
+                        )
+                    ),
+                },
+                default="",
+            ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
             vol.Required(
                 CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE,
                 default=bool(
@@ -283,7 +355,7 @@ class SentinelSubentryFlow(ConfigSubentryFlow):
         """Entry point for Sentinel setup/reconfigure."""
         return await self.async_step_settings(user_input)
 
-    async def async_step_settings(  # noqa: PLR0912
+    async def async_step_settings(  # noqa: PLR0912, PLR0915
         self, user_input: dict[str, Any] | None = None
     ) -> SubentryFlowResult:
         """Create or edit Sentinel configuration."""
@@ -332,10 +404,30 @@ class SentinelSubentryFlow(ConfigSubentryFlow):
                     CONF_SENTINEL_LEVEL_INCREASE_PIN_SALT
                 ]
 
+        raw_links = str(
+            data.get(CONF_SENTINEL_CAMERA_ENTRY_LINKS, "") or ""
+        ).strip()
+        if raw_links:
+            try:
+                parsed = json.loads(raw_links)
+                if not isinstance(parsed, dict) or not all(
+                    isinstance(v, list) and all(isinstance(i, str) for i in v)
+                    for v in parsed.values()
+                ):
+                    raise ValueError  # noqa: TRY301
+                data[CONF_SENTINEL_CAMERA_ENTRY_LINKS] = parsed
+            except (json.JSONDecodeError, ValueError):
+                errors["base"] = "invalid_camera_entry_links"
+        else:
+            data.pop(CONF_SENTINEL_CAMERA_ENTRY_LINKS, None)
+
         if errors:
+            error_payload = {**payload, **data}
+            error_payload.pop(CONF_SENTINEL_LEVEL_INCREASE_PIN_HASH, None)
+            error_payload.pop(CONF_SENTINEL_LEVEL_INCREASE_PIN_SALT, None)
             return self.async_show_form(
                 step_id="settings",
-                data_schema=self._schema({**payload, **data}),
+                data_schema=self._schema(error_payload),
                 errors=errors,
             )
 

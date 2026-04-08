@@ -9,7 +9,7 @@ DOMAIN = "home_generative_agent"
 HGA_CARD_STATIC_PATH = "/hga-card"
 HGA_CARD_STATIC_PATH_LEGACY = "/hga-enroll-card"
 
-CONFIG_ENTRY_VERSION = 5
+CONFIG_ENTRY_VERSION = 6
 
 SUBENTRY_TYPE_DATABASE = "database"
 SUBENTRY_TYPE_MODEL_PROVIDER = "model_provider"
@@ -69,7 +69,6 @@ RECOMMENDED_MEM0_SERVER_URL = "http://192.168.10.2:8673/sse"
 
 # ---- Notify service (for mobile push notifications) ----
 CONF_NOTIFY_SERVICE = "notify_service"
-LLM_HASS_API_NONE = "none"
 
 # ---- LangChain logging ----
 # See https://python.langchain.com/docs/how_to/debugging/
@@ -247,6 +246,13 @@ RECOMMENDED_SENTINEL_PRESENCE_GRACE_MINUTES: int = 10
 # Maps area name -> notify service, e.g. {"bedroom": "notify.mobile_app_alice"}
 CONF_SENTINEL_AREA_NOTIFY_MAP = "sentinel_area_notify_map"
 
+# ---- Sentinel camera-entry rule configuration ----
+# Maps camera entity_id -> list of entry/lock entity_ids in adjacent areas.
+# Use when a camera covers an entry that is not in the same HA area.
+# e.g. {"camera.driveway": ["lock.front_door", "binary_sensor.front_door"]}
+CONF_SENTINEL_CAMERA_ENTRY_LINKS: str = "sentinel_camera_entry_links"
+RECOMMENDED_SENTINEL_CAMERA_ENTRY_LINKS: dict[str, list[str]] = {}
+
 # ---- Sentinel LLM triage (Issue #262) ----
 CONF_SENTINEL_TRIAGE_ENABLED = "sentinel_triage_enabled"
 CONF_SENTINEL_TRIAGE_TIMEOUT_SECONDS = "sentinel_triage_timeout_seconds"
@@ -270,12 +276,19 @@ RECOMMENDED_SENTINEL_BASELINE_FRESHNESS_THRESHOLD_SECONDS: int = 3600
 RECOMMENDED_SENTINEL_BASELINE_MIN_SAMPLES: int = 20
 RECOMMENDED_SENTINEL_BASELINE_MAX_SAMPLES: int = 500
 RECOMMENDED_SENTINEL_BASELINE_DRIFT_THRESHOLD_PCT: float = 30.0
+# DOW (day-of-week) baseline extensions — Sprint 3 PR2
+CONF_SENTINEL_BASELINE_WEEKLY_PATTERNS = "sentinel_baseline_weekly_patterns"
+CONF_SENTINEL_BASELINE_DOW_MIN_SAMPLES = "sentinel_baseline_dow_min_samples"
+RECOMMENDED_SENTINEL_BASELINE_WEEKLY_PATTERNS: bool = False
+# DOW slots update once/week; 4 weeks separates weekend/weekday patterns.
+# Lower than RECOMMENDED_SENTINEL_BASELINE_MIN_SAMPLES (20) for global EMA.
+RECOMMENDED_SENTINEL_BASELINE_DOW_MIN_SAMPLES: int = 4
 
 # ---- Sentinel daily digest notification ----
 CONF_SENTINEL_DAILY_DIGEST_ENABLED = "sentinel_daily_digest_enabled"
 CONF_SENTINEL_DAILY_DIGEST_TIME = "sentinel_daily_digest_time"
 RECOMMENDED_SENTINEL_DAILY_DIGEST_ENABLED: bool = False
-RECOMMENDED_SENTINEL_DAILY_DIGEST_TIME: str = "08:00"
+RECOMMENDED_SENTINEL_DAILY_DIGEST_TIME: str = "08:00:00"
 
 # ---- Feature definitions ----
 DEFAULT_FEATURE_TYPES: tuple[str, ...] = (
