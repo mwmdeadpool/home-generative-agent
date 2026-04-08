@@ -6,7 +6,7 @@ import asyncio
 import contextlib
 import logging
 from datetime import datetime, timedelta
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from homeassistant.const import EVENT_STATE_CHANGED
 from homeassistant.core import callback
@@ -18,6 +18,7 @@ from custom_components.home_generative_agent.const import (
     ACTION_POLICY_AUTO_EXECUTE,
     ACTION_POLICY_BLOCKED,
     CONF_EXPLAIN_ENABLED,
+    CONF_SENTINEL_CAMERA_ENTRY_LINKS,
     CONF_SENTINEL_AUTO_EXEC_CANARY_MODE,
     CONF_SENTINEL_AUTONOMY_LEVEL,
     CONF_SENTINEL_COOLDOWN_MINUTES,
@@ -171,7 +172,12 @@ class SentinelEngine:
             UnlockedLockAtNightRule(),
             OpenEntryWhileAwayRule(),
             AppliancePowerDurationRule(),
-            CameraEntryUnsecuredRule(),
+            CameraEntryUnsecuredRule(
+                camera_entry_links=cast(
+                    "dict[str, list[str]]",
+                    options.get(CONF_SENTINEL_CAMERA_ENTRY_LINKS) or {},
+                ),
+            ),
             UnknownPersonCameraNoHomeRule(),
             UnknownPersonAtNightWhileHomeRule(),
             VehicleDetectedNearCameraRule(),
