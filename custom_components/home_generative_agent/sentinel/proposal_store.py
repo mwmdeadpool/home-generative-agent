@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.storage import Store
+from homeassistant.util import dt as dt_util
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
@@ -127,6 +128,8 @@ class ProposalStore:
                 record["review_notes"] = notes
             if extra:
                 record.update(extra)
+            if status == "approved" and "approved_at" not in record:
+                record["approved_at"] = dt_util.utcnow().isoformat()
             await self.async_save()
             return True
         return False

@@ -12,6 +12,7 @@ from custom_components.home_generative_agent.const import ACTION_PREFIX, DOMAIN
 from custom_components.home_generative_agent.core.utils import extract_final
 from custom_components.home_generative_agent.sentinel.suppression import (
     SuppressionManager,
+    record_cooldown_feedback,
     resolve_prompt,
 )
 
@@ -65,7 +66,6 @@ class ActionHandler:
         LOGGER.info("Handling sentinel action %s for %s.", action, anomaly_id)
         finding = self._pending_findings.get(anomaly_id)
         resolve_prompt(self._suppression.state, anomaly_id)
-        await self._suppression.async_save()
 
         response = {
             "action": action,
@@ -81,6 +81,13 @@ class ActionHandler:
             # User explicitly marked this alert as a false positive.
             response["false_positive"] = True
             outcome = {"status": "dismissed"}
+            if finding is not None and finding.triggering_entities:
+                for _entity_id in finding.triggering_entities:
+                    record_cooldown_feedback(
+                        self._suppression.state, _entity_id, finding.type
+                    )
+
+        await self._suppression.async_save()
 
         if anomaly_id:
             self._pending_findings.pop(anomaly_id, None)

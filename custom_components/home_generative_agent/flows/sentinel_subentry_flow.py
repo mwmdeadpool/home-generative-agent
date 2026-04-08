@@ -23,12 +23,15 @@ from homeassistant.helpers.selector import (
     TextSelector,
     TextSelectorConfig,
     TextSelectorType,
+    TimeSelector,
 )
 
 from ..const import (  # noqa: TID252
     CONF_CRITICAL_ACTION_PIN,
     CONF_EXPLAIN_ENABLED,
     CONF_NOTIFY_SERVICE,
+    CONF_SENTINEL_DAILY_DIGEST_ENABLED,
+    CONF_SENTINEL_DAILY_DIGEST_TIME,
     CONF_SENTINEL_BASELINE_ENABLED,
     CONF_SENTINEL_BASELINE_FRESHNESS_THRESHOLD_SECONDS,
     CONF_SENTINEL_BASELINE_UPDATE_INTERVAL_MINUTES,
@@ -46,6 +49,8 @@ from ..const import (  # noqa: TID252
     CRITICAL_PIN_MAX_LEN,
     CRITICAL_PIN_MIN_LEN,
     RECOMMENDED_EXPLAIN_ENABLED,
+    RECOMMENDED_SENTINEL_DAILY_DIGEST_ENABLED,
+    RECOMMENDED_SENTINEL_DAILY_DIGEST_TIME,
     RECOMMENDED_SENTINEL_BASELINE_ENABLED,
     RECOMMENDED_SENTINEL_BASELINE_FRESHNESS_THRESHOLD_SECONDS,
     RECOMMENDED_SENTINEL_BASELINE_UPDATE_INTERVAL_MINUTES,
@@ -107,6 +112,8 @@ def _default_payload() -> dict[str, Any]:
             RECOMMENDED_SENTINEL_BASELINE_FRESHNESS_THRESHOLD_SECONDS
         ),
         CONF_EXPLAIN_ENABLED: RECOMMENDED_EXPLAIN_ENABLED,
+        CONF_SENTINEL_DAILY_DIGEST_ENABLED: RECOMMENDED_SENTINEL_DAILY_DIGEST_ENABLED,
+        CONF_SENTINEL_DAILY_DIGEST_TIME: RECOMMENDED_SENTINEL_DAILY_DIGEST_TIME,
         CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE: (
             RECOMMENDED_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE
         ),
@@ -227,6 +234,24 @@ class SentinelSubentryFlow(ConfigSubentryFlow):
                     payload.get(CONF_EXPLAIN_ENABLED, RECOMMENDED_EXPLAIN_ENABLED)
                 ),
             ): BooleanSelector(),
+            vol.Required(
+                CONF_SENTINEL_DAILY_DIGEST_ENABLED,
+                default=bool(
+                    payload.get(
+                        CONF_SENTINEL_DAILY_DIGEST_ENABLED,
+                        RECOMMENDED_SENTINEL_DAILY_DIGEST_ENABLED,
+                    )
+                ),
+            ): BooleanSelector(),
+            vol.Required(
+                CONF_SENTINEL_DAILY_DIGEST_TIME,
+                default=str(
+                    payload.get(
+                        CONF_SENTINEL_DAILY_DIGEST_TIME,
+                        RECOMMENDED_SENTINEL_DAILY_DIGEST_TIME,
+                    )
+                ),
+            ): TimeSelector(),
             vol.Required(
                 CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE,
                 default=bool(
