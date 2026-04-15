@@ -83,6 +83,20 @@ COMPLETION_RECENCY_SECS = 900
 # regardless of the configured threshold_pct.
 MINIMUM_POWER_DEVIATION_WATTS = 50.0
 
+# Cyclical-load entity keywords.  Entities whose entity_id or friendly_name
+# tokenises to any of these hints are subject to the sustained deviation gate.
+# Tokens are extracted by splitting on dots, underscores, and spaces via
+# re.split(r"[._\s]+", entity_id) so sensor.refrigerator_power correctly
+# produces the token "refrigerator".
+CYCLICAL_LOAD_HINTS: frozenset[str] = frozenset(
+    {
+        "fridge",
+        "refrigerator",
+        "freezer",
+        "compressor",
+    }
+)
+
 # Entity-name keywords that identify dedicated appliance circuits.  Only these
 # entities qualify for completion detection; generic power sensors (UPS, fridge,
 # whole-home, server rack) are intentionally excluded.
