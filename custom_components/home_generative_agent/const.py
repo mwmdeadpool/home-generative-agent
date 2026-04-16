@@ -283,6 +283,7 @@ RECOMMENDED_SENTINEL_BASELINE_WEEKLY_PATTERNS: bool = False
 # DOW slots update once/week; 4 weeks separates weekend/weekday patterns.
 # Lower than RECOMMENDED_SENTINEL_BASELINE_MIN_SAMPLES (20) for global EMA.
 RECOMMENDED_SENTINEL_BASELINE_DOW_MIN_SAMPLES: int = 4
+# Cyclical load sustained deviation gate — Sprint 4
 # Entities matching CYCLICAL_LOAD_HINTS (fridge/freezer/compressor) must stay
 # above the deviation threshold for this many minutes before firing.  0 = disabled.
 CONF_SENTINEL_BASELINE_SUSTAINED_MINUTES = "sentinel_baseline_sustained_minutes"

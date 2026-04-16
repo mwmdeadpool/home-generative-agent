@@ -79,13 +79,21 @@ class ActionHandler:
             outcome = await self._outcome_for_handoff(finding, payload)
         elif action == "dismiss":
             # User explicitly marked this alert as a false positive.
+            # Record per-entity feedback so future cooldowns are extended.
             response["false_positive"] = True
+            if finding is not None and finding.triggering_entities:
+                for _entity_id in finding.triggering_entities:
+                    record_cooldown_feedback(
+                        self._suppression.state, _entity_id, finding.type
+                    )
             outcome = {"status": "dismissed"}
             if finding is not None and finding.triggering_entities:
                 for _entity_id in finding.triggering_entities:
                     record_cooldown_feedback(
                         self._suppression.state, _entity_id, finding.type
                     )
+
+        await self._suppression.async_save()
 
         await self._suppression.async_save()
 

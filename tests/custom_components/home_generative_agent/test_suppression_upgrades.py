@@ -9,6 +9,7 @@ for all suppression paths, v1→v2 migration, and read-only compatibility mode.
 from __future__ import annotations
 
 from datetime import timedelta
+from typing import Any
 
 from homeassistant.util import dt as dt_util
 
@@ -382,7 +383,7 @@ def test_suppression_state_serialization_includes_new_fields() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _v1_data() -> dict:
+def _v1_data() -> dict[str, Any]:
     return {
         "last_by_type": {"open_entry_while_away": "2025-01-01T00:00:00+00:00"},
         "last_by_entity": {},
@@ -396,7 +397,7 @@ def test_migrate_v1_adds_version_and_new_fields() -> None:
     result = _migrate_suppression_state(data)
 
     assert result is data  # in-place
-    assert result["version"] == 4
+    assert result["version"] == 5
     assert "snoozed_until" in result
     assert "presence_grace_until" in result
     assert result["learned_cooldown_multipliers"] == {}
@@ -418,8 +419,8 @@ def test_migrate_is_idempotent() -> None:
     assert data == snapshot
 
 
-def test_migrate_v3_upgrades_to_v4() -> None:
-    """v3 state is upgraded to v4 — learned_cooldown_multipliers added."""
+def test_migrate_v3_upgrades_to_v5() -> None:
+    """v3 state is upgraded through v4 and to v5 — learned_cooldown_multipliers added."""
     data: dict = {
         "last_by_type": {},
         "last_by_entity": {},
@@ -429,12 +430,12 @@ def test_migrate_v3_upgrades_to_v4() -> None:
         "presence_grace_until": {},
     }
     _migrate_suppression_state(data)
-    assert data["version"] == 4
+    assert data["version"] == 5
     assert data["learned_cooldown_multipliers"] == {}
 
 
-def test_migrate_skips_already_v4() -> None:
-    """v4 state is not mutated by migration."""
+def test_migrate_v4_discards_bare_keys_and_upgrades_to_v5() -> None:
+    """v4 state with bare entity_id keys is discarded and upgraded to v5."""
     data: dict = {
         "last_by_type": {},
         "last_by_entity": {},
@@ -444,9 +445,29 @@ def test_migrate_skips_already_v4() -> None:
         "presence_grace_until": {},
         "learned_cooldown_multipliers": {"lock.front": 2},
     }
-    original = dict(data)
     _migrate_suppression_state(data)
-    assert data == original
+    assert data["version"] == 5
+    # Bare key "lock.front" (no colon) must be discarded — wrong key scheme.
+    assert data["learned_cooldown_multipliers"] == {}
+
+
+def test_migrate_v4_preserves_compound_keys() -> None:
+    """v4 state that already uses compound keys retains them after v4→v5."""
+    data: dict = {
+        "last_by_type": {},
+        "last_by_entity": {},
+        "pending_prompts": {},
+        "version": 4,
+        "snoozed_until": {},
+        "presence_grace_until": {},
+        # Already uses compound key — keep it.
+        "learned_cooldown_multipliers": {"unlocked_lock_at_night:lock.front": 3},
+    }
+    _migrate_suppression_state(data)
+    assert data["version"] == 5
+    assert data["learned_cooldown_multipliers"] == {
+        "unlocked_lock_at_night:lock.front": 3
+    }
 
 
 def test_from_dict_handles_v1_data() -> None:
@@ -456,7 +477,7 @@ def test_from_dict_handles_v1_data() -> None:
     _migrate_suppression_state(data)
     state = SuppressionState.from_dict(data)
 
-    assert state.version == 4
+    assert state.version == 5
     assert state.snoozed_until == {}
     assert state.presence_grace_until == {}
     assert state.learned_cooldown_multipliers == {}
@@ -499,7 +520,7 @@ def test_snooze_takes_priority_over_presence_grace() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _v2_data_with_friendly_name_keys() -> dict:
+def _v2_data_with_friendly_name_keys() -> dict[str, Any]:
     """Return a v2 suppression record with a mix of entity-ID and friendly-name keys."""
     return {
         "last_by_type": {},
@@ -521,7 +542,7 @@ def test_migrate_v2_drops_friendly_name_presence_grace_keys() -> None:
 
     assert "Alice" not in data["presence_grace_until"]
     assert "person.bob" in data["presence_grace_until"]
-    assert data["version"] == 4
+    assert data["version"] == 5
 
 
 def test_migrate_v2_preserves_valid_entity_id_keys() -> None:

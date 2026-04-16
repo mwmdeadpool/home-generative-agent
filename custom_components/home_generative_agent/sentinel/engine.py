@@ -19,13 +19,13 @@ from custom_components.home_generative_agent.const import (
     ACTION_POLICY_AUTO_EXECUTE,
     ACTION_POLICY_BLOCKED,
     CONF_EXPLAIN_ENABLED,
-    CONF_SENTINEL_CAMERA_ENTRY_LINKS,
     CONF_SENTINEL_AUTO_EXEC_CANARY_MODE,
     CONF_SENTINEL_AUTONOMY_LEVEL,
     CONF_SENTINEL_BASELINE_DOW_MIN_SAMPLES,
     CONF_SENTINEL_BASELINE_DRIFT_THRESHOLD_PCT,
     CONF_SENTINEL_BASELINE_SUSTAINED_MINUTES,
     CONF_SENTINEL_BASELINE_WEEKLY_PATTERNS,
+    CONF_SENTINEL_CAMERA_ENTRY_LINKS,
     CONF_SENTINEL_COOLDOWN_MINUTES,
     CONF_SENTINEL_ENTITY_COOLDOWN_MINUTES,
     CONF_SENTINEL_INTERVAL_SECONDS,
@@ -452,7 +452,7 @@ class SentinelEngine:
             self.run_stats["scheduler"] = self._trigger_scheduler.stats
             async_dispatcher_send(self._hass, SIGNAL_SENTINEL_RUN_COMPLETE)
 
-    async def _run_once(self, trigger_source: str = "poll") -> None:  # noqa: PLR0912
+    async def _run_once(self, trigger_source: str = "poll") -> None:  # noqa: PLR0912, PLR0915
         try:
             snapshot = await async_build_full_state_snapshot(self._hass)
         except (ValueError, TypeError, KeyError):

@@ -281,7 +281,7 @@ class SentinelHealthSensor(SensorEntity):
             ):
                 self._attrs[f"discovery_{key}"] = None
 
-        # Proposals approved in the last 24 hours.
+        # Count proposals approved in the last 24 hours from the proposal store.
         await self._refresh_proposals_approved_24h()
 
         # Baseline health statistics.
@@ -346,24 +346,23 @@ class SentinelHealthSensor(SensorEntity):
         )
 
     async def _refresh_proposals_approved_24h(self) -> None:
-        """Count proposals approved in the last 24 hours."""
+        """Populate discovery_proposals_approved_24h from the proposal store."""
         if self._proposal_store is None:
-            self._attrs["proposals_approved_24h"] = None
+            self._attrs["discovery_proposals_approved_24h"] = None
             return
-        cutoff = datetime.now(UTC) - timedelta(hours=24)
-        try:
-            records = await self._proposal_store.async_get_latest(200)
-        except Exception:  # noqa: BLE001
-            self._attrs["proposals_approved_24h"] = None
-            return
+
+        cutoff_24h = dt_util.utcnow() - timedelta(hours=24)
+        proposals = await self._proposal_store.async_get_latest(200)
         count = 0
-        for r in records:
-            if r.get("status") != "approved":
+        for record in proposals:
+            if record.get("status") != "approved":
                 continue
-            approved_at = r.get("approved_at")
-            if not approved_at:
+            approved_at_str = record.get("approved_at")
+            if not approved_at_str:
                 continue
-            parsed = dt_util.parse_datetime(str(approved_at))
-            if parsed is not None and parsed >= cutoff:
+            approved_at = dt_util.parse_datetime(str(approved_at_str))
+            if approved_at is None:
+                continue
+            if approved_at >= cutoff_24h:
                 count += 1
-        self._attrs["proposals_approved_24h"] = count
+        self._attrs["discovery_proposals_approved_24h"] = count

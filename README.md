@@ -16,6 +16,7 @@ These are some of the features currently supported:
 - Full agent control of allowed entities in the home.
 - Short- and long-term memory using semantic search.
 - Automatic summarization of home state to manage LLM context length.
+- Semantic tool retrieval (RAG): tools are embedded at startup and retrieved per-turn by cosine similarity, keeping prompts lean and tool selection accurate.
 
 This integration will set up the `conversation` platform, allowing users to converse directly with the Home Generative Assistant, and the `image` and `sensor` platforms which create entities to display the latest camera image, the AI-generated summary, and recognized people in HA's UI or they can be used to create automations.
 
@@ -97,9 +98,39 @@ A "feature" is a discrete capability exposed by the integration (for example Con
 
 Embedding model selection: the integration uses the first model provider that supports embeddings (or the feature’s provider when it advertises embedding capability). If you want a different embedding model, add a provider that supports embeddings and select the desired embedding model name in that provider’s defaults, then re-run Setup or reload the integration.
 
+### Tool Retrieval (RAG)
+
+**Big thanks to [1Jamie](https://github.com/1Jamie) for this feature!**
+
+On startup the integration indexes all available tools as vector embeddings in PostgreSQL. Each turn, only the most relevant tools for the user’s message are loaded into the agent’s prompt — keeping context short and tool selection accurate.
+
+Two options in the **Options** flow control this:
+
+- **Retrieval Limit** (`tool_retrieval_limit`, default `5`) — maximum number of tools made available to the agent per turn. Raise this if the agent misses tools on complex multi-step requests; lower it to reduce prompt size.
+- **Relevance Threshold** (`tool_relevance_threshold`, default `0.15`) — cosine similarity cutoff. Results below this score are excluded. Lower the threshold if the agent is missing tools it should pick up; raise it to tighten selectivity.
+
+A **Tool Index Status** diagnostic sensor (`sensor.tool_index_status`) exposes the current state of the index: `indexing` (first-run embedding in progress), `ready` (index available), or `failed` (embedding provider unreachable — agent falls back to all tools for that session). Subsequent restarts skip unchanged tools using SHA-256 content hashing, so re-indexing is fast.
+
 If you want separate servers per feature, add multiple Model Provider subentries and assign them in each feature’s settings. For example: create a “Primary Ollama” provider pointing at your chat server and a “Vision Ollama” provider pointing at your camera analysis server, then select the appropriate provider on the feature’s model settings step. You can mix provider types — for example a local vLLM server added as an **OpenAI Compatible** provider alongside an Ollama provider.
 
 Global options (prompt, face recognition URL, context management, critical-action PIN, etc.) live in the integration’s **Options** flow. Sentinel settings are configured in the **Sentinel** subentry.
+
+### Control Home Assistant (LLM API selection)
+
+The **Control Home Assistant** option in the Options flow is a multi-select that controls which Home Assistant LLM APIs the agent can use. Selecting an API grants the agent the tools registered by that API.
+
+- **Assist** (`assist`) — the built-in HA Assist API. Gives the agent access to entity-control intents and the full entity list. Select this for standard voice-assistant style control.
+- **MCP server integrations** — any [Model Context Protocol](https://www.home-assistant.io/integrations/mcp_server/) integration you have configured registers its own LLM API (for example `mcp-<entry_id>`). Those entries appear in the list once added.
+
+You can select any combination. Selecting both Assist and one or more MCP APIs merges all their tools into a single combined API for the agent. Deselecting everything runs the agent with only its built-in LangChain tools (no HA entity control, no MCP tools).
+
+**Adding an MCP server:**
+
+1. Go to Settings → Devices & Services → Add Integration → search **Model Context Protocol**.
+2. Enter the server URL and complete setup.
+3. The MCP integration registers an LLM API automatically.
+4. Open Settings → Devices & Services → Home Generative Agent → **Configure**.
+5. Select the new entry in the **Control Home Assistant** multi-select and save.
 
 ### Speech-to-Text (STT)
 
@@ -177,7 +208,7 @@ Security / presence:
 
 - `unlocked_lock_at_night` — exterior lock unlocked while it is night
 - `open_entry_while_away` — door or window open while everyone is away
-- `camera_entry_unsecured` — camera activity detected in the same area as an unsecured entry point (door, window, or lock)
+- `camera_entry_unsecured` — camera activity detected near an unsecured entry point (door, window, or lock). Same-area entries are detected automatically; cameras that physically overlook entry points in a different HA area can be linked via `sentinel_camera_entry_links` in the Sentinel subentry config.
 - `unknown_person_camera_no_home` — unrecognized person on any camera while no one is home
 - `unknown_person_camera_night_home` — unrecognized person on any camera at night while someone is home
 - `alarm_disarmed_during_external_threat` — security alarm disarmed while an unrecognized person is detected on an outdoor camera
@@ -239,7 +270,7 @@ When `sentinel_baseline_enabled` is `true` **and** `sentinel_enabled` is `true`,
 On each detection cycle the engine calls `async_fetch_baselines()` to read current baseline values from PostgreSQL and passes them to the dynamic-rule evaluators. Two temporal templates are always registered:
 
 - `baseline_deviation` — fires when a numeric entity state deviates from its rolling average by more than `threshold_pct` percent (default `50.0`).
-- `time_of_day_anomaly` — fires when a numeric entity state differs from the expected hour-of-day rolling average by more than `threshold_pct` percent (default `50.0`).
+- `time_of_day_anomaly` — fires when a numeric entity state differs from the expected hour-of-day rolling average by more than `threshold_pct` percent (default `50.0`). When day-of-week baselines are enabled (`sentinel_baseline_weekly_patterns`), this template uses a weighted blend of the DOW-hour mean and the global hourly mean, transitioning smoothly from global to DOW baselines as data accumulates per slot.
 
 `threshold_pct`, `entity_id`, and `metric` are per-rule `params` stored in the rule registry — they are set when a rule is created via discovery or the `hga_sentinel_add_rule` service, not in the subentry. Both templates produce no findings while the table is empty (baselines accumulate over time).
 
@@ -254,9 +285,11 @@ Configuration options (in the Sentinel subentry):
 - `sentinel_baseline_enabled` — enable baseline collection (default: `false`); has no effect unless `sentinel_enabled` is also `true`
 - `sentinel_baseline_update_interval_minutes` — how often baselines are recalculated (default: `15`)
 - `sentinel_baseline_freshness_threshold_seconds` — age after which a baseline is considered stale (default: `3600`)
-- `sentinel_baseline_min_samples` — minimum number of samples before a baseline is considered usable (default: `10`)
-- `sentinel_baseline_max_samples` — rolling window size; older samples are discarded when this is reached (default: `288`)
-- `sentinel_baseline_drift_threshold_pct` — default percent deviation that triggers a `baseline_deviation` or `time_of_day_anomaly` finding (default: `50.0`)
+- `sentinel_baseline_min_samples` — minimum number of samples before a global baseline is usable (default: `20`)
+- `sentinel_baseline_max_samples` — rolling window size; older samples are discarded when this is reached (default: `500`)
+- `sentinel_baseline_drift_threshold_pct` — default percent deviation that triggers a `baseline_deviation` or `time_of_day_anomaly` finding (default: `30.0`)
+- `sentinel_baseline_weekly_patterns` — enable per-(day-of-week, hour) baselines for `time_of_day_anomaly` (default: `false`); requires `sentinel_baseline_enabled`
+- `sentinel_baseline_dow_min_samples` — observations per DOW-hour slot before blend weight reaches 1.0 (default: `4` weeks); separate from the global `sentinel_baseline_min_samples` because DOW slots update at most once per week
 
 ### Sentinel Action Flows
 
@@ -479,11 +512,12 @@ These optional features are configured in the Sentinel subentry:
 3. Select `+ Sentinel` (or reconfigure the existing Sentinel subentry)
 4. Set options:
    - Discovery: `sentinel_discovery_enabled`, `sentinel_discovery_interval_seconds`, `sentinel_discovery_max_records`
-   - Daily digest: `sentinel_daily_digest_enabled` (default `false`), `sentinel_daily_digest_time` (default `08:00` local time — sends a push summary of the past 24 hours at that time each day)
+   - Daily digest: toggle `sentinel_daily_digest_enabled` and set a delivery time with `sentinel_daily_digest_time` (default `08:00:00` — sends a push summary of the past 24 hours at that time each day). Both fields are now exposed directly in the Sentinel subentry config flow UI.
    - Triage: `sentinel_triage_enabled`, `sentinel_triage_timeout_seconds`
    - Baseline: `sentinel_baseline_enabled`, `sentinel_baseline_update_interval_minutes`, `sentinel_baseline_freshness_threshold_seconds`
    - Autonomy guardrails: `sentinel_require_pin_for_level_increase` and the Sentinel autonomy-level increase PIN
    - Per-area notifications: `sentinel_area_notify_map` (area name → notify service, e.g. `{"Garage": "notify.mobile_app_garage_tablet"}`)
+   - Cross-area camera entry links: `sentinel_camera_entry_links` (camera entity ID → list of entry/lock entity IDs in other areas, e.g. `{"camera.driveway": ["lock.front_door"]}`) — used by the `camera_entry_unsecured` rule to fire when a camera sees activity but the linked entry is in a different HA area
    - Audit store size: `audit_hot_max_records` (default 500) — maximum records kept in the local hot store. Records with `suppression_reason_code == "not_suppressed"` (user-visible findings) are always preserved in preference to suppressed records when the store is at capacity.
 
 Discovery and baseline both require `sentinel_enabled` to be `true` — they will not start if anomaly alerting is disabled. Discovery and triage also require a configured chat model; if no model is available, those loops are skipped.
@@ -559,7 +593,7 @@ Attributes:
 | `discovery_candidates_generated` | Total discovery candidates returned by the LLM in the most recent cycle |
 | `discovery_candidates_novel` | Candidates that passed deduplication and were stored |
 | `discovery_candidates_deduplicated` | Candidates dropped as duplicates of existing keys |
-| `discovery_proposals_promoted` | Proposals promoted to draft status in the most recent cycle |
+| `discovery_proposals_approved_24h` | Number of discovery proposals approved by the operator in the past 24 hours |
 | `discovery_unsupported_ttl_expired` | Unsupported proposals whose TTL expired and were cleaned up |
 | `triggers_coalesced` | Cumulative events merged into an existing queued trigger (deduplication) |
 | `triggers_dropped_incoming` | Cumulative triggers dropped on arrival because all queue slots held security-critical triggers |
@@ -577,6 +611,7 @@ Attributes:
 | `baseline_stale_count` | Number of entities whose baseline exists but is older than the freshness threshold |
 | `baseline_rules_waiting` | Number of active baseline rules whose entity has not yet reached `sentinel_baseline_min_samples` |
 | `baseline_last_update` | UTC ISO 8601 timestamp of the most recent baseline write (null if no baselines yet) |
+| `learned_suppressions_active` | Number of distinct `{rule_type}:{entity_id}` pairs with learned cooldown multipliers (from dismiss/snooze feedback) |
 
 Example Lovelace Markdown card:
 
@@ -695,6 +730,21 @@ Normalization fallbacks for common LLM-generated patterns:
 ## Image and Sensor Entities
 
 This section shows how to display the latest camera image, the AI-generated summary, and recognized people in Home Assistant or use in automations via the image and sensor platforms.
+
+### Diagnostic Sensors
+
+The integration registers a **Tool Index Status** sensor (`sensor.tool_index_status`, entity category: diagnostic) that shows the current state of the RAG tool index:
+
+| State | Meaning |
+|---|---|
+| `indexing` | First-run embedding in progress (only during initial startup) |
+| `ready` | Index is built and available; tools are retrieved per-turn by semantic search |
+| `failed` | Embedding provider unreachable; agent falls back to all tools for the session |
+| `unknown` | Index state not yet reported (integration just started) |
+
+You can include this in a Lovelace diagnostic card or use it in automations to alert when the embedding provider goes down.
+
+### Camera Entities
 
 ### Overview
  
@@ -945,9 +995,9 @@ LangGraph powers the conversation agent, enabling you to create stateful, multi-
 
 ![Alt text](./assets/graph.png)
 
-The agent workflow has three nodes, each Python module modifying the agent's state, a shared data structure. The edges between the nodes represent the allowed transitions between them, with solid lines unconditional and dashed lines conditional. Nodes do the work, and edges tell what to do next.
+The agent workflow has four nodes, each Python module modifying the agent's state, a shared data structure. The edges between the nodes represent the allowed transitions between them, with solid lines unconditional and dashed lines conditional. Nodes do the work, and edges tell what to do next.
 
-The ```__start__``` and ```__end__``` nodes inform the graph where to start and stop. The ```agent``` node runs the primary LLM, and if it decides to use a tool, the ```action``` node runs the tool and then returns control to the ```agent```. When the agent does not call a tool, control passes to ```summarize_and_remove_messages```, which summarizes only when trimming is required to manage the LLM context.
+The ```__start__``` and ```__end__``` nodes inform the graph where to start and stop. The ```retrieve_tools``` node runs first: it queries the vector index to select the tools most relevant to the current message (see [Tool Retrieval](#tool-retrieval-rag) above). The ```agent``` node then runs the primary LLM with only those tools bound to its context, and if it decides to use a tool, the ```action``` node runs the tool and returns control to ```agent```. When the agent does not call a tool, control passes to ```summarize_and_remove_messages```, which summarizes only when trimming is required to manage the LLM context.
 
 ### LLM Context Management
 You need to carefully manage the context length of LLMs to balance cost, accuracy, and latency and avoid triggering rate limits such as OpenAI's Tokens per Minute restriction. The system controls the context length of the primary model by trimming the messages in the context if they exceed a max parameter which can be expressed in either tokens or messages, and the trimmed messages are replaced by a shorter summary inserted into the system message. These parameters are configurable in the UI, with defaults defined in `const.py`; their description is below.

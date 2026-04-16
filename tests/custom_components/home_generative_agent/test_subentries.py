@@ -6,7 +6,13 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
-from homeassistant.const import CONF_API_KEY, CONF_HOST, CONF_PASSWORD, CONF_USERNAME
+from homeassistant.const import (
+    CONF_API_KEY,
+    CONF_HOST,
+    CONF_LLM_HASS_API,
+    CONF_PASSWORD,
+    CONF_USERNAME,
+)
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 import custom_components.home_generative_agent as hga_component
@@ -29,6 +35,9 @@ from custom_components.home_generative_agent.const import (
     CONF_OLLAMA_VLM_URL,
     CONF_OPENAI_COMPATIBLE_API_KEY,
     CONF_OPENAI_COMPATIBLE_BASE_URL,
+    CONF_SENTINEL_CAMERA_ENTRY_LINKS,
+    CONF_SENTINEL_DAILY_DIGEST_ENABLED,
+    CONF_SENTINEL_DAILY_DIGEST_TIME,
     CONF_SENTINEL_ENABLED,
     CONF_SENTINEL_INTERVAL_SECONDS,
     CONF_SENTINEL_LEVEL_INCREASE_PIN_HASH,
@@ -60,6 +69,7 @@ from custom_components.home_generative_agent.flows.model_provider_subentry_flow 
 )
 from custom_components.home_generative_agent.flows.sentinel_subentry_flow import (
     SentinelSubentryFlow,
+    _default_payload,
 )
 from custom_components.home_generative_agent.flows.stt_provider_subentry_flow import (
     SttProviderSubentryFlow,
@@ -799,3 +809,254 @@ def test_provider_capabilities_includes_openai_compatible() -> None:
         assert "openai_compatible" in spec["model_keys"], (
             f"openai_compatible missing from {category} model_keys"
         )
+
+
+# ---------------------------------------------------------------------------
+# Sentinel subentry — daily digest fields (Fix 4)
+# ---------------------------------------------------------------------------
+
+
+def test_sentinel_default_payload_contains_digest_keys() -> None:
+    """_default_payload() includes both daily digest keys with non-empty defaults."""
+    payload = _default_payload()
+    assert CONF_SENTINEL_DAILY_DIGEST_ENABLED in payload
+    assert CONF_SENTINEL_DAILY_DIGEST_TIME in payload
+    # Default time must be a non-empty HH:MM:SS string.
+    assert isinstance(payload[CONF_SENTINEL_DAILY_DIGEST_TIME], str)
+    assert len(payload[CONF_SENTINEL_DAILY_DIGEST_TIME]) > 0
+
+
+def test_sentinel_schema_contains_digest_fields(hass: Any) -> None:
+    """_schema() includes both daily digest selectors."""
+    flow = SentinelSubentryFlow()
+    flow.hass = hass
+    schema = flow._schema(_default_payload())
+    schema_keys = {str(k) for k in schema.schema}
+    assert CONF_SENTINEL_DAILY_DIGEST_ENABLED in schema_keys
+    assert CONF_SENTINEL_DAILY_DIGEST_TIME in schema_keys
+
+
+@pytest.mark.asyncio
+async def test_sentinel_subentry_flow_accepts_digest_fields(hass: Any) -> None:
+    """Sentinel flow stores digest fields when provided in user_input."""
+    entry = DummyEntry()
+    flow = SentinelSubentryFlow()
+    flow.hass = hass
+    flow.async_show_form = lambda **kwargs: {  # type: ignore[assignment]
+        "type": "form",
+        "data_schema": kwargs["data_schema"],
+        "errors": kwargs.get("errors"),
+    }
+    flow.async_create_entry = lambda **kwargs: {  # type: ignore[assignment]
+        "type": "create_entry",
+        "title": kwargs.get("title"),
+        "data": kwargs.get("data"),
+    }
+    flow.async_abort = lambda **kwargs: {  # type: ignore[assignment]
+        "type": "abort",
+        "reason": kwargs.get("reason"),
+    }
+    flow._schedule_reload = lambda: None  # type: ignore[assignment]
+    _patch_entry(flow, entry)
+
+    await flow.async_step_user()
+    result = await flow.async_step_settings(
+        {
+            CONF_SENTINEL_ENABLED: True,
+            CONF_SENTINEL_INTERVAL_SECONDS: 300,
+            "sentinel_cooldown_minutes": 30,
+            "sentinel_entity_cooldown_minutes": 15,
+            "sentinel_pending_prompt_ttl_minutes": 240,
+            "sentinel_discovery_enabled": False,
+            "sentinel_discovery_interval_seconds": 3600,
+            "sentinel_discovery_max_records": 200,
+            CONF_EXPLAIN_ENABLED: False,
+            CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE: False,
+            CONF_SENTINEL_DAILY_DIGEST_ENABLED: True,
+            CONF_SENTINEL_DAILY_DIGEST_TIME: "07:30:00",
+        }
+    )
+    assert result.get("type") == "create_entry"
+    data = result.get("data")
+    assert data is not None
+    assert data[CONF_SENTINEL_DAILY_DIGEST_ENABLED] is True
+    assert data[CONF_SENTINEL_DAILY_DIGEST_TIME] == "07:30:00"
+
+
+def test_sentinel_default_payload_contains_camera_entry_links() -> None:
+    """_default_payload() includes sentinel_camera_entry_links as an empty dict."""
+    payload = _default_payload()
+    assert CONF_SENTINEL_CAMERA_ENTRY_LINKS in payload
+    assert payload[CONF_SENTINEL_CAMERA_ENTRY_LINKS] == {}
+
+
+def test_sentinel_schema_contains_camera_entry_links(hass: Any) -> None:
+    """_schema() includes the sentinel_camera_entry_links text selector."""
+    flow = SentinelSubentryFlow()
+    flow.hass = hass
+    schema = flow._schema(_default_payload())
+    schema_keys = {str(k) for k in schema.schema}
+    assert CONF_SENTINEL_CAMERA_ENTRY_LINKS in schema_keys
+
+
+@pytest.mark.asyncio
+async def test_sentinel_flow_camera_entry_links_valid_json(hass: Any) -> None:
+    """Flow parses a valid JSON string into a dict for sentinel_camera_entry_links."""
+    entry = DummyEntry()
+    flow = SentinelSubentryFlow()
+    flow.hass = hass
+    flow.async_show_form = lambda **kwargs: {  # type: ignore[assignment]
+        "type": "form",
+        "data_schema": kwargs["data_schema"],
+        "errors": kwargs.get("errors"),
+    }
+    flow.async_create_entry = lambda **kwargs: {  # type: ignore[assignment]
+        "type": "create_entry",
+        "title": kwargs.get("title"),
+        "data": kwargs.get("data"),
+    }
+    flow.async_abort = lambda **kwargs: {  # type: ignore[assignment]
+        "type": "abort",
+        "reason": kwargs.get("reason"),
+    }
+    flow._schedule_reload = lambda: None  # type: ignore[assignment]
+    _patch_entry(flow, entry)
+
+    await flow.async_step_user()
+    result = await flow.async_step_settings(
+        {
+            CONF_SENTINEL_ENABLED: True,
+            CONF_SENTINEL_INTERVAL_SECONDS: 300,
+            CONF_EXPLAIN_ENABLED: False,
+            CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE: False,
+            CONF_SENTINEL_CAMERA_ENTRY_LINKS: '{"camera.driveway": ["lock.front_door"]}',
+        }
+    )
+    assert result.get("type") == "create_entry"
+    data = result.get("data")
+    assert data is not None
+    assert data[CONF_SENTINEL_CAMERA_ENTRY_LINKS] == {
+        "camera.driveway": ["lock.front_door"]
+    }
+
+
+@pytest.mark.asyncio
+async def test_sentinel_flow_camera_entry_links_invalid_json(hass: Any) -> None:
+    """Flow returns an error for malformed sentinel_camera_entry_links JSON."""
+    entry = DummyEntry()
+    flow = SentinelSubentryFlow()
+    flow.hass = hass
+    flow.async_show_form = lambda **kwargs: {  # type: ignore[assignment]
+        "type": "form",
+        "data_schema": kwargs["data_schema"],
+        "errors": kwargs.get("errors"),
+    }
+    flow.async_create_entry = lambda **kwargs: {  # type: ignore[assignment]
+        "type": "create_entry",
+        "title": kwargs.get("title"),
+        "data": kwargs.get("data"),
+    }
+    flow.async_abort = lambda **kwargs: {  # type: ignore[assignment]
+        "type": "abort",
+        "reason": kwargs.get("reason"),
+    }
+    flow._schedule_reload = lambda: None  # type: ignore[assignment]
+    _patch_entry(flow, entry)
+
+    await flow.async_step_user()
+    result = await flow.async_step_settings(
+        {
+            CONF_SENTINEL_ENABLED: True,
+            CONF_SENTINEL_INTERVAL_SECONDS: 300,
+            CONF_EXPLAIN_ENABLED: False,
+            CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE: False,
+            CONF_SENTINEL_CAMERA_ENTRY_LINKS: "not valid json {{",
+        }
+    )
+    assert result is not None
+    assert result.get("type") == "form"
+    assert (result.get("errors") or {}).get("base") == "invalid_camera_entry_links"
+
+
+@pytest.mark.asyncio
+async def test_sentinel_flow_camera_entry_links_wrong_structure(hass: Any) -> None:
+    """Flow returns an error when sentinel_camera_entry_links is not dict[str, list[str]]."""
+    entry = DummyEntry()
+    flow = SentinelSubentryFlow()
+    flow.hass = hass
+    flow.async_show_form = lambda **kwargs: {  # type: ignore[assignment]
+        "type": "form",
+        "data_schema": kwargs["data_schema"],
+        "errors": kwargs.get("errors"),
+    }
+    flow.async_create_entry = lambda **kwargs: {  # type: ignore[assignment]
+        "type": "create_entry",
+        "title": kwargs.get("title"),
+        "data": kwargs.get("data"),
+    }
+    flow.async_abort = lambda **kwargs: {  # type: ignore[assignment]
+        "type": "abort",
+        "reason": kwargs.get("reason"),
+    }
+    flow._schedule_reload = lambda: None  # type: ignore[assignment]
+    _patch_entry(flow, entry)
+
+    await flow.async_step_user()
+    result = await flow.async_step_settings(
+        {
+            CONF_SENTINEL_ENABLED: True,
+            CONF_SENTINEL_INTERVAL_SECONDS: 300,
+            CONF_EXPLAIN_ENABLED: False,
+            CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE: False,
+            # Value is a string, not a list — wrong structure.
+            CONF_SENTINEL_CAMERA_ENTRY_LINKS: '{"camera.driveway": "lock.front_door"}',
+        }
+    )
+    assert result is not None
+    assert result.get("type") == "form"
+    assert (result.get("errors") or {}).get("base") == "invalid_camera_entry_links"
+
+
+# ---------------------------------------------------------------------------
+# v5 -> v6 migration: CONF_LLM_HASS_API normalisation
+# ---------------------------------------------------------------------------
+
+
+def _make_v5_entry(hass: Any, options: dict[str, Any]) -> Any:
+    """Return a v5 MockConfigEntry with the given options, added to hass."""
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title="Home Generative Agent",
+        version=5,
+        data={},
+        options=options,
+    )
+    entry.add_to_hass(hass)
+    return entry
+
+
+@pytest.mark.asyncio
+async def test_migration_v5_to_v6_string_api_id(hass: HomeAssistant) -> None:
+    """v5 string API id is wrapped in a list."""
+    entry = _make_v5_entry(hass, {CONF_LLM_HASS_API: "assist"})
+    assert await async_migrate_entry(hass, entry)
+    assert entry.options[CONF_LLM_HASS_API] == ["assist"]
+    assert entry.version == CONFIG_ENTRY_VERSION
+
+
+@pytest.mark.asyncio
+async def test_migration_v5_to_v6_none_sentinel(hass: HomeAssistant) -> None:
+    """v5 'none' sentinel is converted to an empty list (no APIs)."""
+    entry = _make_v5_entry(hass, {CONF_LLM_HASS_API: "none"})
+    assert await async_migrate_entry(hass, entry)
+    assert entry.options.get(CONF_LLM_HASS_API) == []
+    assert entry.version == CONFIG_ENTRY_VERSION
+
+
+@pytest.mark.asyncio
+async def test_migration_v5_to_v6_absent_key(hass: HomeAssistant) -> None:
+    """v5 absent CONF_LLM_HASS_API key is converted to empty list."""
+    entry = _make_v5_entry(hass, {})
+    assert await async_migrate_entry(hass, entry)
+    assert entry.options.get(CONF_LLM_HASS_API) == []
+    assert entry.version == CONFIG_ENTRY_VERSION

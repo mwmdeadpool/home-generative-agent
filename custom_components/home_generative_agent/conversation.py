@@ -21,7 +21,7 @@ from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.util import ulid
 from langchain_core.caches import InMemoryCache
 from langchain_core.globals import set_debug, set_llm_cache, set_verbose
-from langchain_core.messages import AIMessage, AnyMessage, HumanMessage
+from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, ToolMessage
 from pydantic import PydanticInvalidForJsonSchema
 
 from .agent.graph import workflow
@@ -71,9 +71,6 @@ from .agent.tools import (
 )
 from .const import (
     CONF_CRITICAL_ACTION_PIN_ENABLED,
-    CONF_FAST_INTENT_ENABLED,
-    CONF_FAST_INTENT_QDRANT_URL,
-    CONF_FAST_INTENT_COLLECTION,
     CONF_GOOGLE_PLACES_ENABLED,
     CONF_LIGHTRAG_ENABLED,
     CONF_PLEX_ENABLED,
@@ -84,8 +81,6 @@ from .const import (
     CRITICAL_ACTION_PROMPT,
     DOMAIN,
     LANGCHAIN_LOGGING_LEVEL,
-    RECOMMENDED_FAST_INTENT_COLLECTION,
-    RECOMMENDED_FAST_INTENT_QDRANT_URL,
     SCHEMA_FIRST_YAML_PROMPT,
     SIGNAL_TOOL_INDEX_UPDATED,
     SUBENTRY_TYPE_MODEL_PROVIDER,
@@ -105,6 +100,7 @@ if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntry
     from homeassistant.core import HomeAssistant
     from homeassistant.helpers.entity_platform import AddEntitiesCallback
+    from homeassistant.util.json import JsonObjectType
     from langchain_core.runnables import RunnableConfig
 
     from .agent.graph import State
@@ -127,13 +123,107 @@ else:
 def _convert_content(
     content: conversation.UserContent | conversation.AssistantContent,
 ) -> HumanMessage | AIMessage:
-    """Convert HA native chat messages to LangChain messages."""
-    if content.content is None:
-        _LOGGER.warning("Content is None, returning empty message")
-        return HumanMessage(content="")
+    """
+    Convert HA native chat messages to LangChain messages.
+
+    Only called with UserContent or tool-call-free AssistantContent (filtered
+    upstream — see message_history comprehension in _async_handle_message).
+    """
     if isinstance(content, conversation.UserContent):
-        return HumanMessage(content=content.content)
-    return AIMessage(content=content.content)
+        return HumanMessage(content=content.content or "")
+    return AIMessage(content=content.content or "")
+
+
+def _normalize_ai_content(content: str | list) -> str | None:
+    """
+    Normalize AIMessage.content to str for HA AssistantContent.
+
+    AIMessage.content is str for most providers, or list[dict] (content blocks) for
+    providers that return structured output (e.g. Anthropic). Extracts text blocks
+    only; returns None if the result is empty.
+    """
+    if isinstance(content, str):
+        return content or None
+    parts = [
+        block.get("text", "")
+        for block in content
+        if isinstance(block, dict) and block.get("type") == "text"
+    ]
+    return "\n".join(parts) or None
+
+
+def _normalize_tool_result(content: str | list) -> JsonObjectType:
+    """
+    Normalize ToolMessage.content to JsonObjectType for HA ToolResultContent.
+
+    ToolMessage.content is str for plain string results, or list[dict] (content blocks)
+    from some providers. HA ToolResultContent.tool_result requires JsonObjectType.
+    """
+    if isinstance(content, str):
+        return {"result": content}
+    parts = [
+        block.get("text", "") if isinstance(block, dict) else str(block)
+        for block in content
+    ]
+    return {"result": "\n".join(parts)}
+
+
+def _populate_chat_log_from_response(
+    chat_log: conversation.ChatLog,
+    agent_id: str,
+    new_messages: list[AnyMessage],
+) -> None:
+    """
+    Backfill chat_log with LangGraph response messages for HA Show Details.
+
+    Walks new_messages (messages produced this turn, sliced from
+    response["messages"][len(app_input["messages"]):]) and appends AssistantContent
+    and ToolResultContent entries so HA's "Show Details" panel renders the full tool
+    call / result chain.
+
+    All ToolInput entries use external=True because LangGraph, not HA, executed the
+    tools. async_add_assistant_content_without_tools() raises ValueError if any
+    ToolInput has external=False.
+
+    chat_log state is not persisted across HA restarts. The LangGraph PostgreSQL
+    checkpointer holds the full conversation history; chat_log is repopulated each
+    turn from the ainvoke() response slice.
+    """
+    for msg in new_messages:
+        if isinstance(msg, AIMessage):
+            if msg.tool_calls:
+                tool_inputs = [
+                    llm.ToolInput(
+                        tool_name=tc["name"],
+                        tool_args=tc["args"],
+                        id=tc["id"] or ulid.ulid_now(),
+                        external=True,
+                    )
+                    for tc in msg.tool_calls
+                ]
+                chat_log.async_add_assistant_content_without_tools(
+                    conversation.AssistantContent(
+                        agent_id=agent_id,
+                        content=_normalize_ai_content(msg.content),
+                        tool_calls=tool_inputs,
+                    )
+                )
+            else:
+                chat_log.async_add_assistant_content_without_tools(
+                    conversation.AssistantContent(
+                        agent_id=agent_id,
+                        content=_normalize_ai_content(msg.content),
+                    )
+                )
+        elif isinstance(msg, ToolMessage):
+            chat_log.async_add_assistant_content_without_tools(
+                conversation.ToolResultContent(
+                    agent_id=agent_id,
+                    tool_call_id=msg.tool_call_id,
+                    tool_name=msg.name or "",
+                    tool_result=_normalize_tool_result(msg.content),
+                )
+            )
 
 
 class MultiLLMAPI:
@@ -273,7 +363,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         """Return a list of supported languages."""
         return MATCH_ALL
 
-    async def _async_handle_message(  # noqa: PLR0912, PLR0915
+    async def _async_handle_message(  # noqa: PLR0911, PLR0912, PLR0915
         self,
         user_input: conversation.ConversationInput,
         chat_log: conversation.ChatLog,
@@ -294,10 +384,14 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         )
 
         # Include only HA User/Assistant messages not already seen by this entity.
+        # Exclude AssistantContent with tool_calls: those are intermediate LangGraph
+        # turns already persisted in the PostgreSQL checkpointer. Including them would
+        # duplicate messages that LangGraph already manages internally.
         message_history = [
             _convert_content(m)
             for m in chat_log.content
-            if isinstance(m, conversation.UserContent | conversation.AssistantContent)
+            if isinstance(m, conversation.UserContent)
+            or (isinstance(m, conversation.AssistantContent) and m.tool_calls is None)
         ]
         # The last chat log entry will be the current user request—add it later.
         message_history = message_history[:-1]
@@ -577,7 +671,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
 
         _LOGGER.debug("====== End of run ======")
 
-        intent_response = intent.IntentResponse(language=user_input.language)
+        # Post-process the final LLM text (entity ID resolution, YAML conversion).
         final_content = response["messages"][-1].content
         if isinstance(final_content, str):
             if options.get(CONF_SCHEMA_FIRST_YAML, False):
@@ -588,10 +682,44 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                 final_content, options.get(CONF_SCHEMA_FIRST_YAML, False)
             )
             _LOGGER.debug("Final response content: %s", final_content)
-        intent_response.async_set_speech(final_content)
-        return conversation.ConversationResult(
-            response=intent_response, conversation_id=conversation_id
-        )
+
+        # Backfill chat_log with the messages produced this turn so HA's
+        # "Show Details" panel renders the full tool call / result chain.
+        # Slice off history + current HumanMessage — only net-new messages.
+        new_messages = response["messages"][len(app_input["messages"]) :]
+
+        # Guard: async_get_result_from_chat_log requires last entry is AssistantContent,
+        # which means the last new message must be an AIMessage.
+        if not new_messages or not isinstance(new_messages[-1], AIMessage):
+            _LOGGER.error(
+                "LangGraph response did not end with AIMessage (got %s). "
+                "Falling back to manual ConversationResult.",
+                type(new_messages[-1]) if new_messages else "empty",
+            )
+            intent_response = intent.IntentResponse(language=user_input.language)
+            intent_response.async_set_speech(
+                final_content if isinstance(final_content, str) else ""
+            )
+            return conversation.ConversationResult(
+                response=intent_response, conversation_id=conversation_id
+            )
+
+        # Replace the final AIMessage content with the post-processed text so
+        # Show Details reflects the same text the user hears.
+        if isinstance(final_content, str):
+            processed_messages: list[AnyMessage] = [
+                *new_messages[:-1],
+                AIMessage(
+                    content=final_content,
+                    tool_calls=new_messages[-1].tool_calls,
+                ),
+            ]
+        else:
+            processed_messages = list(new_messages)
+
+        _populate_chat_log_from_response(chat_log, self.entity_id, processed_messages)
+
+        return conversation.async_get_result_from_chat_log(user_input, chat_log)
 
     async def _async_discover_provider_tools(
         self,
@@ -714,6 +842,8 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                 args_schema = getattr(t_func, "args_schema", None)
                 if args_schema is not None:
                     try:
+                        # Use getattr to avoid pyright errors
+                        # on potential dict types
                         schema_func = getattr(args_schema, "schema", None)
                         if callable(schema_func):
                             params = json.dumps(schema_func(), sort_keys=True)
@@ -726,6 +856,9 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                         params = "{}"
 
                 is_actuation = is_actuation_tool(t_name)
+                # LangChain tools have .name, .description,
+                # and .args_schema (or similar)
+                # We'll use a simplified schema extraction for indexing
                 raw_content = (
                     f"provider:hga_local\nname:{t_name}\n"
                     f"description:{t_func.description}\nparameters:{params}\n"

@@ -32,9 +32,9 @@ class CameraEntryUnsecuredRule:
 
     def __init__(
         self,
-        *,
         camera_entry_links: dict[str, list[str]] | None = None,
     ) -> None:
+        """Initialise rule with optional cross-area camera→entry links."""
         self._camera_entry_links: dict[str, list[str]] = camera_entry_links or {}
 
     def evaluate(self, snapshot: FullStateSnapshot) -> list[AnomalyFinding]:  # noqa: PLR0912, PLR0915
@@ -59,13 +59,15 @@ class CameraEntryUnsecuredRule:
                 continue
             unsecured_by_area.setdefault(area, []).append(entity["entity_id"])
 
-        # Reverse map: entity_id -> area, built from *all* snapshot entities so
-        # that cross-area linked entries are correctly resolved.
+        # Reverse map: entity_id → area, used to populate unsecured_entity_areas
+        # in evidence so the LLM and correlator know where each entity lives.
+        # Built from ALL snapshot entities (not just unsecured ones) so that
+        # cross-area linked entities have their area available.
         all_entity_area_map: dict[str, str] = {
-            e["entity_id"]: e.get("area", "unknown") for e in snapshot["entities"]
+            e["entity_id"]: e.get("area") or "unknown" for e in snapshot["entities"]
         }
 
-        # Quick lookup by entity_id for linked-entry state checks.
+        # Index entities by id for linked-entity unsecured lookup.
         entity_by_id: dict[str, SnapshotEntity] = {
             e["entity_id"]: e for e in snapshot["entities"]
         }
@@ -131,28 +133,38 @@ class CameraEntryUnsecuredRule:
                     ACTIVITY_WINDOW_MIN,
                 )
                 continue
+            # Same-area unsecured entries (primary spatial relationship).
+            unsecured_same_area: list[str] = list(unsecured_by_area.get(area) or [])
 
-            # ---- same-area unsecured entries (original behaviour) ----
-            unsecured_same_area = unsecured_by_area.get(area, [])
-
-            # ---- cross-area linked entries ----
+            # Cross-area linked entries: fire when camera.entity_id has an explicit
+            # entry link configured via sentinel_camera_entry_links.  This covers
+            # cameras that physically overlook an entry in a different HA area
+            # (e.g. driveway camera → front door in "Front" area).
             unsecured_linked: list[str] = []
             for linked_eid in self._camera_entry_links.get(cam, []):
-                ent = entity_by_id.get(linked_eid)
-                if ent is None:
+                entity = entity_by_id.get(linked_eid)
+                if entity is None:
+                    LOGGER.debug(
+                        "%s: linked entry entity %s not in snapshot, skipping.",
+                        cam,
+                        linked_eid,
+                    )
                     continue
-                if ent["domain"] == "lock" and ent["state"] == "unlocked":
-                    unsecured_linked.append(linked_eid)
-                elif (
-                    ent["domain"] == "binary_sensor"
-                    and ent["attributes"].get("device_class") in ENTRY_CLASSES
-                    and ent["state"] == "on"
+                domain = entity["domain"]
+                state = entity["state"]
+                if (domain == "lock" and state == "unlocked") or (
+                    domain == "binary_sensor"
+                    and entity["attributes"].get("device_class") in ENTRY_CLASSES
+                    and state == "on"
                 ):
                     unsecured_linked.append(linked_eid)
 
-            unsecured_all = sorted(
-                set(unsecured_same_area) | set(unsecured_linked)
-            )
+            # Merge: same-area first, then linked (preserving order, deduplicating).
+            same_area_set = set(unsecured_same_area)
+            unsecured_all: list[str] = unsecured_same_area + [
+                eid for eid in unsecured_linked if eid not in same_area_set
+            ]
+
             if not unsecured_all:
                 continue
 
@@ -161,15 +173,16 @@ class CameraEntryUnsecuredRule:
                 "area": area,  # kept for correlator Rule 1 compatibility
                 "camera_area": area,  # explicit field for LLM spatial grounding
                 "last_activity": last_activity,
-                "unsecured_entities": unsecured_all,
+                "unsecured_entities": sorted(unsecured_all),
+                # Iterate sorted order so unsecured_entity_areas key order matches
+                # unsecured_entities list order — consistent view for the LLM.
                 "unsecured_entity_areas": {
                     eid: all_entity_area_map.get(eid, "unknown")
-                    for eid in unsecured_all
+                    for eid in sorted(unsecured_all)
                 },
             }
-            # Hash only the same-area entities so that adding cross-area
-            # linked entries does not invalidate suppression state for
-            # already-notified findings.
+            # Hash only same-area unsecured entities so that changing the link
+            # config does not invalidate suppression state for existing findings.
             anomaly_id = build_anomaly_id(
                 self.rule_id,
                 [activity["camera_entity_id"]],
