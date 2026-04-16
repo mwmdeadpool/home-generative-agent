@@ -1,4 +1,5 @@
-"""Three-tier intent resolver.
+"""
+Three-tier intent resolver.
 
 Tier 1: Deterministic verb extraction + vector entity matching
 Tier 2: Small LLM splits compound intents
@@ -32,7 +33,8 @@ COMPOUND_INDICATORS = [" and ", " also ", " then ", " plus ", ", "]
 
 
 def _extract_action_verb(text: str) -> tuple[str | None, dict[str, str] | None]:
-    """Extract the action verb and its HA mapping from user text.
+    """
+    Extract the action verb and its HA mapping from user text.
 
     Returns (matched_verb, action_mapping) or (None, None).
     """
@@ -61,21 +63,21 @@ def _extract_brightness(text: str) -> int | None:
     """Extract brightness percentage from text."""
     text_lower = text.lower()
     # "dim to 50%", "set brightness to 75", "50 percent"
-    match = re.search(r'(\d{1,3})\s*%|brightness\s+(?:to\s+)?(\d{1,3})', text_lower)
+    match = re.search(r"(\d{1,3})\s*%|brightness\s+(?:to\s+)?(\d{1,3})", text_lower)
     if match:
         val = int(match.group(1) or match.group(2))
         return max(0, min(255, int(val * 255 / 100)))
     # "dim" without number = 30%, "brighten" = 100%
-    if "dim" in text_lower and not re.search(r'\d', text_lower):
+    if "dim" in text_lower and not re.search(r"\d", text_lower):
         return 77  # ~30%
-    if "brighten" in text_lower and not re.search(r'\d', text_lower):
+    if "brighten" in text_lower and not re.search(r"\d", text_lower):
         return 255
     return None
 
 
 def _extract_temperature(text: str) -> float | None:
     """Extract temperature from text."""
-    match = re.search(r'(\d{2,3})\s*(?:degrees?|°|f)?', text.lower())
+    match = re.search(r"(\d{2,3})\s*(?:degrees?|°|f)?", text.lower())
     if match:
         return float(match.group(1))
     return None
@@ -88,7 +90,8 @@ async def resolve_intent(
     qdrant_url: str = "http://localhost:6333",
     collection_name: str = "hga_entities",
 ) -> IntentResult:
-    """Resolve user intent through the 3-tier system.
+    """
+    Resolve user intent through the 3-tier system.
 
     Returns IntentResult with tier, actions, and timing.
     """

@@ -1,4 +1,5 @@
-"""Three-tier intent resolver for fast HA command execution.
+"""
+Three-tier intent resolver for fast HA command execution.
 
 Tier 1: Vector similarity match against embedded entities (~50-100ms)
 Tier 2: Small LLM classifier for compound/ambiguous intents (~200-300ms)

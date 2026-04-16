@@ -1,4 +1,5 @@
-"""Execute resolved intents directly via HA service calls.
+"""
+Execute resolved intents directly via HA service calls.
 
 Handles Tier 1 (direct) and Tier 2 (compound) execution
 without going through the full LLM pipeline.
@@ -14,7 +15,7 @@ from homeassistant.components import conversation
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import intent
 
-from . import IntentResult, IntentTier, ResolvedAction
+from . import IntentResult, ResolvedAction
 
 _LOGGER = logging.getLogger(__name__)
 

@@ -947,6 +947,7 @@ def sanitize_for_prompt(text: str | None) -> str:
 
     Returns:
         A sanitized string safe for inclusion in LLM prompts.
+
     """
     if text is None:
         return ""
@@ -989,6 +990,7 @@ def validate_entity_id(entity_id: str | None) -> bool:
 
     Returns:
         True if the entity_id format is valid, False otherwise.
+
     """
     if not entity_id or not isinstance(entity_id, str):
         return False
@@ -1006,6 +1008,7 @@ def sanitize_entity_for_prompt(entity: dict[str, Any]) -> dict[str, Any]:
 
     Returns:
         A new dictionary with sanitized values.
+
     """
     if not isinstance(entity, dict):
         return {}
@@ -1019,9 +1022,7 @@ def sanitize_entity_for_prompt(entity: dict[str, Any]) -> dict[str, Any]:
                 sanitized[key] = value
             else:
                 sanitized[key] = "invalid.entity_id"
-        elif key == "friendly_name":
-            sanitized[key] = sanitize_for_prompt(value)
-        elif key == "state":
+        elif key == "friendly_name" or key == "state":
             sanitized[key] = sanitize_for_prompt(value)
         elif key == "attributes" and isinstance(value, dict):
             # Sanitize string attributes

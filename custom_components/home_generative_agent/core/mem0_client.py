@@ -6,11 +6,10 @@ import logging
 from contextlib import AsyncExitStack
 from typing import Any
 
+from homeassistant.core import HomeAssistant
+from langchain_mcp_adapters.tools import load_mcp_tools
 from mcp import ClientSession
 from mcp.client.sse import sse_client
-from langchain_mcp_adapters.tools import load_mcp_tools
-
-from homeassistant.core import HomeAssistant
 
 LOGGER = logging.getLogger(__name__)
 
@@ -37,19 +36,19 @@ class Mem0Client:
             # Connect to SSE endpoint
             # We assume the URL is the full SSE endpoint e.g. http://host:port/sse
             read, write = await self._exit_stack.enter_async_context(sse_client(self._url))
-            
+
             # Create and initialize session
             self._session = await self._exit_stack.enter_async_context(
                 ClientSession(read, write)
             )
             await self._session.initialize()
-            
+
             # Load tools into memory using the adapter
             # load_mcp_tools returns a list of LangChain tools
             tools_list = await load_mcp_tools(self._session)
             for tool in tools_list:
                 self._tools[tool.name] = tool
-            
+
             self._connected = True
             LOGGER.info("Connected to Mem0 MCP server at %s", self._url)
         except Exception as err:
@@ -85,7 +84,7 @@ class Mem0Client:
         # Check if we have the tool naturally or possibly prefixed
         # load_mcp_tools usually keeps the original name unless conflicted?
         # Let's try direct first.
-        
+
         target_tool = self._tools.get(tool_name)
         if not target_tool:
             # Fallback simple search if prefixes are involved (e.g. server name?)
@@ -94,7 +93,7 @@ class Mem0Client:
                 if name.endswith(tool_name.replace("mem0_", "")):
                     target_tool = tool
                     break
-        
+
         if not target_tool:
             return f"Error: Tool {tool_name} not found. Available: {list(self._tools.keys())}"
 

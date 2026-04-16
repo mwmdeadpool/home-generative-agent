@@ -1,4 +1,5 @@
-"""Entity embedding and vector store for Tier 1 resolution.
+"""
+Entity embedding and vector store for Tier 1 resolution.
 
 Embeds all HA entities (friendly_name + domain + area) into Qdrant
 for fast similarity matching against user intents.
@@ -6,15 +7,14 @@ for fast similarity matching against user intents.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import time
 from typing import Any
 
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import area_registry as ar
-from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers import entity_registry as er
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -187,7 +187,8 @@ async def embed_entities(
     qdrant_url: str = "http://localhost:6333",
     collection_name: str = "hga_entities",
 ) -> int:
-    """Embed entities and store in Qdrant.
+    """
+    Embed entities and store in Qdrant.
 
     Returns the number of entities embedded.
     """
@@ -282,7 +283,8 @@ async def search_entities(
     limit: int = 5,
     score_threshold: float = 0.65,
 ) -> list[dict[str, Any]]:
-    """Search for entities matching user intent.
+    """
+    Search for entities matching user intent.
 
     Returns list of matches with scores.
     """

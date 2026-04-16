@@ -11,7 +11,7 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.util import dt as dt_util
 
-from ..const import sanitize_for_prompt, sanitize_entity_for_prompt
+from ..const import sanitize_for_prompt
 from .camera_activity import extract_camera_activity
 from .derived import derive_context
 from .schema import (
