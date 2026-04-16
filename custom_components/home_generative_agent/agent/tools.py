@@ -4,19 +4,18 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import calendar
 import json
 import logging
 import math
 import re
 from collections.abc import Mapping
-import calendar
 from datetime import date, datetime, timedelta
-from zoneinfo import ZoneInfo
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, cast
+from zoneinfo import ZoneInfo
 
 import aiofiles
-import async_timeout
 import dateparser
 import homeassistant.util.dt as dt_util
 import voluptuous as vol
@@ -36,14 +35,14 @@ from homeassistant.const import (
 from homeassistant.core import State
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import llm
+from homeassistant.helpers.httpx_client import get_async_client
 from homeassistant.helpers.recorder import get_instance as get_recorder_instance
 from homeassistant.helpers.recorder import session_scope as recorder_session_scope
-from homeassistant.helpers.httpx_client import get_async_client
 from homeassistant.util import ulid
 from langchain_core.messages import AnyMessage, HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig  # noqa: TC002
 from langchain_core.tools import InjectedToolArg, tool
-from langgraph.prebuilt import InjectedStore
+from langgraph.prebuilt.tool_node import InjectedStore
 from langgraph.store.base import BaseStore  # noqa: TC002
 from voluptuous import MultipleInvalid
 
@@ -56,13 +55,11 @@ from ..const import (  # noqa: TID252
     CONF_LIGHTRAG_API_KEY,
     CONF_LIGHTRAG_URL,
     CONF_NOTIFY_SERVICE,
-    CONF_PLEX_ENABLED,
     CONF_PLEX_SERVER_URL,
     CONF_PLEX_TOKEN,
     CONF_REDDIT_CLIENT_ID,
     CONF_REDDIT_CLIENT_SECRET,
     CONF_REDDIT_USER_AGENT,
-    CONF_WIKIPEDIA_ENABLED,
     CRITICAL_PIN_MAX_LEN,
     CRITICAL_PIN_MIN_LEN,
     HISTORY_TOOL_CONTEXT_LIMIT,
@@ -76,7 +73,6 @@ from ..const import (  # noqa: TID252
 )
 from ..core.conversation_helpers import _resolve_entity_id  # noqa: TID252
 from ..core.utils import extract_final, verify_pin  # noqa: TID252
-from .camera_activity import get_camera_last_events_from_states
 from .helpers import (
     ConfigurableData,
     maybe_fill_lock_entity,
@@ -304,7 +300,7 @@ async def _get_camera_image(hass: HomeAssistant, camera_name: str) -> bytes | No
             await asyncio.sleep(backoff_base * (attempt - 1))
 
         try:
-            async with async_timeout.timeout(timeout_sec):
+            async with asyncio.timeout(timeout_sec):
                 image = await camera.async_get_image(
                     hass=hass,
                     entity_id=camera_entity_id,
@@ -654,9 +650,13 @@ async def confirm_sensitive_action(  # noqa: D417, PLR0911
     """
     Confirm and execute a pending sensitive action that requires a PIN.
 
+    Only call this tool after receiving a tool response with status "requires_pin".
+    That response contains the action_id to pass here. Do not call this tool
+    speculatively or before the action tool has returned a "requires_pin" status.
+
     Args:
-        action_id: The action to confirm (provided by agent when it asked for a PIN).
-        pin: The user-provided PIN.
+        action_id: The action ID from the "requires_pin" tool response.
+        pin: The PIN provided by the user.
 
     """
     if "configurable" not in config:
@@ -1255,7 +1255,7 @@ async def get_camera_last_events(  # noqa: D417
 
 
 @tool(parse_docstring=True)
-def current_time(  # noqa: D417
+def current_time(
     timezone: str = "Etc/UTC",
 ) -> str:
     """
@@ -1274,7 +1274,7 @@ def current_time(  # noqa: D417
 
 
 @tool(parse_docstring=True)
-def time_since(  # noqa: D417
+def time_since(
     past_date: str,
 ) -> str:
     """
@@ -1289,7 +1289,7 @@ def time_since(  # noqa: D417
         # Ensure we compare timezone-aware datetimes
         if past.tzinfo is None:
             past = past.replace(tzinfo=dt_util.UTC)
-        
+
         now = dt_util.utcnow()
         delta = now - past
         return f"{delta.days} days, {delta.seconds // 3600} hours ago"
@@ -1298,7 +1298,7 @@ def time_since(  # noqa: D417
 
 
 @tool(parse_docstring=True)
-def add_days(  # noqa: D417
+def add_days(
     days: int,
 ) -> str:
     """
@@ -1316,7 +1316,7 @@ def add_days(  # noqa: D417
 
 
 @tool(parse_docstring=True)
-def subtract_days(  # noqa: D417
+def subtract_days(
     days: int,
 ) -> str:
     """
@@ -1334,7 +1334,7 @@ def subtract_days(  # noqa: D417
 
 
 @tool(parse_docstring=True)
-def date_diff(  # noqa: D417
+def date_diff(
     start: str,
     end: str,
 ) -> str:
@@ -1356,7 +1356,7 @@ def date_diff(  # noqa: D417
 
 
 @tool(parse_docstring=True)
-def next_weekday(  # noqa: D417
+def next_weekday(
     weekday: str,
 ) -> str:
     """
@@ -1380,7 +1380,7 @@ def next_weekday(  # noqa: D417
 
 
 @tool(parse_docstring=True)
-def is_leap_year(  # noqa: D417
+def is_leap_year(
     year: int,
 ) -> bool:
     """
@@ -1394,7 +1394,7 @@ def is_leap_year(  # noqa: D417
 
 
 @tool(parse_docstring=True)
-def week_number(  # noqa: D417
+def week_number(
     date_str: str,
 ) -> int | str:
     """
@@ -1411,7 +1411,7 @@ def week_number(  # noqa: D417
 
 
 @tool(parse_docstring=True)
-def parse_human_date(  # noqa: D417
+def parse_human_date(
     description: str,
 ) -> str:
     """
@@ -1434,7 +1434,7 @@ def parse_human_date(  # noqa: D417
 
 
 @tool(parse_docstring=True)
-def add(  # noqa: D417
+def add(
     a: float,
     b: float,
 ) -> float:
@@ -1450,7 +1450,7 @@ def add(  # noqa: D417
 
 
 @tool(parse_docstring=True)
-def subtract(  # noqa: D417
+def subtract(
     a: float,
     b: float,
 ) -> float:
@@ -1466,7 +1466,7 @@ def subtract(  # noqa: D417
 
 
 @tool(parse_docstring=True)
-def multiply(  # noqa: D417
+def multiply(
     a: float,
     b: float,
 ) -> float:
@@ -1482,7 +1482,7 @@ def multiply(  # noqa: D417
 
 
 @tool(parse_docstring=True)
-def divide(  # noqa: D417
+def divide(
     a: float,
     b: float,
 ) -> float | str:
@@ -1500,7 +1500,7 @@ def divide(  # noqa: D417
 
 
 @tool(parse_docstring=True)
-def percentage_diff(  # noqa: D417
+def percentage_diff(
     original: float,
     new: float,
 ) -> dict[str, Any] | str:
@@ -1522,7 +1522,7 @@ def percentage_diff(  # noqa: D417
 
 
 @tool(parse_docstring=True)
-def round_number(  # noqa: D417
+def round_number(
     value: float,
     places: int = 0,
 ) -> dict[str, Any]:
@@ -1568,7 +1568,7 @@ async def define(  # noqa: D417
         data = response.json()
         if isinstance(data, dict) and data.get("title") == "No Definitions Found":
             return {"error": f"No definitions found for '{word}'"}
-        
+
         # data is a list of entries
         if not isinstance(data, list):
              return {"error": "Unexpected API response format"}
@@ -1602,13 +1602,13 @@ async def example_usage(  # noqa: D417
         return {"error": "Configuration not found"}
     hass = config["configurable"]["hass"]
     client = get_async_client(hass)
-    
+
     try:
         response = await client.get(f"{API_BASE}{word}")
         data = response.json()
         if isinstance(data, dict) and data.get("title") == "No Definitions Found":
             return []
-        
+
         if not isinstance(data, list):
              return {"error": "Unexpected API response format"}
 
@@ -1647,7 +1647,7 @@ async def synonyms(  # noqa: D417
         data = response.json()
         if isinstance(data, dict) and data.get("title") == "No Definitions Found":
             return []
-        
+
         if not isinstance(data, list):
              return {"error": "Unexpected API response format"}
 
@@ -1686,16 +1686,16 @@ async def find_nearby_places(  # noqa: D417
     """
     if "configurable" not in config:
         return {"error": "Configuration not found"}
-    
+
     options = config["configurable"].get("options", {})
     api_key = options.get(CONF_GOOGLE_PLACES_API_KEY)
-    
+
     if not api_key:
         return {"error": "Google Places API Key is not configured."}
 
     hass = config["configurable"]["hass"]
     client = get_async_client(hass)
-    
+
     params = {
         "query": query,
         "key": api_key,
@@ -1704,7 +1704,7 @@ async def find_nearby_places(  # noqa: D417
     try:
         response = await client.get(GOOGLE_PLACES_TEXT_SEARCH_URL, params=params)
         data = response.json()
-        
+
         if data.get("status") != "OK":
              error_msg = data.get("error_message", data.get("status"))
              if data.get("status") == "ZERO_RESULTS":
@@ -1713,9 +1713,9 @@ async def find_nearby_places(  # noqa: D417
 
         results = data.get("results", [])
         output = []
-        
+
         limit = min(max_results, 20)
-        
+
         for place in results[:limit]:
             # Simplify output for LLM consumption
             item = {
@@ -1728,9 +1728,9 @@ async def find_nearby_places(  # noqa: D417
             }
             if place.get("opening_hours") and place["opening_hours"].get("open_now") is not None:
                  item["open_now"] = place["opening_hours"]["open_now"]
-            
+
             output.append(item)
-            
+
         return output
 
     except Exception as err:
@@ -1774,20 +1774,20 @@ async def search_wikipedia(  # noqa: D417
     try:
         response = await client.get(WIKIPEDIA_API_URL, params=params)
         data = response.json()
-        
+
         if "error" in data:
             return {"error": data["error"].get("info", "Unknown API error")}
 
         search_results = data.get("query", {}).get("search", [])
-        
+
         output = []
         for item in search_results:
             output.append({
                 "title": item.get("title"),
-                "snippet": item.get("snippet", "").replace('<span class="searchmatch">', '').replace('</span>', ''),
+                "snippet": item.get("snippet", "").replace('<span class="searchmatch">', "").replace("</span>", ""),
                 "pageid": item.get("pageid"),
             })
-            
+
         return output
     except Exception as err:
         return {"error": f"Error searching Wikipedia: {err}"}
@@ -1825,17 +1825,17 @@ async def get_wikipedia_page(  # noqa: D417
     try:
         response = await client.get(WIKIPEDIA_API_URL, params=params)
         data = response.json()
-        
+
         if "error" in data:
             return {"error": data["error"].get("info", "Unknown API error")}
 
         pages = data.get("query", {}).get("pages", {})
         if not pages:
              return {"error": "Page not found."}
-        
+
         # 'pages' is a dict keyed by pageid, but we typically just want the first one found
         page = next(iter(pages.values()))
-        
+
         if "missing" in page:
             return {"error": f"Page '{title}' does not exist."}
 
@@ -1869,11 +1869,11 @@ async def query_lightrag(  # noqa: D417
     """
     if "configurable" not in config:
         return {"error": "Configuration not found"}
-    
+
     options = config["configurable"].get("options", {})
     base_url = options.get(CONF_LIGHTRAG_URL, "http://localhost:9600").rstrip("/")
     api_key = options.get(CONF_LIGHTRAG_API_KEY, "")
-    
+
     hass = config["configurable"]["hass"]
     client = get_async_client(hass)
 
@@ -1888,15 +1888,15 @@ async def query_lightrag(  # noqa: D417
 
     try:
         response = await client.post(
-            f"{base_url}/query", 
-            json=payload, 
+            f"{base_url}/query",
+            json=payload,
             headers=headers,
             timeout=60
         )
-        
+
         if response.status_code != 200:
             return {"error": f"LightRAG Error ({response.status_code}): {response.text}"}
-            
+
         data = response.json()
         return {
             "response": data.get("response", "No response generated."),
@@ -1913,15 +1913,15 @@ def _get_reddit_client(config: RunnableConfig) -> Any:
     """Get a configured PRAW Reddit client."""
     if "configurable" not in config:
         raise ValueError("Configuration not found")
-        
+
     options = config["configurable"].get("options", {})
     client_id = options.get(CONF_REDDIT_CLIENT_ID)
     client_secret = options.get(CONF_REDDIT_CLIENT_SECRET)
     user_agent = options.get(CONF_REDDIT_USER_AGENT, "HomeAssistant/1.0.0")
-    
+
     if not client_id or not client_secret:
         raise ValueError("Reddit credentials not configured")
-        
+
     import praw
     return praw.Reddit(
         client_id=client_id,
@@ -1948,13 +1948,14 @@ async def get_subreddit_posts(
         sort: Sort method: "hot", "new", "rising", "top". Default is "hot".
         time_filter: "hour", "day", "week", "month", "year", "all". Default is "day".
         limit: Number of posts to fetch (1-100). Default is 10.
+
     """
     hass = config["configurable"]["hass"]
-    
+
     def _fetch():
         reddit = _get_reddit_client(config)
         sub = reddit.subreddit(subreddit)
-        
+
         if sort == "hot":
             posts = sub.hot(limit=limit)
         elif sort == "new":
@@ -1965,7 +1966,7 @@ async def get_subreddit_posts(
             posts = sub.top(time_filter=time_filter, limit=limit)
         else:
             posts = sub.hot(limit=limit)
-            
+
         results = []
         for post in posts:
             results.append({
@@ -1998,6 +1999,7 @@ async def get_post_details(
     Args:
         post_id: Reddit post ID or full URL.
         include_comments: Whether to include top comments. Default is False.
+
     """
     hass = config["configurable"]["hass"]
 
@@ -2007,7 +2009,7 @@ async def get_post_details(
             submission = reddit.submission(url=post_id)
         else:
             submission = reddit.submission(id=post_id)
-            
+
         data = {
             "title": submission.title,
             "author": str(submission.author) if submission.author else "[deleted]",
@@ -2017,19 +2019,19 @@ async def get_post_details(
             "url": submission.url,
             "text": submission.selftext,
         }
-        
+
         if include_comments:
             submission.comments.replace_more(limit=0)
             comments = []
             for comment in submission.comments[:10]:
-                 if hasattr(comment, 'body'):
+                 if hasattr(comment, "body"):
                     comments.append({
                         "author": str(comment.author) if comment.author else "[deleted]",
                         "body": comment.body[:300],
                         "score": comment.score
                     })
             data["comments"] = comments
-            
+
         return data
 
     try:
@@ -2057,6 +2059,7 @@ async def search_reddit(
         sort: "relevance", "hot", "top", "new", "comments". Default is "relevance".
         time_filter: "hour", "day", "week", "month", "year", "all". Default is "all".
         limit: Number of results (1-100). Default is 10.
+
     """
     hass = config["configurable"]["hass"]
 
@@ -2066,7 +2069,7 @@ async def search_reddit(
             api = reddit.subreddit(subreddit)
         else:
             api = reddit.subreddit("all")
-            
+
         results = []
         for post in api.search(query, sort=sort, time_filter=time_filter, limit=limit):
             results.append({
@@ -2095,6 +2098,7 @@ async def get_user_profile(
 
     Args:
         username: Reddit username (without u/).
+
     """
     hass = config["configurable"]["hass"]
 
@@ -2123,14 +2127,14 @@ def _get_plex_server(config: RunnableConfig) -> Any:
     """Get a configured PlexServer instance."""
     if "configurable" not in config:
         raise ValueError("Configuration not found")
-        
+
     options = config["configurable"].get("options", {})
     base_url = options.get(CONF_PLEX_SERVER_URL)
     token = options.get(CONF_PLEX_TOKEN)
-    
+
     if not base_url or not token:
         raise ValueError("Plex configuration missing (URL or Token)")
-        
+
     from plexapi.server import PlexServer
     return PlexServer(base_url, token)
 
@@ -2150,9 +2154,10 @@ async def plex_search_movies(
         title: Title to match.
         year: Year to filter by.
         limit: Max results (default 5).
+
     """
     hass = config["configurable"]["hass"]
-    
+
     def _search():
         plex = _get_plex_server(config)
         kwargs = {"libtype": "movie"}
@@ -2160,7 +2165,7 @@ async def plex_search_movies(
             kwargs["title"] = title
         if year:
             kwargs["year"] = year
-            
+
         results = plex.library.search(**kwargs)
         data = []
         for vid in results[:limit]:
@@ -2189,6 +2194,7 @@ async def plex_get_movie_details(
 
     Args:
         movie_key: The unique key for the movie.
+
     """
     hass = config["configurable"]["hass"]
 
@@ -2225,6 +2231,7 @@ async def plex_recent_movies(
 
     Args:
         count: Number of movies to return.
+
     """
     hass = config["configurable"]["hass"]
 
@@ -2254,6 +2261,7 @@ async def plex_create_playlist(
     Args:
         name: Playlist name.
         movie_keys: List of movie ratingKeys.
+
     """
     hass = config["configurable"]["hass"]
 
@@ -2265,10 +2273,10 @@ async def plex_create_playlist(
                 items.append(plex.library.fetchItem(int(key)))
             except:
                 pass
-        
+
         if not items:
             return {"error": "No valid items found"}
-            
+
         pl = plex.createPlaylist(name, items=items)
         return {"name": pl.title, "key": pl.ratingKey, "count": len(items)}
 
@@ -2307,15 +2315,16 @@ async def plex_get_playlist_items(
 
     Args:
         playlist_key: Payload key.
+
     """
     hass = config["configurable"]["hass"]
 
     def _fetch():
         plex = _get_plex_server(config)
         try:
-            pl = plex.playlist(int(playlist_key)) # fetchItem doesnt always work for playlists? 
+            pl = plex.playlist(int(playlist_key)) # fetchItem doesnt always work for playlists?
             # Or fetchItem(key) works. Let's try to find it in playlists() list if fetch fails or just use fetchItem
-            # plex.playlist() might need title? 
+            # plex.playlist() might need title?
             # safe way:
             pl = plex.fetchItem(int(playlist_key))
             return [{"title": i.title, "year": i.year, "key": i.ratingKey} for i in pl.items()]
@@ -2339,6 +2348,7 @@ async def plex_delete_playlist(
 
     Args:
         playlist_key: Playlist key.
+
     """
     hass = config["configurable"]["hass"]
 
@@ -2370,6 +2380,7 @@ async def plex_add_to_playlist(
     Args:
         playlist_key: Playlist key.
         movie_key: Movie key.
+
     """
     hass = config["configurable"]["hass"]
 
@@ -2400,6 +2411,7 @@ async def plex_get_movie_genres(
 
     Args:
         movie_key: Movie key.
+
     """
     hass = config["configurable"]["hass"]
 

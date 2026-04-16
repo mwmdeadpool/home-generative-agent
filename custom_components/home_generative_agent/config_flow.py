@@ -61,13 +61,14 @@ from .const import (
     CONF_REDDIT_ENABLED,
     CONF_REDDIT_USER_AGENT,
     CONF_SCHEMA_FIRST_YAML,
+    CONF_TOOL_RELEVANCE_THRESHOLD,
+    CONF_TOOL_RETRIEVAL_LIMIT,
     CONF_VIDEO_ANALYZER_MODE,
     CONF_WIKIPEDIA_ENABLED,
     CONFIG_ENTRY_VERSION,
     CRITICAL_PIN_MAX_LEN,
     CRITICAL_PIN_MIN_LEN,
     DOMAIN,
-
     RECOMMENDED_FACE_RECOGNITION,
     RECOMMENDED_FAST_INTENT_COLLECTION,
     RECOMMENDED_FAST_INTENT_ENABLED,
@@ -82,6 +83,8 @@ from .const import (
     RECOMMENDED_PLEX_ENABLED,
     RECOMMENDED_REDDIT_ENABLED,
     RECOMMENDED_REDDIT_USER_AGENT,
+    RECOMMENDED_TOOL_RELEVANCE_THRESHOLD,
+    RECOMMENDED_TOOL_RETRIEVAL_LIMIT,
     RECOMMENDED_VIDEO_ANALYZER_MODE,
     RECOMMENDED_WIKIPEDIA_ENABLED,
     SUBENTRY_TYPE_FEATURE,
@@ -116,7 +119,7 @@ DEFAULT_OPTIONS = {
     CONF_LLM_HASS_API: [llm.LLM_API_ASSIST],
     CONF_PROMPT: llm.DEFAULT_INSTRUCTIONS_PROMPT,
     CONF_SCHEMA_FIRST_YAML: False,
-    CONF_CRITICAL_ACTION_PIN_ENABLED: True,
+    CONF_CRITICAL_ACTION_PIN_ENABLED: False,
     CONF_VIDEO_ANALYZER_MODE: RECOMMENDED_VIDEO_ANALYZER_MODE,
     CONF_FACE_RECOGNITION: RECOMMENDED_FACE_RECOGNITION,
     CONF_MANAGE_CONTEXT_WITH_TOKENS: RECOMMENDED_MANAGE_CONTEXT_WITH_TOKENS,
@@ -128,6 +131,8 @@ DEFAULT_OPTIONS = {
     CONF_REDDIT_ENABLED: RECOMMENDED_REDDIT_ENABLED,
     CONF_PLEX_ENABLED: RECOMMENDED_PLEX_ENABLED,
     CONF_FAST_INTENT_ENABLED: RECOMMENDED_FAST_INTENT_ENABLED,
+    CONF_TOOL_RETRIEVAL_LIMIT: RECOMMENDED_TOOL_RETRIEVAL_LIMIT,
+    CONF_TOOL_RELEVANCE_THRESHOLD: RECOMMENDED_TOOL_RELEVANCE_THRESHOLD,
 }
 
 # ---------------------------
@@ -175,6 +180,18 @@ async def _schema_for_options(
             description={"suggested_value": opts.get(CONF_LLM_HASS_API, [])},
             default=[],
         ): SelectSelector(SelectSelectorConfig(options=hass_apis, multiple=True)),
+        vol.Required(
+            CONF_TOOL_RETRIEVAL_LIMIT,
+            default=opts.get(
+                CONF_TOOL_RETRIEVAL_LIMIT, RECOMMENDED_TOOL_RETRIEVAL_LIMIT
+            ),
+        ): NumberSelector(NumberSelectorConfig(min=1, max=20, step=1)),
+        vol.Required(
+            CONF_TOOL_RELEVANCE_THRESHOLD,
+            default=opts.get(
+                CONF_TOOL_RELEVANCE_THRESHOLD, RECOMMENDED_TOOL_RELEVANCE_THRESHOLD
+            ),
+        ): NumberSelector(NumberSelectorConfig(min=0.0, max=1.0, step=0.01)),
         vol.Optional(
             CONF_VIDEO_ANALYZER_MODE,
             description={"suggested_value": opts.get(CONF_VIDEO_ANALYZER_MODE)},
@@ -211,9 +228,9 @@ async def _schema_for_options(
         vol.Optional(
             CONF_CRITICAL_ACTION_PIN_ENABLED,
             description={
-                "suggested_value": opts.get(CONF_CRITICAL_ACTION_PIN_ENABLED, True)
+                "suggested_value": opts.get(CONF_CRITICAL_ACTION_PIN_ENABLED, False)
             },
-            default=opts.get(CONF_CRITICAL_ACTION_PIN_ENABLED, True),
+            default=opts.get(CONF_CRITICAL_ACTION_PIN_ENABLED, False),
         ): BooleanSelector(),
         vol.Optional(
             CONF_SCHEMA_FIRST_YAML,
@@ -222,7 +239,7 @@ async def _schema_for_options(
         ): BooleanSelector(),
     }
 
-    if opts.get(CONF_CRITICAL_ACTION_PIN_ENABLED, True):
+    if opts.get(CONF_CRITICAL_ACTION_PIN_ENABLED, False):
         schema[
             vol.Optional(
                 CONF_CRITICAL_ACTION_PIN,
@@ -522,7 +539,7 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
 
         pin_enabled = user_input.get(
             CONF_CRITICAL_ACTION_PIN_ENABLED,
-            options.get(CONF_CRITICAL_ACTION_PIN_ENABLED, True),
+            options.get(CONF_CRITICAL_ACTION_PIN_ENABLED, False),
         )
         options[CONF_CRITICAL_ACTION_PIN_ENABLED] = pin_enabled
 

@@ -39,7 +39,7 @@ from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.store.base import InvalidNamespaceError
 from pydantic import PydanticInvalidForJsonSchema, ValidationError
 
-from ..const import (  # noqa: TID252
+from custom_components.home_generative_agent.const import (
     ACTUATION_KEYWORDS_REGEX,
     CONF_CHAT_MODEL_PROVIDER,
     CONF_CRITICAL_ACTION_PIN_ENABLED,
@@ -63,6 +63,7 @@ from ..const import (  # noqa: TID252
     TOOL_CALL_ERROR_TEMPLATE,
     sanitize_for_prompt,
 )
+
 from ..core.utils import extract_final  # noqa: TID252
 from .camera_activity import get_recent_camera_activity
 from .helpers import (
@@ -323,14 +324,13 @@ def _critical_action_guard(
     if not _is_critical_action(tool_args, ctx.critical_actions, tool_name):
         return None
     if not ctx.pin_hash or not ctx.pin_salt:
-        return _make_tool_error(
-            (
-                "Critical action requires a configured PIN. "
-                "No action was queued. Set a PIN in the integration options and retry."
-            ),
+        LOGGER.warning(
+            "Critical action PIN is enabled but no PIN is configured. "
+            "Allowing '%s' without PIN verification. "
+            "Set a PIN in the integration options to enforce confirmation.",
             tool_name,
-            tool_call.get("id") or "",
         )
+        return None
 
     action_id = ulid.ulid_now()
     ctx.pending_actions[action_id] = {
@@ -557,9 +557,6 @@ async def _find_open_entries(
     return open_entries
 
 
-# ----- Tool RAG retrieval -----
-
-
 class RawTool(TypedDict):
     """Represent a tool before formatting for the LLM."""
 
@@ -692,6 +689,10 @@ async def _get_actuation_safety_tools(
         return []
 
     try:
+        # Score actuation tools against the query so the most relevant ones are
+        # ranked first.  This lets the merge drop low-relevance actuation tools
+        # (e.g. alarm_control for a "turn on light" query) and free those slots
+        # for non-actuation RAG tools (e.g. camera analysis).
         results = await store.asearch(
             ("system", "tools"),
             query=query,
@@ -855,6 +856,15 @@ async def _retrieve_tools(
     )
 
     # 2. Merge: safety tools take priority; RAG fills remaining slots.
+    #
+    # Safety tools are now score-sorted by relevance (see _get_actuation_safety_tools).
+    # Cap them at ¾ of the configured limit so low-relevance actuation tools
+    # (e.g. alarm_control for "turn on light") don't crowd out non-actuation RAG
+    # tools needed for other intents (e.g. camera analysis).
+    #
+    # effective_limit expands just enough to fit all rag_only tools that survived
+    # the per-sub-query RAG budget, but is capped at safety_cap + limit to avoid
+    # unbounded growth.
     safety_cap = min(len(safety_tools), max(1, limit * 3 // 4))
     safety_capped = safety_tools[:safety_cap]
     safety_names = {t["name"] for t in safety_capped}
@@ -863,6 +873,9 @@ async def _retrieve_tools(
     all_candidates = (safety_capped + rag_only)[:effective_limit]
 
     # 3. Fallback: vector store unavailable or index not yet ready.
+    # Still apply the limit so the user-configured cap is always respected.
+    # Prioritize actuation tools for actuation queries; otherwise use
+    # declaration order (HA tools first, then LangChain tools).
     if not all_candidates:
         fallback = _get_fallback_tools(config, allowed_api_ids)
         LOGGER.warning(
@@ -1076,15 +1089,16 @@ async def _summarize_and_remove_messages(
     )
 
     # Build messages for the already-configured summarization model.
-    messages = (
+    messages = cast(
+        "list[AnyMessage]",
         [SystemMessage(content=SUMMARIZATION_SYSTEM_PROMPT)]
         + [m for m in msgs_to_remove if isinstance(m, (HumanMessage, AIMessage))]
-        + [HumanMessage(content=summary_message)]
+        + [HumanMessage(content=summary_message)],
     )
 
     model = config["configurable"]["summarization_model"]
     LOGGER.debug("Summary messages: %s", messages)
-    raw_response = await model.ainvoke(messages)
+    raw_response = await _invoke_model(model, messages, {})
     LOGGER.debug("Raw summary response: %s", raw_response)
 
     response = extract_final(
@@ -1224,7 +1238,7 @@ async def _call_tools(
     pin_configured = bool(pin_hash and pin_salt)
     # Always respect a configured PIN, even if the toggle somehow reads False.
     pin_enabled = bool(
-        options.get(CONF_CRITICAL_ACTION_PIN_ENABLED, True) or pin_configured
+        options.get(CONF_CRITICAL_ACTION_PIN_ENABLED, False) or pin_configured
     )
     pending_actions = config["configurable"].get("pending_actions", {})
 

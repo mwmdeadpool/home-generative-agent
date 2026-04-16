@@ -143,8 +143,12 @@ def _migrate_suppression_state(data: dict[str, Any]) -> dict[str, Any]:
     v2 → v3: drop ``presence_grace_until`` keys that are not ``person.*``
              entity IDs (previously keyed by friendly name).
     v3 → v4: add ``learned_cooldown_multipliers`` (empty dict).
-    v4 → v5: re-key ``learned_cooldown_multipliers`` from bare entity_id
-             to ``rule_type:entity_id``.
+    v4 → v5: discard bare ``entity_id`` keys in ``learned_cooldown_multipliers``
+             (wrong key scheme — should be ``{rule_type}:{entity_id}``).
+             In production the dict was always empty since the feedback signal
+             was never wired, but any manually-set or dev-build entries are
+             discarded with a warning rather than silently migrated to an
+             ambiguous compound key.
 
     Returns the same dict object (mutations are in-place).
     """
@@ -185,10 +189,24 @@ def _migrate_suppression_state(data: dict[str, Any]) -> dict[str, Any]:
         stored_version = 4
         LOGGER.info("Suppression state migrated from v3 to v4.")
 
-    # v4 → v5: re-key learned_cooldown_multipliers (bare entity_id → rule_type:entity_id).
-    # Existing bare keys are dropped because we cannot infer the rule_type retroactively.
+    # v4 → v5: fix key scheme (entity_id only → {rule_type}:{entity_id})
     if stored_version < 5:  # noqa: PLR2004
-        data["learned_cooldown_multipliers"] = {}
+        stale = {
+            k: v
+            for k, v in data.get("learned_cooldown_multipliers", {}).items()
+            if ":" not in k
+        }
+        if stale:
+            for key in stale:
+                del data["learned_cooldown_multipliers"][key]
+            LOGGER.warning(
+                "Suppression state v4→v5: discarded %d bare entity_id key(s) "
+                "from learned_cooldown_multipliers (wrong key scheme; "
+                "expected '{rule_type}:{entity_id}'). "
+                "Discarded keys: %s",
+                len(stale),
+                sorted(stale),
+            )
         data["version"] = 5
         stored_version = 5
         LOGGER.info("Suppression state migrated from v4 to v5.")
@@ -597,20 +615,23 @@ def record_cooldown_feedback(
     """
     Increment the learned cooldown multiplier for *rule_type*:*entity_id* by one.
 
-    Call this when a user signals that a rule+entity pair is generating too
-    many alerts (e.g. via a snooze, dismiss, or explicit feedback action).
-    The multiplier is capped at ``MAX_COOLDOWN_MULTIPLIER`` and applied to
-    the base entity cooldown in :func:`should_suppress`.
+    Call this when a user signals that a rule+entity combination is generating
+    too many alerts (e.g. via a snooze or dismiss action).  The multiplier is
+    keyed by ``"{rule_type}:{entity_id}"`` so that different rules for the same
+    entity accumulate independent multipliers.
+
+    The multiplier is capped at ``MAX_COOLDOWN_MULTIPLIER`` and applied to the
+    base entity cooldown in :func:`should_suppress`.
 
     Returns the new multiplier value.
     """
-    key = f"{rule_type}:{entity_id}"
-    current = state.learned_cooldown_multipliers.get(key, 1)
+    compound_key = f"{rule_type}:{entity_id}"
+    current = state.learned_cooldown_multipliers.get(compound_key, 1)
     new_value = min(current + 1, MAX_COOLDOWN_MULTIPLIER)
-    state.learned_cooldown_multipliers[key] = new_value
+    state.learned_cooldown_multipliers[compound_key] = new_value
     LOGGER.debug(
         "Learned cooldown multiplier for %s updated: %d → %d.",
-        key,
+        compound_key,
         current,
         new_value,
     )

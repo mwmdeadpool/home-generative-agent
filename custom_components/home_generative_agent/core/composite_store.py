@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any, AsyncIterator, Sequence, TypedDict
+from collections.abc import AsyncIterator, Sequence
+from typing import Any, TypedDict
 
 from langgraph.store.base import BaseStore
 
@@ -77,7 +78,7 @@ class CompositeStore(BaseStore):
         namespace: tuple[str, ...],
         key: str,
         value: dict[str, Any],
-        *, 
+        *,
         must_not_exist: bool = True,
     ) -> AsyncIterator[str]:
         """Create a value in the appropriate store."""
