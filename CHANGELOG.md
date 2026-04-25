@@ -2,6 +2,62 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.12.2] - 2026-04-24
+
+### Fixed
+
+- **Chat streaming no longer hangs under heavy VLM load** — `_invoke_model` now
+  wraps `model.ainvoke()` in `asyncio.wait_for(_LLM_INVOKE_TIMEOUT_S=90s)`. When
+  the Ollama GPU is saturated by concurrent camera analysis, the chat LLM was
+  queuing indefinitely inside `astream_events`, stalling the streaming pipeline
+  and showing "no response" in the HA chat UI. The timeout converts an infinite
+  hang into a bounded `HomeAssistantError`. Closes #378.
+
+- **Blank chat bubble after timeout replaced with user-visible error message** —
+  The timeout `HomeAssistantError` now propagates cleanly through
+  `_stream_langgraph_to_ha` (bypassing the misleading "generator error" log path)
+  to the recovery handler, which emits "I'm sorry, I was unable to respond in time.
+  Please try again." instead of an empty bubble.
+
+- **Empty-content fallback in `_async_handle_message` now shows an error message**
+  — the `content=""` guard (hit when streaming fails with no recoverable graph
+  state) now emits "I'm sorry, I was unable to respond. Please try again." so the
+  chat UI always shows something actionable.
+
+## [3.12.1] - 2026-04-24
+
+### Fixed
+
+- **LM Studio / local embedding server compatibility** — `OpenAIEmbeddings` now sets
+  `check_embedding_ctx_length=False`, preventing `tiktoken` from converting text into
+  integer token arrays before sending. Local servers (LM Studio, Ollama-compatible
+  endpoints) expect plain strings and returned `400 - 'input' field must be a string
+  or an array of strings`. Closes #375.
+
+- **Removed `dimensions=` from local embedding calls** — the `dimensions` parameter
+  is an OpenAI-specific truncation feature not supported by local models. Sending it
+  caused `422 Unprocessable Entity` errors with models like `nomic-embed-text`.
+
+- **Configurable embedding vector dimensions** — the openai_compatible model provider
+  settings now expose an `Embedding dimensions` field (default 768, matching
+  `nomic-embed-text`). Previously the dimension was hardcoded to 1024 for all
+  providers, which caused pgvector index mismatches with 768-dim models. The value
+  flows through provider settings into `PostgresIndexConfig(dims=N)`.
+
+### Upgrade notes
+
+If you are using an `openai_compatible` provider for embeddings and have already run
+the integration (pgvector tables exist), you will need to drop and recreate the vector
+store tables if you change the `embedding_dims` value:
+
+```sql
+DROP TABLE IF EXISTS store_vectors;
+DROP TABLE IF EXISTS vector_migrations;
+```
+
+The tables are recreated automatically on the next startup.
+
+
 ## [3.12.0] - 2026-04-21
 
 ### Added
