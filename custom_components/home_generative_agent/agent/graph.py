@@ -63,7 +63,6 @@ from custom_components.home_generative_agent.const import (
     SUMMARIZATION_SYSTEM_PROMPT,
     TOOL_CALL_ERROR_TEMPLATE,
     TOOL_CALL_TRANSIENT_ERROR_TEMPLATE,
-    sanitize_for_prompt,
 )
 
 from ..core.utils import extract_final  # noqa: TID252
@@ -564,8 +563,7 @@ def _parse_open_entries_from_live_context(raw: str) -> list[str]:
             continue
 
     if current_name and is_on and is_opening:
-        # Sanitize to prevent prompt injection via entity names
-        open_entries.append(sanitize_for_prompt(current_name))
+        open_entries.append(current_name)
     return open_entries
 
 
@@ -590,8 +588,7 @@ async def _find_open_entries(
         if str(state_obj.state).lower() not in {"on", "open", "opening"}:
             continue
         friendly = state_obj.attributes.get("friendly_name") or entity_id
-        # Sanitize to prevent prompt injection via entity names
-        open_entries.append(sanitize_for_prompt(str(friendly)))
+        open_entries.append(str(friendly))
     return open_entries
 
 
@@ -1226,6 +1223,20 @@ async def _call_model(
 
     content = getattr(raw_response, "content", "") or ""
     response = extract_final(content)
+
+    tool_calls = getattr(raw_response, "tool_calls", []) or []
+
+    # Qwen3 extended-thinking: Ollama strips <think>…</think> tokens from content,
+    # leaving content='' when all output was reasoning.  On a post-tool turn with no
+    # follow-up tool call the user would receive no reply at all.  Inject a minimal
+    # acknowledgement so the conversation doesn't go silent.
+    if (
+        not response
+        and not tool_calls
+        and isinstance(state["messages"][-1], ToolMessage)
+    ):
+        LOGGER.debug("Empty model response after tool execution; injecting fallback.")
+        response = "Done."
 
     tool_calls = getattr(raw_response, "tool_calls", []) or []
 
