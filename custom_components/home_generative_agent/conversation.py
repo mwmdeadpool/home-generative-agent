@@ -49,52 +49,19 @@ from .agent.rag_embedding_text import (
 )
 from .agent.tools import (
     add_automation,
-    add_days,
     alarm_control,
     confirm_sensitive_action,
-    current_time,
-    date_diff,
-    define,
-    example_usage,
-    find_nearby_places,
     get_and_analyze_camera_image,
     get_camera_last_events,
     get_entity_history,
-    get_post_details,
-    get_subreddit_posts,
-    get_user_profile,
-    get_wikipedia_page,
-    is_leap_year,
-    next_weekday,
-    plex_add_to_playlist,
-    plex_create_playlist,
-    plex_delete_playlist,
-    plex_get_movie_details,
-    plex_get_movie_genres,
-    plex_get_playlist_items,
-    plex_list_playlists,
-    plex_recent_movies,
-    plex_search_movies,
-    query_lightrag,
     resolve_entity_ids,
-    search_reddit,
-    search_wikipedia,
-    subtract_days,
-    synonyms,
-    time_since,
     upsert_memory,
-    week_number,
     write_yaml_file,
 )
 from .const import (
     CONF_CRITICAL_ACTION_PIN_ENABLED,
-    CONF_GOOGLE_PLACES_ENABLED,
-    CONF_LIGHTRAG_ENABLED,
-    CONF_PLEX_ENABLED,
     CONF_PROMPT,
-    CONF_REDDIT_ENABLED,
     CONF_SCHEMA_FIRST_YAML,
-    CONF_WIKIPEDIA_ENABLED,
     CRITICAL_ACTION_PROMPT,
     DOMAIN,
     LANGCHAIN_LOGGING_LEVEL,
@@ -109,7 +76,7 @@ from .core.conversation_helpers import (
     _is_dashboard_request,
     _maybe_fix_dashboard_entities,
 )
-from .core.utils import gather_store_puts_in_chunks
+from .core.utils import gather_store_puts_in_chunks, local_chat_session
 
 if TYPE_CHECKING:
     from collections.abc import (
@@ -745,49 +712,9 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             "alarm_control": alarm_control,
             "resolve_entity_ids": resolve_entity_ids,
             "write_yaml_file": write_yaml_file,
-            "current_time": current_time,
-            "time_since": time_since,
-            "add_days": add_days,
-            "subtract_days": subtract_days,
-            "date_diff": date_diff,
-            "next_weekday": next_weekday,
-            "is_leap_year": is_leap_year,
-            "week_number": week_number,
-            "define": define,
-            "example_usage": example_usage,
-            "synonyms": synonyms,
         }
         if not options.get(CONF_SCHEMA_FIRST_YAML, False):
             langchain_tools["add_automation"] = add_automation
-
-        # Conditionally add custom integration tools based on config
-        if options.get(CONF_GOOGLE_PLACES_ENABLED, False):
-            langchain_tools["find_nearby_places"] = find_nearby_places
-
-        if options.get(CONF_WIKIPEDIA_ENABLED, False):
-            langchain_tools["search_wikipedia"] = search_wikipedia
-            langchain_tools["get_wikipedia_page"] = get_wikipedia_page
-
-        if options.get(CONF_LIGHTRAG_ENABLED, False):
-            langchain_tools["query_lightrag"] = query_lightrag
-
-        if options.get(CONF_REDDIT_ENABLED, False):
-            langchain_tools["search_reddit"] = search_reddit
-            langchain_tools["get_subreddit_posts"] = get_subreddit_posts
-            langchain_tools["get_post_details"] = get_post_details
-            langchain_tools["get_user_profile"] = get_user_profile
-
-        if options.get(CONF_PLEX_ENABLED, False):
-            langchain_tools["plex_search_movies"] = plex_search_movies
-            langchain_tools["plex_get_movie_details"] = plex_get_movie_details
-            langchain_tools["plex_create_playlist"] = plex_create_playlist
-            langchain_tools["plex_list_playlists"] = plex_list_playlists
-            langchain_tools["plex_get_playlist_items"] = plex_get_playlist_items
-            langchain_tools["plex_delete_playlist"] = plex_delete_playlist
-            langchain_tools["plex_add_to_playlist"] = plex_add_to_playlist
-            langchain_tools["plex_recent_movies"] = plex_recent_movies
-            langchain_tools["plex_get_movie_genres"] = plex_get_movie_genres
-
         tools.extend(langchain_tools.values())
 
         return tools, langchain_tools
@@ -1044,8 +971,6 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         chat_log: conversation.ChatLog,
     ) -> conversation.ConversationResult:
         """Process the user input."""
-        hass = self.hass
-        options = self.entry.runtime_data.options
         runtime_data = self.entry.runtime_data
         intent_response = intent.IntentResponse(language=user_input.language)
 
@@ -1064,6 +989,31 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             if chat_log.conversation_id is None
             else chat_log.conversation_id
         )
+
+        deployment = runtime_data.model_deployments.get("chat", "edge")
+        async with local_chat_session(deployment, category="chat"):
+            return await self._async_handle_message_active(
+                user_input,
+                chat_log,
+                intent_response,
+                llm_context,
+                message_history,
+                conversation_id,
+            )
+
+    async def _async_handle_message_active(  # noqa: PLR0913
+        self,
+        user_input: conversation.ConversationInput,
+        chat_log: conversation.ChatLog,
+        intent_response: intent.IntentResponse,
+        llm_context: llm.LLMContext,
+        message_history: list[Any],
+        conversation_id: str,
+    ) -> conversation.ConversationResult:
+        """Process user input while local chat activity is already marked."""
+        hass = self.hass
+        runtime_data = self.entry.runtime_data
+        options = runtime_data.options
 
         # Multi-API initialization
         try:
@@ -1282,48 +1232,11 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             "alarm_control": alarm_control,
             "resolve_entity_ids": resolve_entity_ids,
             "write_yaml_file": write_yaml_file,
-            "current_time": current_time,
-            "time_since": time_since,
-            "add_days": add_days,
-            "subtract_days": subtract_days,
-            "date_diff": date_diff,
-            "next_weekday": next_weekday,
-            "is_leap_year": is_leap_year,
-            "week_number": week_number,
-            "define": define,
-            "example_usage": example_usage,
-            "synonyms": synonyms,
         }
         # Mirror the dispatch-time guard: add_automation is excluded when
         # schema_first_yaml=True so the index and langchain_tools stay in sync.
         if not self.entry.options.get(CONF_SCHEMA_FIRST_YAML, False):
             local_tools["add_automation"] = add_automation
-
-        # Conditionally add custom integration tools for indexing
-        options = self.entry.runtime_data.options
-        if options.get(CONF_GOOGLE_PLACES_ENABLED, False):
-            local_tools["find_nearby_places"] = find_nearby_places
-        if options.get(CONF_WIKIPEDIA_ENABLED, False):
-            local_tools["search_wikipedia"] = search_wikipedia
-            local_tools["get_wikipedia_page"] = get_wikipedia_page
-        if options.get(CONF_LIGHTRAG_ENABLED, False):
-            local_tools["query_lightrag"] = query_lightrag
-        if options.get(CONF_REDDIT_ENABLED, False):
-            local_tools["search_reddit"] = search_reddit
-            local_tools["get_subreddit_posts"] = get_subreddit_posts
-            local_tools["get_post_details"] = get_post_details
-            local_tools["get_user_profile"] = get_user_profile
-        if options.get(CONF_PLEX_ENABLED, False):
-            local_tools["plex_search_movies"] = plex_search_movies
-            local_tools["plex_get_movie_details"] = plex_get_movie_details
-            local_tools["plex_create_playlist"] = plex_create_playlist
-            local_tools["plex_list_playlists"] = plex_list_playlists
-            local_tools["plex_get_playlist_items"] = plex_get_playlist_items
-            local_tools["plex_delete_playlist"] = plex_delete_playlist
-            local_tools["plex_add_to_playlist"] = plex_add_to_playlist
-            local_tools["plex_recent_movies"] = plex_recent_movies
-            local_tools["plex_get_movie_genres"] = plex_get_movie_genres
-
         for t_name, t_func in local_tools.items():
             try:
                 # Extract the JSON schema for local tools

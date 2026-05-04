@@ -206,6 +206,7 @@ from .core.person_gallery import PersonGalleryDAO
 from .core.runtime import HGAConfigEntry, HGAData
 from .core.subentry_resolver import (
     build_database_uri_from_entry,
+    build_model_deployments,
     legacy_feature_configs,
     legacy_model_provider_configs,
     resolve_model_provider_configs,
@@ -1042,7 +1043,7 @@ class NullChat:
         """Return self, as tool binding is a no-op for the fallback model."""
         return self
 
-    def with_config(self, **_cfg: Any) -> NullChat:
+    def with_config(self, _config: Any = None, **_cfg: Any) -> NullChat:
         """Return self, as this is a no-op."""
         return self
 
@@ -1162,9 +1163,84 @@ def _register_services(hass: HomeAssistant, entry: HGAConfigEntry) -> None:
     )
 
 
+async def _log_ollama_server_info(
+    hass: HomeAssistant,
+    urls_by_category: dict[str, str],
+) -> None:
+    """Query Ollama /api/ps at startup and log loaded models and swap-risk notes."""
+    client = get_async_client(hass)
+
+    # Log which categories share each URL so operators can spot contention.
+    url_to_cats: dict[str, list[str]] = {}
+    for cat, url in urls_by_category.items():
+        url_to_cats.setdefault(url, []).append(cat)
+    for url, cats in url_to_cats.items():
+        LOGGER.info(
+            "subsystem=model_server url=%s categories=%s",
+            url,
+            ",".join(sorted(cats)),
+        )
+
+    # Query /api/ps on each unique URL and log loaded models.
+    for url, cats in url_to_cats.items():
+        try:
+            async with asyncio.timeout(5.0):
+                resp = await client.get(f"{url.rstrip('/')}/api/ps")
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as err:  # noqa: BLE001
+            LOGGER.warning(
+                "subsystem=model_server url=%s probe_failed reason=%s",
+                url,
+                err,
+            )
+            continue
+
+        models = data.get("models", [])
+        if not models:
+            LOGGER.info("subsystem=model_server url=%s loaded_models=none", url)
+            continue
+
+        for m in models:
+            name = m.get("name", "unknown")
+            size_mb = int(m.get("size", 0)) // (1024 * 1024)
+            vram_mb = int(m.get("size_vram", 0)) // (1024 * 1024)
+            LOGGER.info(
+                "subsystem=model_server url=%s model=%s size_mb=%d vram_mb=%d",
+                url,
+                name,
+                size_mb,
+                vram_mb,
+            )
+
+        if len(cats) > 1:
+            LOGGER.info(
+                "subsystem=model_server url=%s shared_by=%d categories=%s "
+                "note=model_swapping_may_add_latency",
+                url,
+                len(cats),
+                ",".join(sorted(cats)),
+            )
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:  # noqa: C901, PLR0912, PLR0915
     """Set up Home Generative Agent from a config entry."""
     hass.data.setdefault(DOMAIN, {})
+
+    # Reset admission-control globals in case a prior entry unload left them
+    # dirty (e.g. mid-chat reload where the task was not cleanly cancelled).
+    import custom_components.home_generative_agent.core.utils as _utils_mod  # noqa: PLC0415
+
+    _utils_mod._chat_active_count = 0  # noqa: SLF001
+    _utils_mod._chat_idle.set()  # noqa: SLF001
+    _utils_mod._video_active_count = 0  # noqa: SLF001
+    _utils_mod._video_idle.set()  # noqa: SLF001
+    _utils_mod._sentinel_last_run = 0.0  # noqa: SLF001
+    _utils_mod._sentinel_first_defer = 0.0  # noqa: SLF001
+    _utils_mod._sentinel_defer_count = 0  # noqa: SLF001
+    for _t in _utils_mod._sentinel_llm_tasks:  # noqa: SLF001
+        _t.cancel()
+    _utils_mod._sentinel_llm_tasks = set()  # noqa: SLF001
 
     _register_services(hass, entry)
     _ensure_default_feature_subentries(hass, entry)
@@ -1175,6 +1251,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     options = resolve_runtime_options(entry)
     conf = dict(options)
     providers = resolve_model_provider_configs(entry, options)
+    model_deployments = build_model_deployments(entry, providers, options)
     api_key = conf.get(CONF_API_KEY) or _provider_api_key(providers, "openai")
     openai_secret = SecretStr(api_key) if api_key else None
     gemini_key = conf.get(CONF_GEMINI_API_KEY) or _provider_api_key(providers, "gemini")
@@ -1758,9 +1835,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         hass, options, suppression, action_handler, audit_store=audit_store
     )
     notifier.start()
+    sentinel_run_stats: dict[str, Any] = {
+        "sentinel_admission_degraded": False,
+        "sentinel_admission_degraded_category": None,
+        "sentinel_admission_consecutive_deferrals": 0,
+        "sentinel_admission_starved_for_s": 0,
+    }
+    chat_deployment = model_deployments.get("chat", "edge")
     explainer = None
     if options.get(CONF_EXPLAIN_ENABLED, RECOMMENDED_EXPLAIN_ENABLED):
-        explainer = LLMExplainer(chat_model)
+        explainer = LLMExplainer(
+            chat_model,
+            deployment=chat_deployment,
+            health_stats=sentinel_run_stats,
+        )
+
     # Issue #262: optional LLM triage service.
     triage_service: SentinelTriageService | None = None
     if options.get(CONF_SENTINEL_TRIAGE_ENABLED, RECOMMENDED_SENTINEL_TRIAGE_ENABLED):
@@ -1771,7 +1860,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             )
         )
         triage_service = SentinelTriageService(
-            chat_model, timeout_seconds=triage_timeout
+            chat_model,
+            timeout_seconds=triage_timeout,
+            deployment=chat_deployment,
+            health_stats=sentinel_run_stats,
         )
         LOGGER.info("Sentinel LLM triage enabled (timeout=%ds).", triage_timeout)
     # Issue #265: optional baseline updater (requires PostgreSQL pool).
@@ -1798,6 +1890,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         entry_id=entry.entry_id,
         triage_service=triage_service,
         baseline_updater=baseline_updater,
+        run_stats=sentinel_run_stats,
     )
     discovery_engine = SentinelDiscoveryEngine(
         hass=hass,
@@ -1807,6 +1900,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         rule_registry=rule_registry,
         proposal_store=proposal_store,
         baseline_updater=baseline_updater,
+        deployment=chat_deployment,
+        health_stats=sentinel_run_stats,
     )
 
     face_recognition = options.get(CONF_FACE_RECOGNITION, RECOMMENDED_FACE_RECOGNITION)
@@ -1824,6 +1919,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         chat_model_options=ollama_chat_model_options,
         vision_model=vision_model,
         summarization_model=summarization_model,
+        model_deployments=model_deployments,
         store=store,
         video_analyzer=video_analyzer,
         checkpointer=checkpointer,
@@ -1868,6 +1964,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         hass.data[DOMAIN]["http_registered"] = True
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+
+    if ollama_any_ok:
+        ollama_probe_urls: dict[str, str] = {
+            "chat": ollama_chat_url,
+            "vlm": ollama_vlm_url,
+            "summarization": ollama_sum_url,
+        }
+        if embedding_provider not in {"openai", "openai_compatible", "gemini"}:
+            ollama_probe_urls["embeddings"] = base_ollama_url
+        hass.async_create_task(_log_ollama_server_info(hass, ollama_probe_urls))
 
     if options.get(CONF_VIDEO_ANALYZER_MODE) != "disable":
         video_analyzer.start()
