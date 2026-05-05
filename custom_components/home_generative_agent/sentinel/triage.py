@@ -25,13 +25,21 @@ Design constraints (from sentinel_plan.md §6, §7)
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import re
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
+
+from langchain_core.messages import HumanMessage, SystemMessage
+
+from custom_components.home_generative_agent.core.utils import (
+    SENTINEL_ADMISSION_TIMEOUT_S,
+    SentinelLLMDeferredError,
+    extract_final,
+    run_sentinel_llm_call,
+)
 
 if TYPE_CHECKING:
     from custom_components.home_generative_agent.sentinel.models import AnomalyFinding
@@ -54,6 +62,7 @@ TRIAGE_REASON_LLM_SUPPRESS = "llm_suppress"
 TRIAGE_REASON_TIMEOUT = "triage_timeout"
 TRIAGE_REASON_ERROR = "triage_error"
 TRIAGE_REASON_DISABLED = "triage_disabled"
+TRIAGE_REASON_DEFERRED = "triage_deferred"
 
 # Input allowlist for optional sanitised evidence fields.
 _ALLOWED_EVIDENCE_KEYS: frozenset[str] = frozenset(
@@ -117,10 +126,19 @@ class SentinelTriageService:
     Pass ``None`` to disable triage (all findings pass through as notify).
     """
 
-    def __init__(self, model: Any, *, timeout_seconds: int = 10) -> None:
+    def __init__(
+        self,
+        model: Any,
+        *,
+        timeout_seconds: int = 10,
+        deployment: str = "edge",
+        health_stats: dict[str, Any] | None = None,
+    ) -> None:
         """Initialise with a LangChain-compatible model."""
         self._model = model
         self._timeout_seconds = timeout_seconds
+        self._deployment = deployment
+        self._health_stats = health_stats
 
     async def triage(
         self,
@@ -144,19 +162,26 @@ class SentinelTriageService:
         prompt = _build_prompt(finding, snapshot)
         start = time.monotonic()
 
+        messages = [
+            SystemMessage(content=_SYSTEM_PROMPT),
+            HumanMessage(content=prompt),
+        ]
         try:
-            from langchain_core.messages import (  # noqa: PLC0415
-                HumanMessage,
-                SystemMessage,
+            result = await run_sentinel_llm_call(
+                lambda: self._model.ainvoke(messages),
+                deployment=self._deployment,
+                category="triage",
+                admission_timeout_s=SENTINEL_ADMISSION_TIMEOUT_S,
+                call_timeout_s=float(self._timeout_seconds),
+                health_stats=self._health_stats,
             )
-
-            messages = [
-                SystemMessage(content=_SYSTEM_PROMPT),
-                HumanMessage(content=prompt),
-            ]
-            result = await asyncio.wait_for(
-                self._model.ainvoke(messages),
-                timeout=self._timeout_seconds,
+        except SentinelLLMDeferredError as err:
+            LOGGER.debug("Triage deferred: %s", err)
+            return TriageDecision(
+                decision=TRIAGE_NOTIFY,
+                reason_code=TRIAGE_REASON_DEFERRED,
+                triage_confidence=None,
+                summary="Triage deferred; chat was active.",
             )
         except TimeoutError:
             elapsed_ms = int((time.monotonic() - start) * 1000)
@@ -247,9 +272,7 @@ def _parse_response(result: Any, elapsed_ms: int) -> TriageDecision:  # noqa: AR
 
     Fails-open to ``notify`` on any parse error.
     """
-    content = getattr(result, "content", None) or ""
-    if not isinstance(content, str):
-        content = str(content)
+    content = extract_final(getattr(result, "content", None) or "")
 
     # Strip think blocks, then markdown fences if the model wrapped the JSON.
     content = _THINK_BLOCK.sub("", content).strip()

@@ -16,6 +16,12 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from custom_components.home_generative_agent.const import (
     CONF_SENTINEL_DISCOVERY_INTERVAL_SECONDS,
 )
+from custom_components.home_generative_agent.core.utils import (
+    SENTINEL_ADMISSION_TIMEOUT_S,
+    SentinelLLMDeferredError,
+    extract_final,
+    run_sentinel_llm_call,
+)
 from custom_components.home_generative_agent.explain.discovery_prompts import (
     SYSTEM_PROMPT,
     USER_PROMPT_TEMPLATE,
@@ -39,6 +45,13 @@ if TYPE_CHECKING:
     from .rule_registry import RuleRegistry
 
 LOGGER = logging.getLogger(__name__)
+
+# Hard cap on discovery LLM calls: prevents the chat model from being
+# monopolised when the snapshot is large (observed 180s+ without a cap).
+_DISCOVERY_LLM_TIMEOUT_S: float = 60.0
+# Max semantic keys sent in the discovery prompt. The post-hoc filter catches
+# any duplicates that slip through, so a generous cap is safe.
+_MAX_SEMANTIC_KEYS_IN_PROMPT: int = 60
 
 # Rule IDs for static built-in rules (deterministic, always active).
 # Included in active_rule_ids so the LLM knows these topics are already covered
@@ -71,6 +84,8 @@ class SentinelDiscoveryEngine:
         rule_registry: RuleRegistry | None = None,
         proposal_store: ProposalStore | None = None,
         baseline_updater: SentinelBaselineUpdater | None = None,
+        deployment: str = "edge",
+        health_stats: dict[str, Any] | None = None,
     ) -> None:
         """Initialize advisory discovery dependencies and runtime state."""
         self._hass = hass
@@ -80,6 +95,8 @@ class SentinelDiscoveryEngine:
         self._rule_registry = rule_registry
         self._proposal_store = proposal_store
         self._baseline_updater = baseline_updater
+        self._deployment = deployment
+        self._health_stats = health_stats
         self._task: asyncio.Task[None] | None = None
         self._stop_event = asyncio.Event()
         self._run_lock = asyncio.Lock()
@@ -173,30 +190,54 @@ class SentinelDiscoveryEngine:
                     "Discovery TTL cleanup failed; continuing.", exc_info=True
                 )
         active_rule_ids, existing_keys = await self._existing_semantic_context()
+        # Cap keys sent to the LLM to bound prompt token cost. Post-hoc filter
+        # handles duplicates that slip through.
+        capped_keys = sorted(existing_keys)[:_MAX_SEMANTIC_KEYS_IN_PROMPT]
         now = dt_util.utcnow().isoformat()
         prompt = USER_PROMPT_TEMPLATE.format(
             snapshot=compact_snapshot,
             active_rule_ids=json.dumps(sorted(active_rule_ids), separators=(",", ":")),
-            existing_semantic_keys=json.dumps(
-                sorted(existing_keys), separators=(",", ":")
-            ),
+            existing_semantic_keys=json.dumps(capped_keys, separators=(",", ":")),
+        )
+        LOGGER.debug(
+            "Discovery prompt: %d chars (snapshot=%d, keys=%d/%d).",
+            len(prompt),
+            len(compact_snapshot),
+            len(capped_keys),
+            len(existing_keys),
         )
         messages = [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=prompt)]
 
         try:
-            result = await self._model.ainvoke(messages)
+            result = await run_sentinel_llm_call(
+                lambda: self._model.ainvoke(messages),
+                deployment=self._deployment,
+                category="discovery",
+                admission_timeout_s=SENTINEL_ADMISSION_TIMEOUT_S,
+                call_timeout_s=_DISCOVERY_LLM_TIMEOUT_S,
+                health_stats=self._health_stats,
+            )
+        except SentinelLLMDeferredError as err:
+            LOGGER.debug("Discovery LLM call deferred: %s", err)
+            return
+        except TimeoutError:
+            LOGGER.warning(
+                "Discovery LLM call timed out after %.0fs; skipping cycle.",
+                _DISCOVERY_LLM_TIMEOUT_S,
+            )
+            return
         except (ValueError, TypeError, RuntimeError) as err:
             LOGGER.warning("Discovery LLM call failed: %s", err)
             return
 
-        content = getattr(result, "content", None)
+        content = extract_final(getattr(result, "content", None) or "")
         if not content:
             LOGGER.debug("Discovery LLM returned empty content.")
             return
 
         try:
             payload = json.loads(content)
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, TypeError):
             LOGGER.warning("Discovery output was not valid JSON.")
             return
 
