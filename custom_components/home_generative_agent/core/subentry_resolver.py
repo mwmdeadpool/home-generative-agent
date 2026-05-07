@@ -15,6 +15,7 @@ from homeassistant.const import (
 )
 
 from ..const import (  # noqa: TID252
+    CONF_ANTHROPIC_API_KEY,
     CONF_CHAT_MODEL_PROVIDER,
     CONF_DB_NAME,
     CONF_DB_PARAMS,
@@ -128,6 +129,28 @@ if TYPE_CHECKING:
     from homeassistant.config_entries import ConfigEntry, ConfigSubentry
 
 LOGGER = logging.getLogger(__name__)
+
+# Deployment defaults by provider type.
+# openai_compatible defaults to "edge" because it is currently only exposed
+# under the Edge path in the config flow and is commonly used for LM Studio,
+# vLLM, or other locally hosted servers.
+_DEPLOYMENT_DEFAULTS: dict[str, str] = {
+    "ollama": "edge",
+    "openai": "cloud",
+    "gemini": "cloud",
+    "openai_compatible": "edge",
+    "anthropic": "cloud",
+    "triton": "edge",
+    "docker_runner": "edge",
+}
+
+
+def _deployment_for(provider_type: str, data: dict[str, Any]) -> str:
+    """Return deployment value, preferring explicit data over provider-type default."""
+    stored = data.get("deployment")
+    if isinstance(stored, str) and stored in ("edge", "cloud"):
+        return stored
+    return _DEPLOYMENT_DEFAULTS.get(provider_type, "edge")
 
 
 def _options_for(entry: ConfigEntry) -> dict[str, Any]:
@@ -291,6 +314,7 @@ def _model_provider_from_subentry(subentry: ConfigSubentry) -> ModelProviderConf
         provider_type=provider_type,
         capabilities=caps,
         data={"settings": dict(settings), "name": name},
+        deployment=_deployment_for(provider_type, data),
     )
 
 
@@ -436,6 +460,7 @@ def _build_ollama_legacy_providers(
             provider_type="ollama",
             capabilities=categories,
             data={"settings": settings},
+            deployment=_DEPLOYMENT_DEFAULTS.get("ollama", "edge"),
         )
 
     return providers
@@ -469,6 +494,7 @@ def _build_openai_legacy_provider(
         provider_type="openai",
         capabilities={"chat", "vlm", "summarization", "embedding"},
         data={"settings": settings},
+        deployment=_DEPLOYMENT_DEFAULTS.get("openai", "cloud"),
     )
 
 
@@ -500,6 +526,7 @@ def _build_gemini_legacy_provider(
         provider_type="gemini",
         capabilities={"chat", "vlm", "summarization", "embedding"},
         data={"settings": settings},
+        deployment=_DEPLOYMENT_DEFAULTS.get("gemini", "cloud"),
     )
 
 
@@ -693,6 +720,9 @@ def _apply_provider_to_category(
     if provider.provider_type == "gemini" and (api_key := settings.get("api_key")):
         options[CONF_GEMINI_API_KEY] = api_key
 
+    if provider.provider_type == "anthropic" and (api_key := settings.get("api_key")):
+        options[CONF_ANTHROPIC_API_KEY] = api_key
+
     if category == "embedding":
         options[CONF_EMBEDDING_MODEL_PROVIDER] = provider.provider_type
 
@@ -744,6 +774,40 @@ def _apply_feature_model_to_options(
             options[CONF_OLLAMA_REASONING] = model_data.get(
                 CONF_FEATURE_MODEL_REASONING
             )
+
+
+def build_model_deployments(
+    entry: ConfigEntry,
+    providers: Mapping[str, ModelProviderConfig],
+    options: Mapping[str, Any],
+) -> dict[str, str]:
+    """
+    Return {category: deployment} for all model categories.
+
+    Uses the feature→provider mapping when subentries are present, then falls
+    back to provider capabilities for any uncovered category.
+    """
+    features = resolve_feature_configs(entry, providers, options)
+    providers_by_id = dict(providers)
+
+    category_provider: dict[str, ModelProviderConfig] = {}
+    for feature in features.values():
+        cat = FEATURE_CATEGORY_MAP.get(feature.feature_type)
+        if not cat:
+            continue
+        provider = providers_by_id.get(feature.model_provider_id or "")
+        if provider:
+            category_provider.setdefault(cat, provider)
+
+    for cat in ("chat", "vlm", "summarization", "embedding"):
+        if cat in category_provider:
+            continue
+        for provider in providers_by_id.values():
+            if cat in provider.capabilities:
+                category_provider[cat] = provider
+                break
+
+    return {cat: p.deployment for cat, p in category_provider.items()}
 
 
 def resolve_runtime_options(entry: ConfigEntry) -> dict[str, Any]:
