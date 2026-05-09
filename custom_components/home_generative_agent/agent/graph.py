@@ -1221,22 +1221,7 @@ async def _call_model(
     raw_response = await _invoke_model(model, trimmed_messages, config)
     LOGGER.debug("Raw chat model response: %s", raw_response)
 
-    content = getattr(raw_response, "content", "") or ""
-    response = extract_final(content)
-
-    tool_calls = getattr(raw_response, "tool_calls", []) or []
-
-    # Qwen3 extended-thinking: Ollama strips <think>…</think> tokens from content,
-    # leaving content='' when all output was reasoning.  On a post-tool turn with no
-    # follow-up tool call the user would receive no reply at all.  Inject a minimal
-    # acknowledgement so the conversation doesn't go silent.
-    if (
-        not response
-        and not tool_calls
-        and isinstance(state["messages"][-1], ToolMessage)
-    ):
-        LOGGER.debug("Empty model response after tool execution; injecting fallback.")
-        response = "Done."
+    response = extract_final(getattr(raw_response, "content", "") or "")
 
     tool_calls = getattr(raw_response, "tool_calls", []) or []
 
@@ -1306,9 +1291,7 @@ async def _summarize_and_remove_messages(
     raw_response = await _invoke_model(model, messages, {})
     LOGGER.debug("Raw summary response: %s", raw_response)
 
-    response = extract_final(
-        getattr(raw_response, "content", "") or ""
-    )  # content may be list
+    response = extract_final(getattr(raw_response, "content", "") or "")
 
     return {
         "summary": response,
