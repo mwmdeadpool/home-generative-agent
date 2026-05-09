@@ -1424,12 +1424,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     ollama_embeddings: OllamaEmbeddings | None = None
     if ollama_health.get(base_ollama_url):
         try:
-            ollama_embeddings = OllamaEmbeddings(
-                model=options.get(
-                    CONF_OLLAMA_EMBEDDING_MODEL, RECOMMENDED_OLLAMA_EMBEDDING_MODEL
-                ),
-                base_url=base_ollama_url,
-                num_ctx=EMBEDDING_MODEL_CTX,
+            # Same blocking-I/O issue as ChatOllama (3.12.8): the Ollama
+            # constructor builds an httpx.Client that loads the certifi CA
+            # bundle synchronously. Defer to the executor.
+            ollama_embeddings = await hass.async_add_executor_job(
+                partial(
+                    OllamaEmbeddings,
+                    model=options.get(
+                        CONF_OLLAMA_EMBEDDING_MODEL,
+                        RECOMMENDED_OLLAMA_EMBEDDING_MODEL,
+                    ),
+                    base_url=base_ollama_url,
+                    num_ctx=EMBEDDING_MODEL_CTX,
+                )
             )
         except Exception:
             LOGGER.exception("Ollama embeddings init failed; continuing without them.")
