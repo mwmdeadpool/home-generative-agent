@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.12.7] - 2026-05-09
+
+### Changed
+
+- **Default Ollama chat model: `gemma4:31b`** (was `gpt-oss`). Gemma 4 added
+  to `CHAT_MODEL_OLLAMA_SUPPORTED` so it appears in the UI dropdown alongside
+  the existing options (kept for back-compat).
+- **Default Ollama summarization model: `gemma4:e4b`** (was `qwen3:8b`).
+  Gemma 4 added to `SUMMARIZATION_MODEL_OLLAMA_SUPPORTED`.
+- **Reasoning hint: added `gemma4` to `OLLAMA_BOOL_HINT_TAGS`.** Gemma 4
+  reports `thinking` capability and defaults to thinking-on at the Ollama
+  layer, the same pattern that caused Sentinel timeouts on Qwen3-family
+  models. With this hint, `reasoning_field()` explicitly passes
+  `{"reasoning": False}` for Gemma 4 when reasoning is disabled, mirroring
+  the Qwen3 fix from 3.12.6.
+- VLM stays on `qwen3-vl:8b`. No Gemma 4 vision variant adopted yet.
+
 ## [3.12.6] - 2026-05-03
 
 ### Fixed
