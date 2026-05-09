@@ -925,10 +925,22 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             # If streaming ended without committing a final AssistantContent
             # (e.g. the generator raised before the last LLM turn), recover the
             # final AIMessage from the graph state so the caller can return it.
-            if not isinstance(
-                chat_log.content[-1] if chat_log.content else None,
-                conversation.AssistantContent,
-            ):
+            #
+            # Also treat an empty/whitespace-only AssistantContent as
+            # "streaming did not complete" — this happens when a tool failure
+            # mid-stream causes the synthetic-rejection path in
+            # _stream_langgraph_to_ha to emit, leaving chat_log.content[-1]
+            # as a blank AssistantContent. Without this, the user sees an
+            # empty bubble.
+            last = chat_log.content[-1] if chat_log.content else None
+            is_blank_assistant = (
+                isinstance(last, conversation.AssistantContent)
+                and not (last.content or "").strip()
+                and not last.tool_calls
+            )
+            if not isinstance(last, conversation.AssistantContent) or is_blank_assistant:
+                if is_blank_assistant:
+                    chat_log.content.pop()
                 messages = final_state.values.get("messages", [])
                 if messages and isinstance(messages[-1], AIMessage):
                     final_msg = messages[-1]
