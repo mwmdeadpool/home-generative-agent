@@ -100,6 +100,7 @@ _LC_TOOL_TIMEOUT_S: float = 30.0
 # generation for typical conversation history lengths.
 _LLM_INVOKE_TIMEOUT_S: float = 180.0
 
+
 _PIN_LOOKBACK = 20  # messages to scan for an unresolved requires_pin
 _ROUTING_REJECTION_MARKER = "is not available for this request"
 

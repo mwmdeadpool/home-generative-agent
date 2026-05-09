@@ -73,6 +73,7 @@ from ..const import (  # noqa: TID252
 )
 from ..core.conversation_helpers import _resolve_entity_id  # noqa: TID252
 from ..core.utils import extract_final, verify_pin  # noqa: TID252
+from .camera_activity import get_camera_last_events_from_states
 from .helpers import (
     ConfigurableData,
     maybe_fill_lock_entity,
@@ -1250,7 +1251,18 @@ async def get_camera_last_events(  # noqa: D417
     if "configurable" not in config:
         return "Configuration not found. Please check your setup."
 
+    hass = config["configurable"]["hass"]
+    results = get_camera_last_events_from_states(hass, camera_entity_id)
 
+    if not results:
+        return "No camera last event data available."
+
+    return yaml.dump(
+        {"camera_last_events": results},
+        default_flow_style=False,
+        allow_unicode=True,
+        sort_keys=False,
+    )
 
 
 
