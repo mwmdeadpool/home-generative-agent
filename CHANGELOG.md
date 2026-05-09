@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.12.9] - 2026-05-09
+
+### Fixed
+
+- **`OllamaEmbeddings()` constructor blocks the event loop** — same pattern
+  the 3.12.8 ChatOllama fix addressed, missed in the embeddings init path.
+  Defer construction to `hass.async_add_executor_job`.
+
 ## [3.12.8] - 2026-05-09
 
 ### Fixed
