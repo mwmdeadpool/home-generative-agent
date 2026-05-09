@@ -1362,6 +1362,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
 
     gemini_provider: RunnableSerializable[LanguageModelInput, BaseMessage] | None = None
     if gemini_ok:
+        # Workaround for langchain_google_genai's converter dropping `items`
+        # on array-typed properties produced via voluptuous-openapi anyOf
+        # (HA's GetLiveContextTool `domain` field). Idempotent monkey-patch.
+        from .agent.gemini_compat import apply_gemini_tool_schema_fix
+        apply_gemini_tool_schema_fix()
         try:
             gemini_provider = ChatGoogleGenerativeAI(
                 google_api_key=gemini_secret,
