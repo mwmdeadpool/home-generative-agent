@@ -944,6 +944,49 @@ def _has_pending_pin_confirmation(messages: Sequence[AnyMessage]) -> bool:
     return False
 
 
+# HA-provided info tools that should always be available to the model — even
+# when RAG retrieval scores them low for a given query. These are state-lookup
+# tools the model needs reflexively (e.g. "is the door locked?") but whose
+# generic descriptions lose against keyword-matching action tools.
+_ALWAYS_AVAILABLE_PROVIDER_TOOLS: tuple[str, ...] = ("GetLiveContext",)
+
+
+async def _get_always_available_provider_tools(
+    store: BaseStore | None,
+    allowed_api_ids: list[str],
+) -> list[RawTool]:
+    """Force-inject a small set of state-lookup tools the model needs reflexively.
+
+    Without this, the RAG retriever can starve out tools like GetLiveContext
+    when an actuation-shaped query happens to keyword-match other tools more
+    strongly. Mirrors the pin_tools force-injection pattern.
+    """
+    if store is None or not allowed_api_ids:
+        return []
+
+    out: list[RawTool] = []
+    for tool_name in _ALWAYS_AVAILABLE_PROVIDER_TOOLS:
+        for api_id in allowed_api_ids:
+            try:
+                item = await store.aget(("system", "tools"), key=f"{api_id}::{tool_name}")
+            except Exception:  # noqa: BLE001
+                continue
+            if item is None:
+                continue
+            val = item.value
+            out.append(
+                RawTool(
+                    name=val["name"],
+                    api_id=val["api_id"],
+                    description=val["description"],
+                    parameters=val["parameters"],
+                    is_actuation=val.get("is_actuation", False),
+                )
+            )
+            break  # first hit across api_ids is enough
+    return out
+
+
 async def _get_pending_pin_tools(
     messages: list[AnyMessage],
     store: BaseStore | None,
@@ -1000,10 +1043,11 @@ async def _retrieve_tools(
     limit = int(opts.get(CONF_TOOL_RETRIEVAL_LIMIT, 5))
 
     # 1. Gather candidates
-    rag_tools, safety_tools, pin_tools = await asyncio.gather(
+    rag_tools, safety_tools, pin_tools, always_tools = await asyncio.gather(
         _get_rag_retrieved_tools(store, config, query, allowed_api_ids),
         _get_actuation_safety_tools(store, config, query, allowed_api_ids),
         _get_pending_pin_tools(state["messages"], store),
+        _get_always_available_provider_tools(store, allowed_api_ids),
     )
 
     # 2. Merge: safety tools take priority; RAG fills remaining slots.
@@ -1017,19 +1061,22 @@ async def _retrieve_tools(
     # the per-sub-query RAG budget, but is capped at safety_cap + limit to avoid
     # unbounded growth.
     #
-    # pin_tools are force-injected outside the limit — they must always be present
-    # when a PIN confirmation is pending, regardless of RAG scores.
+    # pin_tools and always_tools are force-injected outside the limit —
+    # they must always be present (PIN confirmations, GetLiveContext-style
+    # info lookups) regardless of RAG scores.
     pin_names = {t["name"] for t in pin_tools}
+    always_names = {t["name"] for t in always_tools}
+    forced_names = pin_names | always_names
     safety_cap = min(len(safety_tools), max(1, limit * 3 // 4))
-    safety_capped = [t for t in safety_tools[:safety_cap] if t["name"] not in pin_names]
+    safety_capped = [t for t in safety_tools[:safety_cap] if t["name"] not in forced_names]
     safety_names = {t["name"] for t in safety_capped}
     rag_only = [
         t
         for t in rag_tools
-        if t["name"] not in safety_names and t["name"] not in pin_names
+        if t["name"] not in safety_names and t["name"] not in forced_names
     ]
     effective_limit = min(safety_cap + len(rag_only), safety_cap + limit)
-    all_candidates = pin_tools + (safety_capped + rag_only)[:effective_limit]
+    all_candidates = pin_tools + always_tools + (safety_capped + rag_only)[:effective_limit]
 
     # 3. Fallback: vector store unavailable or index not yet ready.
     # Still apply the limit so the user-configured cap is always respected.
@@ -1053,13 +1100,15 @@ async def _retrieve_tools(
     selected_tools, routing_map = _format_and_dedupe_tools(all_candidates)
 
     LOGGER.debug(
-        "Tool retrieval: limit=%d eff=%d rag=%d safety=%d/%d pin=%d merged=%d tools=%s",
+        "Tool retrieval: limit=%d eff=%d rag=%d safety=%d/%d pin=%d always=%d "
+        "merged=%d tools=%s",
         limit,
         effective_limit,
         len(rag_tools),
         safety_cap,
         len(safety_tools),
         len(pin_tools),
+        len(always_tools),
         len(all_candidates),
         [t["function"]["name"] for t in selected_tools],
     )

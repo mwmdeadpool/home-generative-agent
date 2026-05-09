@@ -284,7 +284,11 @@ async def _perform_alarm_control(
 
 async def _get_camera_image(hass: HomeAssistant, camera_name: str) -> bytes | None:
     """Get an image from a given camera."""
-    camera_entity_id: str = f"camera.{camera_name.lower()}"
+    # The model sometimes passes a full entity_id ("camera.front_door_bell")
+    # instead of a bare name ("front_door_bell"). Strip the leading domain so
+    # we don't end up looking up "camera.camera.front_door_bell".
+    bare_name = camera_name.lower().removeprefix("camera.")
+    camera_entity_id: str = f"camera.{bare_name}"
     state = hass.states.get(camera_entity_id)
     if state and state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
         LOGGER.warning(
