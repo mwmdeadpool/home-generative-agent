@@ -1328,13 +1328,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         except Exception:
             LOGGER.exception("OpenAI provider init failed; continuing without it.")
 
-    def _build_ollama_provider(
+    async def _build_ollama_provider(
         url: str,
     ) -> RunnableSerializable[LanguageModelInput, BaseMessage]:
-        return ChatOllama(
-            model=RECOMMENDED_OLLAMA_CHAT_MODEL,
-            base_url=url,
-        ).configurable_fields(
+        # ChatOllama() constructs an httpx.Client which calls
+        # ssl.SSLContext.load_verify_locations on the certifi CA bundle —
+        # blocking filesystem I/O on the event loop. Build in an executor.
+        chat_ollama = await hass.async_add_executor_job(
+            partial(ChatOllama, model=RECOMMENDED_OLLAMA_CHAT_MODEL, base_url=url)
+        )
+        return chat_ollama.configurable_fields(
             model=ConfigurableField(id="model"),
             format=ConfigurableField(id="format"),
             temperature=ConfigurableField(id="temperature"),
@@ -1354,7 +1357,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         if not healthy:
             continue
         try:
-            ollama_providers[url] = _build_ollama_provider(url)
+            ollama_providers[url] = await _build_ollama_provider(url)
         except Exception:
             LOGGER.exception(
                 "Ollama provider init failed for %s; continuing without it.", url
@@ -1362,6 +1365,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
 
     gemini_provider: RunnableSerializable[LanguageModelInput, BaseMessage] | None = None
     if gemini_ok:
+        # Workaround for langchain_google_genai's converter dropping `items`
+        # on array-typed properties produced via voluptuous-openapi anyOf
+        # (HA's GetLiveContextTool `domain` field). Idempotent monkey-patch.
+        from .agent.gemini_compat import apply_gemini_tool_schema_fix
+        apply_gemini_tool_schema_fix()
         try:
             gemini_provider = ChatGoogleGenerativeAI(
                 google_api_key=gemini_secret,

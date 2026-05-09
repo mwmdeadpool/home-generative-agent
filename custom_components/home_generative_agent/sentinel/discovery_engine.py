@@ -19,6 +19,7 @@ from custom_components.home_generative_agent.const import (
 from custom_components.home_generative_agent.core.utils import (
     SENTINEL_ADMISSION_TIMEOUT_S,
     SentinelLLMDeferredError,
+    extract_final,
     run_sentinel_llm_call,
 )
 from custom_components.home_generative_agent.explain.discovery_prompts import (
@@ -229,7 +230,11 @@ class SentinelDiscoveryEngine:
             LOGGER.warning("Discovery LLM call failed: %s", err)
             return
 
-        content = getattr(result, "content", None)
+        raw_content = getattr(result, "content", None)
+        # Some providers (Ollama with reasoning models, anything emitting content
+        # blocks) return a list[dict] instead of a str. extract_final() flattens
+        # both shapes and strips any leaked <think> reasoning before JSON parse.
+        content = extract_final(raw_content) if raw_content else ""
         if not content:
             LOGGER.debug("Discovery LLM returned empty content.")
             return
@@ -237,7 +242,10 @@ class SentinelDiscoveryEngine:
         try:
             payload = json.loads(content)
         except json.JSONDecodeError:
-            LOGGER.warning("Discovery output was not valid JSON.")
+            LOGGER.warning(
+                "Discovery output was not valid JSON: %s",
+                content[:200],
+            )
             return
 
         payload.setdefault("schema_version", DISCOVERY_SCHEMA_VERSION)

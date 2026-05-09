@@ -2,6 +2,39 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.12.8] - 2026-05-09
+
+### Fixed
+
+- **Sentinel discovery loop crash on list-shaped LLM content** —
+  `discovery_engine._run_once()` called `json.loads()` on `result.content`
+  directly. Some providers return a `list[dict]` for content blocks instead
+  of `str`, raising `TypeError: the JSON object must be str, bytes or
+  bytearray, not list`. The exception escaped the JSONDecodeError handler
+  and propagated up through the discovery task; on integration unload it
+  prevented the loop from draining cleanly, wedging the entry into
+  `ConfigEntryState.FAILED_UNLOAD`. Route content through `extract_final()`
+  (which already handles both str and list shapes plus leaked `<think>`
+  reasoning) before `json.loads`.
+- **Gemini 400 on tools whose array properties lack `items`** —
+  `ChatGoogleGenerativeAI` rejected requests with
+  `properties[domain].items: missing field`. Root cause is a converter
+  incompatibility, not an HGA tool definition: HA's `GetLiveContextTool`
+  declares `domain` as `vol.Any(cv.string, [cv.string])`, voluptuous-openapi
+  emits `anyOf: [{type: string}, {type: array}]`, and
+  `langchain_google_genai._format_json_schema_to_gapic` produces a Gemini
+  `Schema` with `type=ARRAY` but no `items`. New `agent/gemini_compat.py`
+  applies a one-shot, idempotent monkey-patch that wraps the converter and
+  injects `items: {type: STRING}` into any array node missing them.
+  Patch is applied only when the Gemini provider is being built; no effect
+  on Ollama, OpenAI, or openai_compatible.
+- **`ChatOllama()` constructor blocks the event loop** — HA logged
+  `Detected blocking call to load_verify_locations ... by ChatOllama(...)`
+  on every integration setup. The constructor builds an `httpx.Client`
+  which loads the certifi CA bundle synchronously. Move construction into
+  `hass.async_add_executor_job`, matching the pattern already used for the
+  OpenAI provider's `httpx.Client`.
+
 ## [3.12.7] - 2026-05-09
 
 ### Changed
