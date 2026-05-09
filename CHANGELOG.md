@@ -2,6 +2,33 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.12.10] - 2026-05-09
+
+### Fixed
+
+- **`GetLiveContext` rejected by per-turn tool router** — for state-lookup
+  queries like "Is the front door locked?" the RAG retriever scored other
+  tools higher on keyword overlap and crowded out `GetLiveContext`. The
+  model still tried to call it but `_invoke_one` rejected any call outside
+  the per-turn routing_map, leaving the user with an empty answer. Add
+  `_get_always_available_provider_tools()` that force-injects
+  `GetLiveContext` (and any future entries in
+  `_ALWAYS_AVAILABLE_PROVIDER_TOOLS`) into the routing map every turn,
+  mirroring the existing pin-tools force-injection pattern.
+- **`_get_camera_image()` doubled the `camera.` prefix** — the model
+  sometimes passed a full entity_id (`camera.front_door_bell`) instead of
+  a bare name. The f-string blindly prepended another `camera.`, producing
+  `camera.camera.front_door_bell` and three failed capture attempts. Strip
+  the leading domain if present.
+- **Empty assistant bubble after mid-stream tool failure** — when a tool
+  errored mid-stream, `_stream_langgraph_to_ha` emitted synthetic
+  rejections and re-raised, leaving `chat_log.content[-1]` as a blank
+  AssistantContent. The recovery branch in `_async_run_astream` skipped
+  because the last entry IS an AssistantContent (just empty), and the user
+  saw an empty response. Treat blank/no-tool-calls AssistantContent as
+  "streaming did not complete," pop it, and let recovery emit either the
+  graph state's last AIMessage or the "unable to respond in time" fallback.
+
 ## [3.12.9] - 2026-05-09
 
 ### Fixed
