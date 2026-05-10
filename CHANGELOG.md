@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.12.11] - 2026-05-09
+
+### Fixed
+
+- **Recovery after mid-stream tool failure could still emit a blank bubble.**
+  3.12.10 added a recovery path that pulls the last AIMessage from graph
+  state when streaming dies. But when the model never produced a reply
+  (e.g. a tool error short-circuited the post-tool turn), that AIMessage
+  exists with empty `content` — and the recovery happily committed the
+  empty string. Reproduction: "Pause the TV" with a tool that fails
+  during the streaming response. Check the recovered content for non-blank
+  characters; if blank, fall through to the user-visible
+  "unable to respond in time" message.
+
 ## [3.12.10] - 2026-05-09
 
 ### Fixed
