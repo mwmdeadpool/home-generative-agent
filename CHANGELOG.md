@@ -2,6 +2,185 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.13.1] - 2026-05-05
+
+### Fixed
+
+- **Home Assistant blocking I/O during model setup** — Ollama chat and embeddings
+  clients now use Home Assistant's SSL context helper, and tool binding is moved
+  into the executor path. This avoids blocking `httpx` client setup work on the
+  event loop during integration setup and model calls.
+- **Video analyzer face API client ownership** — The video analyzer now uses Home
+  Assistant's shared async `httpx` client for face API calls and passes the face
+  timeout per request, avoiding direct async client construction and shutdown in
+  the integration.
+- **Sentinel log noise** — Repeated Sentinel operational failures are now rate
+  limited with recovery messages, and routine cycle/debug logs were removed from
+  the hot path. Discovery, triage, suppression, execution, and trigger handling
+  should be quieter while still surfacing first failures and repeated issues.
+- **Sentinel LLM calls off the event loop** — Sentinel model calls now prefer the
+  synchronous `invoke` path in a worker thread when available, preserving
+  admission/defer semantics while reducing event-loop pressure.
+- **Video analyzer priority typecheck coverage** — Tests were tightened around
+  `NullChat`, Ollama server logging, and nested mock accessors so priority-path
+  coverage remains compatible with Pyright.
+
+## [3.13.0] - 2026-05-03
+
+### Added
+
+- **Anthropic Claude provider** — You can now select Anthropic Claude models
+  (claude-opus-4-5, claude-sonnet-4-5, claude-haiku-4-5, and their successors)
+  as the chat, vision (VLM), and summarization provider. Configure by adding an
+  Anthropic model-provider subentry and entering your API key. Prompt caching is
+  enabled automatically via `cache_control: ephemeral`, reducing latency and cost
+  on repeated conversation turns.
+- **Anthropic API key validation** — The config flow validates the API key against
+  `https://api.anthropic.com/v1/models` before saving, with distinct errors for
+  authentication failures and connectivity issues.
+- **`extract_final` list-content support** — `extract_final()` now accepts
+  Anthropic's multi-block content format (`list[{"type":"text","text":"..."}]`) in
+  addition to plain strings. This fixes triage, discovery, and explain responses
+  when Anthropic returns structured content blocks.
+
+### Fixed
+
+- **Sentinel triage with Anthropic provider** — `_parse_response` used `str(content)`
+  which produced a Python dict repr when Anthropic returned multi-block content,
+  causing every alert to bypass triage (fail-open to notify). Fixed to use
+  `extract_final(content)`.
+- **LLM explain with Anthropic provider** — `extract_final(str(content))` → 
+  `extract_final(content)` so list-format Anthropic responses are rendered
+  correctly in push notifications instead of showing raw dict repr.
+- **Discovery engine with Anthropic provider** — `json.loads(content)` raised
+  `TypeError` (not caught by the bare `json.JSONDecodeError` handler) when
+  Anthropic returned a list. Fixed to use `extract_final(content)` before parsing
+  and added `TypeError` to the handler.
+- **Config flow `else` branch hardened** — The Anthropic API-key schema builder
+  used a bare `else:` that would silently present the Anthropic form for any
+  future unknown provider. Changed to explicit `elif provider_type == "anthropic":`
+  with a fallback empty schema.
+- **Config flow: API key stored on validation failure** — `settings["api_key"]`
+  was assigned even when `validate_anthropic_key` raised an exception. Moved
+  inside the success path.
+
+## [3.12.6] - 2026-05-03
+
+### Fixed
+
+- **Sentinel LLM timeouts on Qwen3-family models** — Qwen3.5:35b defaults to
+  thinking mode (generating `<think>…</think>` chains) when `ChatOllama.reasoning`
+  is `None`. `reasoning_field()` now passes `{"reasoning": False}` instead of `{}`
+  when reasoning is disabled, explicitly suppressing the default. This was the root
+  cause of repeated 20–60 s timeouts on Sentinel explain and discovery calls.
+- **Discovery prompt token bloat** — `_existing_semantic_context()` could return up
+  to 400 semantic keys (200 proposals + 200 discovery records), adding ~16 K chars
+  of exclusion context on top of the 20 K snapshot budget. Keys sent to the LLM are
+  now capped at 60 (`_MAX_SEMANTIC_KEYS_IN_PROMPT`). The post-hoc
+  `_filter_novel_candidates()` filter catches any duplicates that slip through.
+- **Sentinel explain timeout too tight** — `_EXPLAIN_LLM_TIMEOUT_S` raised 20 → 30 s
+  to give the model headroom over the observed ~20 s inference time.
+- **Discovery timeout too tight** — `_DISCOVERY_LLM_TIMEOUT_S` raised 45 → 60 s.
+- **Opaque timeout log** — `async_explain` now logs
+  `"LLM explanation timed out after 30s; skipping."` instead of the empty-string
+  warning produced when `TimeoutError` was bundled with other exceptions.
+- **Discovery prompt observability** — a new `DEBUG` log line reports prompt char
+  counts (`snapshot=N, keys=M/total`) each discovery cycle.
+
+## [3.12.5] - 2026-04-29
+
+### Fixed
+
+- **Sentinel discovery snapshot stays within 20 k-char (~5 k token) budget** —
+  `reduce_snapshot_for_discovery()` previously produced snapshots up to ~32 k
+  tokens, routinely exceeding the 45 s discovery LLM timeout. Four changes tighten
+  the output:
+  - `_MAX_CAMERA_ACTIVITY` reduced 50 → 20; `_MAX_SUMMARY_CHARS` 150 → 80.
+  - Derived context compressed: `timezone` dropped (redundant with `is_night`),
+    `now` and motion timestamps truncated to minute precision,
+    `baseline_ready_entities` intersected with the filtered entity set and capped
+    at 30 IDs.
+  - Character-budget gate (`_TOKEN_BUDGET_CHARS = 20_000`) with four progressive
+    trim passes: (1) strip `last_changed` from entity groups, (2) truncate camera
+    summaries to 40 chars, (3) drop all camera summaries, (4) cap
+    `recognized_people` per camera at 5 entries — the fourth pass prevents
+    facial-recognition deployments from exceeding the budget after summaries are
+    dropped.
+  - Nine new tests cover timezone removal, `baseline_ready_entities` filtering
+    and cap, camera-count cap, budget compliance, and each of the four trim passes.
+
+## [3.12.4] - 2026-04-28
+
+### Fixed
+
+- **`SENTINEL_ADMISSION_TIMEOUT_S` public constant** — admission timeout was a
+  magic `2.0` literal scattered across triage, discovery, and explain call sites.
+  Extracted to a named constant in `core/utils.py` and imported at each site.
+
+- **`asyncio.create_task()` replaces deprecated `asyncio.ensure_future()`** —
+  `run_sentinel_llm_call` now wraps the call factory in a proper `Task`, which is
+  cancellable and tracked in `_sentinel_llm_tasks`.
+
+- **HA reload cancels in-flight Sentinel LLM tasks** — the previous reload path
+  replaced `_sentinel_llm_tasks` with a fresh `set()` while old tasks continued
+  running. The teardown in `__init__.py` now cancels each task before replacing
+  the set.
+
+- **Warning log when Sentinel LLM cancel times out** — `contextlib.suppress`
+  silently swallowed any `TimeoutError` from the cancel wait. Replaced with an
+  explicit `except TimeoutError` that emits a `WARNING` log.
+
+- **Tests** — deferred-path coverage for `SentinelTriageService`,
+  `LLMExplainer`, and `run_sentinel_llm_call` (timeout path); three tests for
+  `build_model_deployments` (ollama→edge, openai→cloud, empty providers).
+
+## [3.12.3] - 2026-04-26
+
+### Fixed
+
+- **Deployment-aware admission control replaces lock-based GPU gate** — the
+  previous `chat_priority_context` / `_bg_vlm_lock` / `_bg_llm_lock` approach
+  made chat wait for background work to finish. The new design inverts this:
+  `local_chat_session(deployment)` marks the full chat turn active by clearing a
+  shared `_chat_idle` event; Sentinel triage and discovery call
+  `sentinel_admission(deployment, timeout_s=2.0)` before each LLM invocation and
+  defer if chat is active. Video analysis no longer participates in any
+  admission gate — its existing tuning constants (`_VISION_TIMEOUT_SEC`,
+  `_SUMMARY_TIMEOUT_SEC`, per-camera queues) remain the intended concurrency
+  surface. Embedding generation is ungated and runs concurrently with chat.
+
+- **Provider deployment metadata flows through runtime** — `ModelProviderConfig`
+  gains a `deployment: str` field ("edge"/"cloud"). `build_model_deployments()`
+  builds a `{category: deployment}` map from provider subentries at setup time;
+  the map lives on `HGAData.model_deployments`. Cloud providers bypass all local
+  admission gates automatically, with no code changes required per provider.
+
+- **Sentinel starvation surfaced in the health sensor** — `sentinel_admission`
+  tracks consecutive deferrals and wall-clock gap since last success. When the
+  gap exceeds 300 s a WARNING is logged and the `SentinelHealthSensor` transitions
+  to `"degraded"`, exposing the condition to HA automations and dashboards.
+
+- **Chat LLM timeout raised from 90 s to 180 s** — the higher limit covers
+  prefill + generation for typical conversation history lengths without the
+  gate-wait overhead of the old approach.
+
+- **Sentinel discovery capped at 45 s per LLM call** — discovery prompts can
+  be large enough to consume 180 s+ of GPU time. A hard `asyncio.wait_for`
+  timeout skips the cycle cleanly rather than monopolising the GPU.
+
+- **Tool timeout sends a non-retryable error to the LLM** — `_run_langchain_tool`
+  now returns a `TOOL_CALL_TRANSIENT_ERROR_TEMPLATE` message on `TimeoutError`
+  instead of the generic retry-prompting error template. This stops the model
+  from re-calling a tool that timed out due to a temporary resource constraint.
+
+- **Qwen3 extended-thinking fallback** — when Ollama strips `<think>` tokens
+  and returns empty content after a tool call, `_call_model` injects `"Done."`
+  so the conversation does not go silent.
+
+- **Tests** — 26 tests for the new admission-control primitives, plus coverage
+  for the triage/discovery deferral paths, the transient tool-error helper, and
+  the Qwen3 fallback.
+
 ## [3.12.2] - 2026-04-24
 
 ### Fixed
