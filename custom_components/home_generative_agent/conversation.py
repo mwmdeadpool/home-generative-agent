@@ -942,12 +942,14 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                 if is_blank_assistant:
                     chat_log.content.pop()
                 messages = final_state.values.get("messages", [])
+                recovered = ""
                 if messages and isinstance(messages[-1], AIMessage):
-                    final_msg = messages[-1]
+                    recovered = _normalize_ai_content(messages[-1].content) or ""
+                if recovered.strip():
                     chat_log.async_add_assistant_content_without_tools(
                         conversation.AssistantContent(
                             agent_id=self.entity_id,
-                            content=_normalize_ai_content(final_msg.content),
+                            content=recovered,
                         )
                     )
                     _LOGGER.debug(
@@ -956,8 +958,10 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                     )
                 else:
                     # Graph state has no usable AI response (e.g. model timed out
-                    # before generating a reply). Emit a user-visible error message
-                    # so the chat UI shows something instead of a blank bubble.
+                    # before generating a reply, OR last AIMessage exists but has
+                    # empty content because the tool error short-circuited the
+                    # post-tool turn). Emit a user-visible error message so the
+                    # chat UI shows something instead of a blank bubble.
                     chat_log.async_add_assistant_content_without_tools(
                         conversation.AssistantContent(
                             agent_id=self.entity_id,
