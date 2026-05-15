@@ -42,6 +42,7 @@ from pydantic import PydanticInvalidForJsonSchema, ValidationError
 
 from custom_components.home_generative_agent.const import (
     ACTUATION_KEYWORDS_REGEX,
+    CONF_ANTHROPIC_CHAT_MODEL,
     CONF_CHAT_MODEL_PROVIDER,
     CONF_CRITICAL_ACTION_PIN_ENABLED,
     CONF_CRITICAL_ACTION_PIN_HASH,
@@ -63,6 +64,7 @@ from custom_components.home_generative_agent.const import (
     SUMMARIZATION_SYSTEM_PROMPT,
     TOOL_CALL_ERROR_TEMPLATE,
     sanitize_for_prompt,
+    TOOL_CALL_TRANSIENT_ERROR_TEMPLATE,
 )
 
 from ..core.utils import extract_final  # noqa: TID252
@@ -93,12 +95,12 @@ LOGGER = logging.getLogger(__name__)
 _LC_TOOL_TIMEOUT_S: float = 30.0
 
 # Maximum seconds to wait for the chat LLM to respond.
-# Under heavy VLM load the Ollama GPU is fully saturated; the chat model
-# queues behind concurrent vision requests and can block indefinitely inside
-# astream_events, stalling the streaming pipeline. This guard converts an
-# infinite hang into a bounded HomeAssistantError so the recovery path can
-# return a response to the user.
-_LLM_INVOKE_TIMEOUT_S: float = 90.0
+# The chat model may need exclusive GPU access and can be delayed while the
+# chat-priority gate waits for in-flight background jobs (camera analysis,
+# embedding, Sentinel LLM) to finish.  With a large prompt, prefill alone
+# can take tens of seconds.  Set high enough to cover gate wait + prefill +
+# generation for typical conversation history lengths.
+_LLM_INVOKE_TIMEOUT_S: float = 180.0
 
 
 _PIN_LOOKBACK = 20  # messages to scan for an unresolved requires_pin
@@ -123,6 +125,8 @@ def _determine_model_name(provider: str, opts: dict[str, Any]) -> str:
         return opts.get(CONF_OPENAI_COMPATIBLE_CHAT_MODEL, "")
     if provider == "gemini":
         return opts.get(CONF_GEMINI_CHAT_MODEL, "")
+    if provider == "anthropic":
+        return opts.get(CONF_ANTHROPIC_CHAT_MODEL, "")
     return opts.get(CONF_OLLAMA_CHAT_MODEL, "")
 
 
@@ -149,6 +153,16 @@ def _make_tool_error(err: str, name: str, tid: str) -> ToolMessage:
     """Build a standardized error ToolMessage."""
     return ToolMessage(
         content=TOOL_CALL_ERROR_TEMPLATE.format(error=err),
+        name=name,
+        tool_call_id=tid,
+        status="error",
+    )
+
+
+def _make_transient_tool_error(err: str, name: str, tid: str) -> ToolMessage:
+    """Build a ToolMessage for transient/resource errors that must not be retried."""
+    return ToolMessage(
+        content=TOOL_CALL_TRANSIENT_ERROR_TEMPLATE.format(error=err),
         name=name,
         tool_call_id=tid,
         status="error",
@@ -290,7 +304,7 @@ async def _run_langchain_tool(
             status=status,
         )
     except TimeoutError:
-        return _make_tool_error(
+        return _make_transient_tool_error(
             f"Tool timed out after {_LC_TOOL_TIMEOUT_S}s.",
             tool_name,
             tool_call.get("id") or "",
@@ -677,8 +691,8 @@ async def _get_rag_retrieved_tools(
             api_id = item.value.get("api_id")
             if api_id not in allowed_api_ids:
                 continue
-            # score is (1 - distance) for pgvector cosine
-            score = getattr(item, "score", 0.0)
+            # score is (1 - distance) for pgvector cosine; None when no embedding
+            score = getattr(item, "score", None) or 0.0
             if score >= threshold and (name not in best or score > best[name][0]):
                 best[name] = (score, item)
 
@@ -753,7 +767,7 @@ async def _get_actuation_safety_tools(
 
     # Sort by relevance score descending so the merge can cap to the top-N.
     sorted_results = sorted(
-        results, key=lambda i: getattr(i, "score", 0.0), reverse=True
+        results, key=lambda i: getattr(i, "score", None) or 0.0, reverse=True
     )
     safety_tools: list[RawTool] = []
     for item in sorted_results:
@@ -841,13 +855,21 @@ def _format_and_dedupe_tools(
             continue
 
         routing_map[name] = tool["api_id"]
+        parameters = json.loads(tool["parameters"])
+        if not isinstance(parameters, dict):
+            parameters = {"type": "object", "properties": {}}
+        elif not parameters.get("type"):
+            parameters["type"] = "object"
+        # OpenAI requires 'properties' on all type:object schemas.
+        if parameters.get("type") == "object" and "properties" not in parameters:
+            parameters["properties"] = {}
         selected_tools.append(
             {
                 "type": "function",
                 "function": {
                     "name": name,
                     "description": tool["description"],
-                    "parameters": json.loads(tool["parameters"]),
+                    "parameters": parameters,
                 },
             }
         )
@@ -1069,7 +1091,7 @@ async def _trim_messages_for_model(
     hass: HomeAssistant,
 ) -> list[AnyMessage]:
     """Trim messages to manage context window length."""
-    _known_providers = {"openai", "openai_compatible", "gemini", "ollama"}
+    _known_providers = {"openai", "openai_compatible", "gemini", "ollama", "anthropic"}
     provider_raw = opts.get(CONF_CHAT_MODEL_PROVIDER)
     provider = str(provider_raw) if provider_raw else "openai"
     if provider not in _known_providers:
@@ -1113,14 +1135,34 @@ async def _trim_messages_for_model(
     )
 
 
+def _build_system_message(
+    base_prompt: str,
+    mems: list[Any],
+    camera_activity: list[Any],
+    summary: str,
+) -> str:
+    """Compose the system message from the base prompt and retrieved context."""
+    system_message = base_prompt
+    if mems:
+        formatted_mems = "\n".join(f"[{mem.key}]: {mem.value}" for mem in mems)
+        system_message += f"\n<memories>\n{formatted_mems}\n</memories>"
+    if camera_activity:
+        ca = "\n".join(str(a) for a in camera_activity)
+        system_message += f"\n<recent_camera_activity>\n{ca}\n</recent_camera_activity>"
+    if summary:
+        system_message += (
+            f"\n<past_conversation_summary>\n{summary}\n</past_conversation_summary>"
+        )
+    return system_message
+
+
 async def _invoke_model(
     model: Any, messages: list[AnyMessage], config: RunnableConfig
 ) -> Any:
     """Invoke a chat model, wrapping non-HA exceptions as HomeAssistantError."""
     try:
-        return await asyncio.wait_for(
-            model.ainvoke(messages, config), timeout=_LLM_INVOKE_TIMEOUT_S
-        )
+        async with asyncio.timeout(_LLM_INVOKE_TIMEOUT_S):
+            return await model.ainvoke(messages, config)
     except TimeoutError:
         msg = f"Model invocation timed out after {_LLM_INVOKE_TIMEOUT_S}s."
         raise HomeAssistantError(msg) from None
@@ -1129,6 +1171,39 @@ async def _invoke_model(
     except Exception as err:
         msg = f"Model invocation failed: {err}"
         raise HomeAssistantError(msg) from err
+
+
+def _bind_model_tools(
+    model: Any, selected_tools: list[Any], *, disable_reasoning: bool
+) -> Any:
+    """Bind tools to a model in a worker thread."""
+    if disable_reasoning:
+        model = model.with_config(config={"configurable": {"reasoning": False}})
+    return model.bind_tools(selected_tools)
+
+
+async def _search_memories(store: BaseStore, user_id: str, query: str | None) -> list:
+    """Search the memory store, falling back gracefully on embedding errors."""
+    try:
+        return await store.asearch((user_id, "memories"), query=query, limit=10)
+    except AttributeError:
+        # Some OpenAI-compatible servers (e.g. llama-server) return a raw JSON
+        # list from /v1/embeddings instead of {"data": [...]}, which causes the
+        # OpenAI SDK parser to raise AttributeError.  Fall back to recency search.
+        LOGGER.warning(
+            "Memory semantic search failed — embedding endpoint returned an "
+            "incompatible response (not OpenAI-standard). Falling back to "
+            "recency-based memory retrieval. Check the /v1/embeddings response "
+            "format of your OpenAI-compatible server."
+        )
+        try:
+            return await store.asearch((user_id, "memories"), limit=10)
+        except Exception:
+            LOGGER.exception("Memory recency search also failed; no memories injected")
+            return []
+    except Exception:
+        LOGGER.exception("Unexpected memory store search failure; no memories injected")
+        return []
 
 
 async def _call_model(
@@ -1155,23 +1230,15 @@ async def _call_model(
             query=last_message.content
         )
 
-    mems = await store.asearch((user_id, "memories"), query=query_prompt, limit=10)
+    mems = await _search_memories(store, user_id, query_prompt)
 
     # Recent camera activity.
     camera_activity = await get_recent_camera_activity(hass, store)
 
     # Build system message.
-    system_message = conf["prompt"]
-    if mems:
-        formatted_mems = "\n".join(f"[{mem.key}]: {mem.value}" for mem in mems)
-        system_message += f"\n<memories>\n{formatted_mems}\n</memories>"
-    if camera_activity:
-        ca = "\n".join(str(a) for a in camera_activity)
-        system_message += f"\n<recent_camera_activity>\n{ca}\n</recent_camera_activity>"
-    if summary := state.get("summary", ""):
-        system_message += (
-            f"\n<past_conversation_summary>\n{summary}\n</past_conversation_summary>"
-        )
+    system_message = _build_system_message(
+        conf["prompt"], mems, camera_activity, state.get("summary", "")
+    )
 
     # Model input = System + current messages.
     messages = [SystemMessage(content=system_message)] + state["messages"]
@@ -1188,9 +1255,14 @@ async def _call_model(
         # Disable reasoning/thinking before binding tools: Qwen3's <think> tokens
         # interleave with tool call JSON output and break Ollama's qwen3.go parser
         # (ResponseError: "invalid character 'g' looking for beginning of value").
-        if chat_model_options.get("reasoning"):
-            model = model.with_config(config={"configurable": {"reasoning": False}})
-        model = model.bind_tools(selected_tools)
+        model = await hass.async_add_executor_job(
+            partial(
+                _bind_model_tools,
+                model,
+                selected_tools,
+                disable_reasoning=bool(chat_model_options.get("reasoning")),
+            )
+        )
 
     # Pass routing map to MultiLLMAPI
     routing_map = state.get("tool_routing_map", {})
@@ -1204,9 +1276,23 @@ async def _call_model(
     content = getattr(raw_response, "content", "") or ""
     response = extract_final(content)
 
+    tool_calls = getattr(raw_response, "tool_calls", []) or []
+
+    # Qwen3 extended-thinking: Ollama strips <think>…</think> tokens from content,
+    # leaving content='' when all output was reasoning.  On a post-tool turn with no
+    # follow-up tool call the user would receive no reply at all.  Inject a minimal
+    # acknowledgement so the conversation doesn't go silent.
+    if (
+        not response
+        and not tool_calls
+        and isinstance(state["messages"][-1], ToolMessage)
+    ):
+        LOGGER.debug("Empty model response after tool execution; injecting fallback.")
+        response = "Done."
+
     # Create AI message, no need to include tool call metadata if there's none.
-    if hasattr(raw_response, "tool_calls"):
-        ai_response = AIMessage(content=response, tool_calls=raw_response.tool_calls)
+    if tool_calls:
+        ai_response = AIMessage(content=response, tool_calls=tool_calls)
     else:
         ai_response = AIMessage(content=response)
     LOGGER.debug("AI response: %s", ai_response)

@@ -5,17 +5,21 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import ssl
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.dispatcher import async_dispatcher_send
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
+import custom_components.home_generative_agent as hga_component
 import custom_components.home_generative_agent.agent.graph as agent_graph
 from custom_components.home_generative_agent.agent import tools as agent_tools
+from custom_components.home_generative_agent.agent.graph import _search_memories
 from custom_components.home_generative_agent.const import SIGNAL_HGA_RECOGNIZED
 from custom_components.home_generative_agent.core.image_entity import LastEventImage
 from custom_components.home_generative_agent.core.person_gallery import PersonGalleryDAO
@@ -242,3 +246,268 @@ async def test_invoke_model_returns_result_within_timeout(
 
     result = await agent_graph._invoke_model(mock_model, [], {})
     assert result is expected
+
+
+# ---------------------------------------------------------------------------
+# _make_transient_tool_error — non-retryable tool timeout message
+# ---------------------------------------------------------------------------
+
+
+def test_make_transient_tool_error_status_and_content() -> None:
+    """_make_transient_tool_error must produce a ToolMessage with status='error'."""
+    msg = agent_graph._make_transient_tool_error("boom", "my_tool", "call-123")
+
+    assert isinstance(msg, ToolMessage)
+    assert msg.name == "my_tool"
+    assert msg.tool_call_id == "call-123"
+    assert msg.status == "error"
+    # The content must contain the error description.
+    assert "boom" in msg.content
+
+
+def test_make_transient_tool_error_content_instructs_no_retry() -> None:
+    """Transient error message must tell the LLM not to retry the tool."""
+    msg = agent_graph._make_transient_tool_error("timeout", "some_tool", "id-1")
+    # The template instructs the model not to retry.
+    content = str(msg.content)
+    assert "Do not retry" in content or "transient" in content.lower()
+
+
+def test_ollama_httpx_client_kwargs_use_prebuilt_ssl_context() -> None:
+    """Ollama chat and embedding clients must not build SSL contexts on-loop."""
+    kwargs = cast("Any", hga_component)._ollama_httpx_client_kwargs()
+
+    assert isinstance(kwargs["verify"], ssl.SSLContext)
+
+
+# ---------------------------------------------------------------------------
+# _call_model — fallback "Done." when Qwen3 thinking strips all content
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_call_model_injects_done_fallback_after_empty_tool_response(
+    hass: HomeAssistant,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    _call_model must emit 'Done.' when the model returns empty content after a tool.
+
+    Regression: Qwen3 extended-thinking strips <think> tokens so content becomes
+    '' (eval_count: 9).  Without the fallback the user receives no reply at all.
+    """
+    empty_ai = AIMessage(content="", tool_calls=[])
+
+    async def _fake_invoke_model(*_args: object, **_kwargs: object) -> AIMessage:
+        return empty_ai
+
+    async def _fake_camera(*_args: object, **_kwargs: object) -> list[object]:
+        return []
+
+    async def _fake_trim(
+        messages: list[object], *_args: object, **_kwargs: object
+    ) -> list[object]:
+        return messages
+
+    mock_store = MagicMock()
+    mock_store.asearch = AsyncMock(return_value=[])
+
+    monkeypatch.setattr(agent_graph, "_invoke_model", _fake_invoke_model)
+    monkeypatch.setattr(agent_graph, "get_recent_camera_activity", _fake_camera)
+    monkeypatch.setattr(agent_graph, "_trim_messages_for_model", _fake_trim)
+
+    state: dict[str, object] = {
+        "messages": [
+            HumanMessage(content="turn it off"),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "HassTurnOff",
+                        "args": {},
+                        "id": "call-1",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            ToolMessage(content="action_done", tool_call_id="call-1"),
+        ],
+        "selected_tools": [],
+        "summary": "",
+        "tool_routing_map": {},
+        "messages_to_remove": [],
+        "chat_model_usage_metadata": {},
+    }
+
+    config: dict[str, object] = {
+        "configurable": {
+            "chat_model": MagicMock(),
+            "user_id": "user-test",
+            "hass": hass,
+            "options": {},
+            "chat_model_options": {},
+            "prompt": "You are a helpful assistant.",
+            "langchain_tools": {},
+            "ha_llm_api": None,
+            "pending_actions": {},
+        }
+    }
+
+    result = await agent_graph._call_model(state, config, store=mock_store)  # type: ignore[arg-type]
+
+    ai_msg = result["messages"]
+    assert isinstance(ai_msg, AIMessage)
+    assert ai_msg.content == "Done.", f"expected 'Done.' but got {ai_msg.content!r}"
+    assert not ai_msg.tool_calls
+
+
+@pytest.mark.asyncio
+async def test_call_model_binds_tools_in_executor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Tool binding can lazily import LangChain modules, so keep it off-loop."""
+
+    async def _fake_invoke_model(*_args: object, **_kwargs: object) -> AIMessage:
+        return AIMessage(content="ok")
+
+    async def _fake_camera(*_args: object, **_kwargs: object) -> list[object]:
+        return []
+
+    async def _fake_trim(
+        messages: list[object], *_args: object, **_kwargs: object
+    ) -> list[object]:
+        return messages
+
+    class FakeHass:
+        executor_calls = 0
+
+        async def async_add_executor_job(self, target: Any) -> Any:
+            self.executor_calls += 1
+            return target()
+
+    class FakeModel:
+        bound_tools: list[object] | None = None
+        config: dict[str, object] | None = None
+
+        def with_config(self, *, config: dict[str, object]) -> FakeModel:
+            self.config = config
+            return self
+
+        def bind_tools(self, tools: list[object]) -> FakeModel:
+            self.bound_tools = tools
+            return self
+
+    fake_hass = FakeHass()
+    model = FakeModel()
+    selected_tools: list[object] = [object()]
+    mock_store = MagicMock()
+    mock_store.asearch = AsyncMock(return_value=[])
+
+    monkeypatch.setattr(agent_graph, "_invoke_model", _fake_invoke_model)
+    monkeypatch.setattr(agent_graph, "get_recent_camera_activity", _fake_camera)
+    monkeypatch.setattr(agent_graph, "_trim_messages_for_model", _fake_trim)
+
+    state: dict[str, object] = {
+        "messages": [HumanMessage(content="turn on the lamp")],
+        "selected_tools": selected_tools,
+        "summary": "",
+        "tool_routing_map": {},
+        "messages_to_remove": [],
+        "chat_model_usage_metadata": {},
+    }
+    config: dict[str, object] = {
+        "configurable": {
+            "chat_model": model,
+            "user_id": "user-test",
+            "hass": fake_hass,
+            "options": {},
+            "chat_model_options": {"reasoning": True},
+            "prompt": "You are a helpful assistant.",
+            "langchain_tools": {},
+            "ha_llm_api": None,
+            "pending_actions": {},
+        }
+    }
+
+    result = await agent_graph._call_model(state, config, store=mock_store)  # type: ignore[arg-type]
+
+    assert fake_hass.executor_calls == 1
+    assert model.config == {"configurable": {"reasoning": False}}
+    assert model.bound_tools == selected_tools
+    assert result["messages"].content == "ok"
+
+
+# ---------------------------------------------------------------------------
+# _search_memories — issue #394: llama-server embedding incompatibility
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_search_memories_returns_semantic_results() -> None:
+    """Happy path: semantic search returns store results unchanged."""
+    store = MagicMock()
+    expected = [MagicMock()]
+    store.asearch = AsyncMock(return_value=expected)
+
+    result = await _search_memories(store, "user-1", "what is the temperature?")
+
+    store.asearch.assert_awaited_once_with(
+        ("user-1", "memories"), query="what is the temperature?", limit=10
+    )
+    assert result is expected
+
+
+@pytest.mark.asyncio
+async def test_search_memories_falls_back_to_recency_on_attribute_error(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """
+    AttributeError from embedding endpoint falls back to recency search (issue #394).
+
+    llama-server returns a bare JSON list instead of {"data": [...]}, which causes
+    the OpenAI SDK parser to raise AttributeError inside store.asearch.
+    """
+    store = MagicMock()
+    fallback = [MagicMock()]
+    store.asearch = AsyncMock(
+        side_effect=[
+            AttributeError("'list' object has no attribute 'data'"),
+            fallback,
+        ]
+    )
+
+    with caplog.at_level(logging.WARNING):
+        result = await _search_memories(store, "user-1", "some query")
+
+    assert result is fallback
+    assert "incompatible response" in caplog.text
+    # Second call must omit query= (recency-only)
+    _, recency_kwargs = store.asearch.call_args_list[1]
+    assert "query" not in recency_kwargs
+
+
+@pytest.mark.asyncio
+async def test_search_memories_returns_empty_when_both_searches_fail() -> None:
+    """Both semantic and recency search failures return [] without propagating."""
+    store = MagicMock()
+    store.asearch = AsyncMock(
+        side_effect=[
+            AttributeError("bad embedding format"),
+            RuntimeError("DB gone"),
+        ]
+    )
+
+    result = await _search_memories(store, "user-1", "query")
+
+    assert result == []
+
+
+@pytest.mark.asyncio
+async def test_search_memories_returns_empty_on_unexpected_error() -> None:
+    """Unexpected exceptions are swallowed and return [] so the agent can still respond."""
+    store = MagicMock()
+    store.asearch = AsyncMock(side_effect=RuntimeError("unexpected failure"))
+
+    result = await _search_memories(store, "user-1", "query")
+
+    assert result == []

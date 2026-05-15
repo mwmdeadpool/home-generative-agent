@@ -306,10 +306,10 @@ class SentinelNotifier:
                     "push": {"interruption-level": interrupt_level},
                 },
             }
-            LOGGER.info("Sending sentinel notification via %s.", target_service)
+            LOGGER.debug("Sending sentinel notification via %s.", target_service)
             await self._hass.services.async_call(domain, service, data, blocking=False)
         else:
-            LOGGER.info("Sending sentinel notification via persistent_notification.")
+            LOGGER.debug("Sending sentinel notification via persistent_notification.")
             await self._hass.services.async_call(
                 "persistent_notification",
                 "create",
@@ -364,7 +364,9 @@ class SentinelNotifier:
                         self._suppression.state, _entity_id, finding.type
                     )
                 await self._suppression.async_save()
-                LOGGER.info("Snooze 24 h registered for finding type %s.", finding.type)
+                LOGGER.debug(
+                    "Snooze 24 h registered for finding type %s.", finding.type
+                )
 
         elif verb == ACT_SNOOZE_ALWAYS:
             # Guard: send confirmation notification; do NOT write snooze yet.
@@ -380,7 +382,7 @@ class SentinelNotifier:
                     self._suppression.state, finding_type, SNOOZE_PERMANENT, now
                 )
                 await self._suppression.async_save()
-                LOGGER.info(
+                LOGGER.debug(
                     "Permanent snooze confirmed for finding type %s.", finding_type
                 )
             else:
@@ -513,7 +515,7 @@ class SentinelNotifier:
                 },
                 blocking=False,
             )
-        LOGGER.info("Daily digest sent: %s.", message)
+        LOGGER.debug("Daily digest sent: %s.", message)
 
     async def _send_always_confirmation(self, finding: AnomalyFinding) -> None:
         """
@@ -575,6 +577,13 @@ def _build_actions(finding: AnomalyFinding) -> list[dict[str, Any]]:
                 {
                     "action": f"{ACTION_PREFIX}handoff_{finding.anomaly_id}",
                     "title": "Ask Agent",
+                }
+            )
+        elif "arm_alarm" in finding.suggested_actions:
+            actions.append(
+                {
+                    "action": f"{ACTION_PREFIX}execute_{finding.anomaly_id}",
+                    "title": "Arm Alarm",
                 }
             )
         else:
@@ -685,6 +694,9 @@ def _friendly_type(anomaly_type: str) -> str:
         "open_any_window_at_night_while_away": "Window open at night",
         "unlocked_lock_at_night": "Door lock left unlocked",
         "camera_entry_unsecured": "Activity near unsecured entry",
+        "alarm_disarmed_during_external_threat": (
+            "Outdoor activity while alarm disarmed"
+        ),
     }
     if anomaly_type in known:
         return known[anomaly_type]
@@ -734,10 +746,45 @@ _POWER_SUFFIXES: tuple[str, ...] = (
 
 def _strip_power_suffix(name: str) -> str:
     """Remove trailing power-sensor label words from an appliance display name."""
+    name_lower = name.lower()
     for suffix in _POWER_SUFFIXES:
-        if name.endswith(suffix):
+        if name_lower.endswith(suffix.lower()):
             return name[: -len(suffix)].strip()
     return name
+
+
+def _appliance_power_duration_mobile_message(finding: AnomalyFinding) -> str:
+    """Deterministic mobile copy for appliance_power_duration."""
+    ev = finding.evidence
+    raw_name = (ev.get("friendly_name") or "").strip()
+    if raw_name:
+        appliance = _strip_power_suffix(raw_name)
+    else:
+        entity_id = str(
+            ev.get("entity_id")
+            or (finding.triggering_entities[0] if finding.triggering_entities else "")
+        )
+        appliance = _strip_power_suffix(_friendly_entity(entity_id))
+
+    power_w = ev.get("power_w")
+    duration_min = ev.get("duration_min")
+    threshold_min = ev.get("threshold_min")
+
+    power_str = (
+        f"about {round(float(power_w))} W" if power_w is not None else "high power"
+    )
+    dur_str = (
+        f"{int(duration_min)} min" if duration_min is not None else "an extended period"
+    )
+    thr_str = (
+        f"{int(threshold_min)} min" if threshold_min is not None else "the configured"
+    )
+
+    msg = (
+        f"{appliance} drew {power_str} for {dur_str},"
+        f" above the {thr_str} threshold. Check it."
+    )
+    return msg[:MAX_MOBILE_MESSAGE_CHARS].rstrip()
 
 
 def _fallback_message(finding: AnomalyFinding) -> str:
@@ -750,7 +797,48 @@ def _fallback_message(finding: AnomalyFinding) -> str:
     return f"{summary}: {entity}. {_severity_action_hint(finding.severity)}"
 
 
+def _alarm_disarmed_mobile_message(finding: AnomalyFinding) -> str:
+    """Deterministic mobile copy for alarm_disarmed_during_external_threat."""
+    ev = finding.evidence
+
+    cam_name: str = (ev.get("camera_friendly_name") or "").strip()[:30]
+    if not cam_name:
+        cam_id = str(ev.get("camera_entity_id", ""))
+        if cam_id:
+            cam_name = cam_id.partition(".")[2].replace("_", " ").title()[:30]
+        else:
+            cam_name = ""
+    if not cam_name:
+        cam_name = "A camera"
+
+    age = ev.get("camera_activity_age_minutes")
+    if age is not None:
+        age_mins = max(1, round(float(age)))
+        activity_phrase = (
+            f"{cam_name} detected unrecognized outdoor activity {age_mins} min ago."
+        )
+    else:
+        activity_phrase = f"{cam_name} reported unrecognized outdoor activity."
+
+    last_changed = ev.get("alarm_last_changed")
+    alarm_phrase = ""
+    if last_changed:
+        parsed = dt_util.parse_datetime(str(last_changed))
+        if parsed is not None:
+            time_str = dt_util.as_local(parsed).strftime("%-I:%M %p")
+            alarm_phrase = f" The alarm has been disarmed since {time_str}."
+    if not alarm_phrase:
+        alarm_phrase = " The alarm is currently disarmed."
+
+    cta = " Arm the alarm or view the camera."
+    return (activity_phrase + alarm_phrase + cta)[:MAX_MOBILE_MESSAGE_CHARS].rstrip()
+
+
 def _mobile_message(explanation: str | None, finding: AnomalyFinding) -> str:
+    if finding.type == "alarm_disarmed_during_external_threat":
+        return _alarm_disarmed_mobile_message(finding)
+    if finding.type == "appliance_power_duration":
+        return _appliance_power_duration_mobile_message(finding)
     if explanation:
         text = _normalize_text(explanation)
         if text and len(text) <= MAX_MOBILE_MESSAGE_CHARS:
@@ -763,6 +851,9 @@ def _persistent_message(explanation: str | None, finding: AnomalyFinding) -> str
         text = _normalize_text(explanation)
         if text:
             return text
+
+    if finding.type == "appliance_power_duration":
+        return _appliance_power_duration_mobile_message(finding)
 
     entities = ", ".join(
         _friendly_entity(entity) for entity in finding.triggering_entities

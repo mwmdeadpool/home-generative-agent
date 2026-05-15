@@ -25,13 +25,24 @@ Design constraints (from sentinel_plan.md §6, §7)
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import re
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
+
+from langchain_core.messages import HumanMessage, SystemMessage
+
+from custom_components.home_generative_agent.core.utils import (
+    SENTINEL_ADMISSION_TIMEOUT_S,
+    SentinelLLMDeferredError,
+    extract_final,
+    run_sentinel_model_call,
+)
+from custom_components.home_generative_agent.sentinel.logging_utils import (
+    RepeatingLogLimiter,
+)
 
 if TYPE_CHECKING:
     from custom_components.home_generative_agent.sentinel.models import AnomalyFinding
@@ -40,6 +51,7 @@ if TYPE_CHECKING:
     )
 
 LOGGER = logging.getLogger(__name__)
+_PARSE_LOG_LIMITER = RepeatingLogLimiter(LOGGER)
 
 _THINK_BLOCK = re.compile(r"<think>.*?(?:</think>|$)", re.IGNORECASE | re.DOTALL)
 
@@ -54,6 +66,7 @@ TRIAGE_REASON_LLM_SUPPRESS = "llm_suppress"
 TRIAGE_REASON_TIMEOUT = "triage_timeout"
 TRIAGE_REASON_ERROR = "triage_error"
 TRIAGE_REASON_DISABLED = "triage_disabled"
+TRIAGE_REASON_DEFERRED = "triage_deferred"
 
 # Input allowlist for optional sanitised evidence fields.
 _ALLOWED_EVIDENCE_KEYS: frozenset[str] = frozenset(
@@ -117,10 +130,20 @@ class SentinelTriageService:
     Pass ``None`` to disable triage (all findings pass through as notify).
     """
 
-    def __init__(self, model: Any, *, timeout_seconds: int = 10) -> None:
+    def __init__(
+        self,
+        model: Any,
+        *,
+        timeout_seconds: int = 10,
+        deployment: str = "edge",
+        health_stats: dict[str, Any] | None = None,
+    ) -> None:
         """Initialise with a LangChain-compatible model."""
         self._model = model
         self._timeout_seconds = timeout_seconds
+        self._deployment = deployment
+        self._health_stats = health_stats
+        self._log_limiter = RepeatingLogLimiter(LOGGER)
 
     async def triage(
         self,
@@ -144,23 +167,32 @@ class SentinelTriageService:
         prompt = _build_prompt(finding, snapshot)
         start = time.monotonic()
 
+        messages = [
+            SystemMessage(content=_SYSTEM_PROMPT),
+            HumanMessage(content=prompt),
+        ]
         try:
-            from langchain_core.messages import (  # noqa: PLC0415
-                HumanMessage,
-                SystemMessage,
+            result = await run_sentinel_model_call(
+                self._model,
+                messages,
+                deployment=self._deployment,
+                category="triage",
+                admission_timeout_s=SENTINEL_ADMISSION_TIMEOUT_S,
+                call_timeout_s=float(self._timeout_seconds),
+                health_stats=self._health_stats,
             )
-
-            messages = [
-                SystemMessage(content=_SYSTEM_PROMPT),
-                HumanMessage(content=prompt),
-            ]
-            result = await asyncio.wait_for(
-                self._model.ainvoke(messages),
-                timeout=self._timeout_seconds,
+        except SentinelLLMDeferredError as err:
+            LOGGER.debug("Triage deferred: %s", err)
+            return TriageDecision(
+                decision=TRIAGE_NOTIFY,
+                reason_code=TRIAGE_REASON_DEFERRED,
+                triage_confidence=None,
+                summary="Triage deferred; chat was active.",
             )
         except TimeoutError:
             elapsed_ms = int((time.monotonic() - start) * 1000)
-            LOGGER.warning(
+            self._log_limiter.warning(
+                "llm_call",
                 "Triage LLM call timed out after %d ms; failing open to notify.",
                 elapsed_ms,
             )
@@ -171,7 +203,11 @@ class SentinelTriageService:
                 summary="Triage timed out; defaulting to notify.",
             )
         except (ValueError, TypeError, RuntimeError, OSError) as err:
-            LOGGER.warning("Triage LLM call failed: %s; failing open to notify.", err)
+            self._log_limiter.warning(
+                "llm_call",
+                "Triage LLM call failed: %s; failing open to notify.",
+                err,
+            )
             return TriageDecision(
                 decision=TRIAGE_NOTIFY,
                 reason_code=TRIAGE_REASON_ERROR,
@@ -180,6 +216,10 @@ class SentinelTriageService:
             )
 
         elapsed_ms = int((time.monotonic() - start) * 1000)
+        self._log_limiter.recovered(
+            "llm_call",
+            "Triage LLM call recovered after %d failed attempt(s).",
+        )
         return _parse_response(result, elapsed_ms)
 
 
@@ -247,9 +287,7 @@ def _parse_response(result: Any, elapsed_ms: int) -> TriageDecision:  # noqa: AR
 
     Fails-open to ``notify`` on any parse error.
     """
-    content = getattr(result, "content", None) or ""
-    if not isinstance(content, str):
-        content = str(content)
+    content = extract_final(getattr(result, "content", None) or "")
 
     # Strip think blocks, then markdown fences if the model wrapped the JSON.
     content = _THINK_BLOCK.sub("", content).strip()
@@ -259,7 +297,8 @@ def _parse_response(result: Any, elapsed_ms: int) -> TriageDecision:  # noqa: AR
     try:
         parsed: dict[str, Any] = json.loads(content)
     except (json.JSONDecodeError, ValueError):
-        LOGGER.warning(
+        _PARSE_LOG_LIMITER.warning(
+            "non_json",
             "Triage LLM returned non-JSON response (%d chars); failing open.",
             len(content),
         )
@@ -277,6 +316,10 @@ def _parse_response(result: Any, elapsed_ms: int) -> TriageDecision:  # noqa: AR
         TRIAGE_REASON_LLM_SUPPRESS
         if decision == TRIAGE_SUPPRESS
         else TRIAGE_REASON_LLM_NOTIFY
+    )
+    _PARSE_LOG_LIMITER.recovered(
+        "non_json",
+        "Triage JSON parsing recovered after %d invalid response(s).",
     )
 
     raw_conf = parsed.get("triage_confidence")

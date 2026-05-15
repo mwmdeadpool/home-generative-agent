@@ -37,36 +37,53 @@ This integration will set up the `conversation` platform, allowing users to conv
 
 ### HACS
 
-
-1. Install the [PostgreSQL with pgvector](https://github.com/goruck/addon-postgres-pgvector/tree/main/postgres_pgvector) add-on by clicking the button below and configure it according to [these directions](https://github.com/goruck/addon-postgres-pgvector/blob/main/postgres_pgvector/DOCS.md). This allows for persistence storage of conversations and memories with vector similarity search.
+1. Install the [PostgreSQL with pgvector](https://github.com/goruck/addon-postgres-pgvector/tree/main/postgres_pgvector) add-on by clicking the button below and configure it according to [these directions](https://github.com/goruck/addon-postgres-pgvector/blob/main/postgres_pgvector/DOCS.md). This allows persistent storage of conversations and memories with vector similarity search.
 
 [![Open your Home Assistant instance and show the add add-on repository dialog with a specific repository URL pre-filled.](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2Fgoruck%2Faddon-postgres-pgvector)
 
-2. home-generative-agent is available in the default HACS repository. You can install it directly through HACS or click the button below to open it there.
+2. Install Home Generative Agent from HACS. It is available in the default HACS repository, or you can click the button below to open it directly.
 
 [![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=goruck&repository=https%3A%2F%2Fgithub.com%2Fgoruck%2Fhome-generative-agent&category=integration)
 
-3. Add Home Generative Agent as an assistant in your Home Assistant installation by going to Settings → Voice Assistants. Use a configuration similar to the figure below.
+3. Restart Home Assistant.
 
-![Alt text](./assets/hga_assist_config.png)
+4. Add the integration in Home Assistant:
+   - Go to **Settings → Devices & Services**.
+   - Click **Add Integration**.
+   - Search for **Home Generative Agent**.
+   - Complete the initial instruction-only setup screen.
 
-4. Install all the Blueprints in the `blueprints` directory. You can manually create automations using these that converse directly with the Agent (the Agent can also create automations for you from your your conversations with it, see examples below.)
+5. Open the Home Generative Agent integration page and click **Setup**.
+   - Enable the features you want.
+   - Configure the database connection.
+   - If prompted, add a model provider.
 
-5. (Optional) Install `ollama` on your edge device by following the instructions [here](https://ollama.com/download), **or** run any OpenAI-compatible server (vLLM, llama.cpp, LiteLLM, etc.) and add it as an **OpenAI Compatible** edge provider.
+6. Click **Model Provider** on the integration page and add at least one provider, such as OpenAI, Ollama, Gemini, Anthropic, or an OpenAI-compatible endpoint.
 
-- Pull `ollama` models `gpt-oss`, `qwen3:8b`, `qwen3:1.7b`, `qwen2.5vl:7b` and `mxbai-embed-large`.
+7. Add Home Generative Agent as an assistant:
+   - Go to **Settings → Voice Assistants**.
+   - Select Home Generative Agent as the conversation agent.
+   - Use a configuration similar to the figure below.
 
-6. (Optional) Install [face-service](https://github.com/goruck/face-service) on your edge device if you want to use face recognition.
+   ![Alt text](./assets/hga_assist_config.png)
 
-- Go to Developers tools -> Actions -> Enroll Person in the HA UI to enroll a new person into the face database from an image file.
-- If you want the dashboard enrollment card, add the Lovelace resource after installing the integration:
-  - Settings -> Dashboards -> Resources -> Add
-  - URL: `/hga-card/hga-enroll-card.js`
-  - Type: `JavaScript Module`
-- If you want the Sentinel proposals dashboard card, add this resource as well:
-  - Settings -> Dashboards -> Resources -> Add
-  - URL: `/hga-card/hga-proposals-card.js`
-  - Type: `JavaScript Module`
+8. Install all the Blueprints in the `blueprints` directory. You can manually create automations using these that converse directly with the Agent. The Agent can also create automations for you from your conversations with it; see examples below.
+
+9. (Optional) Install `ollama` on your edge device by following the instructions [here](https://ollama.com/download), **or** run any OpenAI-compatible server (vLLM, llama.cpp, LiteLLM, etc.) and add it as an **OpenAI Compatible** edge provider.
+
+   - Pull `ollama` models `gpt-oss`, `qwen3:8b`, `qwen3:1.7b`, `qwen2.5vl:7b` and `mxbai-embed-large`.
+
+10. (Optional) Install [face-service](https://github.com/goruck/face-service) on your edge device if you want to use face recognition.
+
+   - Go to Developers tools -> Actions -> Enroll Person in the HA UI to enroll a new person into the face database from an image file.
+   - If you want the dashboard enrollment card, add the Lovelace resource after installing the integration:
+     - Settings -> Dashboards -> Resources -> Add
+     - URL: `/hga-card/hga-enroll-card.js`
+     - Type: `JavaScript Module`
+   - If you want the Sentinel proposals dashboard card, add this resource as well:
+     - Settings -> Dashboards -> Resources -> Add
+     - URL: `/hga-card/hga-proposals-card.js`
+     - Type: `JavaScript Module`
 
 ### Manual (non-HACS install)
 1. Install PostgreSQL with pgvector as shown above in Step 1.
@@ -76,8 +93,8 @@ This integration will set up the `conversation` platform, allowing users to conv
 5. Download _all_ the files from the `custom_components/home_generative_agent/` directory in this repository.
 6. Place the files you downloaded in the new directory you created.
 7. Restart Home Assistant
-8. In the HA UI, go to "Configuration" -> "Integrations" click "+," and search for "Home Generative Agent"
-9. Follow steps 3 to 6 above.
+8. In the HA UI, go to **Settings → Devices & Services**, click **Add Integration**, and search for **Home Generative Agent**.
+9. Follow steps 4 to 10 above.
 
 ## Configuration
 Configuration is done entirely in the Home Assistant UI using subentry flows.
@@ -201,6 +218,10 @@ Sentinel is a singleton service per Home Generative Agent config entry. Configur
 
 Important: The LLM never executes actions or directly decides runtime safety behavior. Detection and actuation remain deterministic. Triage can suppress low-value notifications but cannot alter any finding field or gate execution.
 
+**Admission control:** On edge deployments (Ollama, local OpenAI-compatible servers), Sentinel LLM calls (triage, discovery, explain) defer when a chat turn or a video model call is active, so the GPU is not competed for during live interactions. Priority order is: chat (highest) > video > Sentinel. Chat cancels in-flight Sentinel tasks on entry; video defers queued Sentinel tasks for its entire window (chat-wait + semaphore-wait + model call). Sentinel resumes immediately once both foreground activities are idle. Cloud providers (OpenAI, Gemini, Anthropic) are always admitted — they use remote inference and are unaffected by local GPU load. When deferrals persist for more than 300 s, the `sentinel_health` sensor transitions to `degraded` and a WARNING is logged.
+
+Set `model_provider_uncontended: true` in the Options flow to bypass all local gates (chat-session, video-session, Sentinel deferral) when the server has dedicated capacity that doesn't need protection.
+
 ### Built-in Static Rules
 
 These rules run on every detection cycle without any configuration or approval. They cover the most common security and safety patterns out of the box:
@@ -216,7 +237,7 @@ Security / presence:
 
 Appliances / sensors:
 
-- `appliance_power_duration` — appliance drawing power beyond a configurable duration threshold
+- `appliance_power_duration` — appliance drawing power beyond a configurable duration threshold; notification names the actual appliance (e.g. `Washer drew about 296 W for 633 min, above the 60 min threshold. Check it.`)
 
 Cameras:
 
@@ -235,7 +256,8 @@ When Sentinel notifications are enabled:
 
 - Mobile push explanation text is compact and plain-language (targeted for small screens).
 - Explanation text is normalized before send (markdown/backticks removed, whitespace collapsed).
-- If explanation text is missing or too long, Sentinel uses a deterministic fallback message.
+- Some finding types use a dedicated deterministic message builder regardless of LLM explanation availability — `appliance_power_duration` and `alarm_disarmed_during_external_threat` always produce deterministic mobile copy that names the relevant entity.
+- For all other finding types, if explanation text is missing or too long, Sentinel uses a deterministic fallback message.
 - Fallback urgency wording depends on severity:
   - `high`: `Urgent: check and secure it now.`
   - `medium`: `Check soon and secure it if unexpected.`
@@ -580,7 +602,7 @@ Notable service behavior:
 
 ### Sentinel Health Sensor
 
-Sentinel registers a `sensor.sentinel_health` entity that is updated after every detection run. Its state is `ok` when Sentinel is enabled and `disabled` otherwise.
+Sentinel registers a `sensor.sentinel_health` entity that is updated after every detection run. Its state is `ok` when Sentinel is enabled and running normally, `degraded` when Sentinel LLM calls have been consecutively deferred for more than 300 s (edge deployment under sustained chat load), and `disabled` when Sentinel is not configured.
 
 Attributes:
 
@@ -590,6 +612,10 @@ Attributes:
 | `last_run_end` | UTC ISO 8601 timestamp when the last run ended |
 | `run_duration_ms` | Last run duration in milliseconds |
 | `active_rule_count` | Number of active rules evaluated |
+| `sentinel_admission_degraded` | `true` when Sentinel LLM calls have been deferred for more than 300 s without a successful run |
+| `sentinel_admission_degraded_category` | The Sentinel category (`triage`, `discovery`, `explain`) that last triggered the degraded flag, or `null` |
+| `sentinel_admission_consecutive_deferrals` | Number of consecutive times Sentinel LLM admission was denied due to active chat |
+| `sentinel_admission_starved_for_s` | Seconds since the last successful Sentinel LLM run (or since the first deferral if no run has ever succeeded) |
 | `trigger_source_breakdown` | Rolling 24-hour trigger counts broken down by source: `{poll: N, event: N, on_demand: N}` |
 | `discovery_candidates_generated` | Total discovery candidates returned by the LLM in the most recent cycle |
 | `discovery_candidates_novel` | Candidates that passed deduplication and were stored |
@@ -727,6 +753,7 @@ Normalization fallbacks for common LLM-generated patterns:
   - `Rule registry ignored duplicate rule ...`
   - `... covered_by_existing_rule ...`
 - Existing stored proposal drafts are not auto-migrated; statuses update when proposals are re-processed.
+- **llama-server embedding incompatibility** — If you use llama-server as an OpenAI-compatible provider and see `Memory semantic search failed — embedding endpoint returned an incompatible response` in the logs, the agent has automatically fallen back to recency-based memory retrieval. This happens because llama-server's `/v1/embeddings` response format does not match the OpenAI SDK's expected structure. Semantic search (memory and RAG tool retrieval) will degrade silently. For reliable semantic embeddings, use a dedicated embedding model via Ollama (`mxbai-embed-large` is recommended) and set its provider as the **Embedding** provider in the integration settings. Chat and embedding providers can be different — e.g. llama-server for chat, Ollama for embeddings.
 
 ## Image and Sensor Entities
 
@@ -979,14 +1006,17 @@ Category | Provider | Default model | Purpose
 Chat | OpenAI | gpt-5 | High-level reasoning and planning
 Chat | Ollama | gpt-oss | High-level reasoning and planning
 Chat | Gemini | gemini-2.5-flash-lite | High-level reasoning and planning
+Chat | Anthropic | claude-sonnet-4-6 | High-level reasoning and planning
 Chat | OpenAI Compatible | gpt-4o | High-level reasoning and planning
 VLM | Ollama | qwen3-vl:8b | Image scene analysis
 VLM | OpenAI | gpt-5-nano | Image scene analysis
 VLM | Gemini | gemini-2.5-flash-lite | Image scene analysis
+VLM | Anthropic | claude-sonnet-4-6 | Image scene analysis
 VLM | OpenAI Compatible | gpt-4o | Image scene analysis
 Summarization | Ollama | qwen3:1.7b | Primary model context summarization
 Summarization | OpenAI | gpt-5-nano | Primary model context summarization
 Summarization | Gemini | gemini-2.5-flash-lite | Primary model context summarization
+Summarization | Anthropic | claude-haiku-4-5-20251001 | Primary model context summarization
 Summarization | OpenAI Compatible | gpt-4o | Primary model context summarization
 Embeddings | Ollama | mxbai-embed-large | Embedding generation for semantic search
 Embeddings | OpenAI | text-embedding-3-small | Embedding generation for semantic search
@@ -1014,7 +1044,7 @@ Parameter | Description | Default
 ### Latency
 The latency between user requests or the agent taking timely action on the user's behalf is critical for you to consider in the design. I used several techniques to reduce latency, including using specialized, smaller helper LLMs running on the edge and facilitating primary model prompt caching by structuring the prompts to put static content, such as instructions and examples, upfront and variable content, such as user-specific information at the end. These techniques also reduce primary model usage costs considerably.
 
-Native LLM streaming (v3.12.0+) means the first tokens appear in the HA conversation UI within milliseconds of the model starting its response — total response time is unchanged, but perceived latency drops significantly. Multi-tool turns also benefit from parallel tool execution: tools in the same model turn run concurrently rather than serially.
+Native LLM streaming (v3.12.0+) means the first tokens appear in the HA conversation UI within milliseconds of the model starting its response — total response time is unchanged, but perceived latency drops significantly. Multi-tool turns also benefit from parallel tool execution: tools in the same model turn run concurrently rather than serially. As of v3.14.4, OpenAI and Anthropic providers are constructed with `streaming=True` so they emit token chunks directly, while other providers continue to use their existing streaming or fallback behavior.
 
 You can see the typical latency performance in the table below.
 
@@ -1131,6 +1161,14 @@ The agent uses a tool that in turn uses the HA Blueprint `hga_scene_analysis.yam
 ### Proactive Camera Video Analysis.
 
 You can enable proactive video scene analysis from cameras visible to Home Assistant. When enabled, motion detection will trigger the analysis which will be stored in a database for use by the agent, and optionally, notifications of the analysis will be sent to the mobile app. You can also enable anomaly detection which will only send notifications based on semantic search of the current analysis vis-a-vis the database. These options are set in the integration's config UI.
+
+**Caption deduplication:** In anomaly mode, repeated low-value notifications are suppressed. If the new caption is semantically close to a recent caption (vector similarity ≥ 0.89), the notification is withheld. A 30-minute lexical fast path additionally suppresses repeated artifact captions (nighttime glare, monochrome blur scenes, empty walkway descriptions) even when the vector score falls below the threshold. Notifications for scenes with real subjects (people, vehicles, packages, animals) are always preserved — and if a subject was last seen more than 30 minutes ago, notification resumes even if the vector score is high.
+
+**Resource management on edge deployments:** The video pipeline enforces a per-entry semaphore that limits how many VLM and summary model calls run concurrently. The default limit is 1 (sequential). Frames that cannot acquire the semaphore within 30 s are dropped so stale results never accumulate. If a chat turn starts while the video pipeline is waiting for the model, it waits briefly for the chat turn to complete before dropping the frame — avoiding GPU contention. The video token budget is intentionally capped (256 tokens for VLM scene descriptions, 128 tokens for summaries) so video frames do not monopolize the model's context window at the expense of other callers.
+
+Two advanced options are available in the Camera Image Analysis feature subentry:
+- `video_model_semaphore` — concurrent video model call limit (default: `1`). Increase only if your server has dedicated GPU headroom for parallel video inference.
+- `model_provider_uncontended` (global Options) — bypass all local gates when the model server has dedicated capacity that does not need protecting.
 
 The image below is an example of a notification sent to the mobile app.
 
