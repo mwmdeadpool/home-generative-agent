@@ -13,23 +13,23 @@ import voluptuous as vol
 from homeassistant.util import dt as dt_util
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from custom_components.home_generative_agent.const import (
+from ..const import (
     CONF_SENTINEL_DISCOVERY_INTERVAL_SECONDS,
 )
-from custom_components.home_generative_agent.core.utils import (
+from ..core.utils import (
     SENTINEL_ADMISSION_TIMEOUT_S,
     SentinelLLMDeferredError,
     extract_final,
     run_sentinel_model_call,
 )
-from custom_components.home_generative_agent.explain.discovery_prompts import (
+from ..explain.discovery_prompts import (
     SYSTEM_PROMPT,
     USER_PROMPT_TEMPLATE,
 )
-from custom_components.home_generative_agent.snapshot.builder import (
+from ..snapshot.builder import (
     async_build_full_state_snapshot,
 )
-from custom_components.home_generative_agent.snapshot.discovery_reducer import (
+from ..snapshot.discovery_reducer import (
     reduce_snapshot_for_discovery,
 )
 

@@ -271,6 +271,7 @@ async def wait_for_chat_idle(timeout_s: float) -> bool:
         return False
     else:
         return True
+    return _chat_idle.is_set()
 
 
 async def _cancel_active_sentinel_llm_tasks(category: str) -> None:
@@ -784,6 +785,7 @@ async def anthropic_healthy(
         return False
     else:
         return True
+    return False
 
 
 async def validate_face_api_url(

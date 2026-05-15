@@ -1066,6 +1066,7 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                 message_history,
                 conversation_id,
             )
+        raise HomeAssistantError("Conversation handling ended unexpectedly.")
 
     async def _async_handle_message_active(  # noqa: PLR0913
         self,

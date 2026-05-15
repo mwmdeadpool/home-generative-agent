@@ -34,19 +34,19 @@ from typing import TYPE_CHECKING, Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from custom_components.home_generative_agent.core.utils import (
+from ..core.utils import (
     SENTINEL_ADMISSION_TIMEOUT_S,
     SentinelLLMDeferredError,
     extract_final,
     run_sentinel_model_call,
 )
-from custom_components.home_generative_agent.sentinel.logging_utils import (
+from .logging_utils import (
     RepeatingLogLimiter,
 )
 
 if TYPE_CHECKING:
-    from custom_components.home_generative_agent.sentinel.models import AnomalyFinding
-    from custom_components.home_generative_agent.snapshot.schema import (
+    from .models import AnomalyFinding
+    from ..snapshot.schema import (
         FullStateSnapshot,
     )
 

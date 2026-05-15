@@ -1171,6 +1171,7 @@ async def _invoke_model(
     except Exception as err:
         msg = f"Model invocation failed: {err}"
         raise HomeAssistantError(msg) from err
+    raise HomeAssistantError("Model invocation failed unexpectedly.")
 
 
 def _bind_model_tools(

@@ -1056,6 +1056,7 @@ class VideoAnalyzer:
             self._m_add_latency(camera_id, dur_ms)
             self._m_inc(camera_id, "analyzed")
             return {frame_description: faces_in_frame}
+        return {}
 
     async def _handle_notification(
         self, camera_id: str, msg: str, batch: list[Path]

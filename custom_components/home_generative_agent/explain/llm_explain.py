@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from custom_components.home_generative_agent.core.utils import (
+from ..core.utils import (
     SENTINEL_ADMISSION_TIMEOUT_S,
     SentinelLLMDeferredError,
     extract_final,
@@ -19,7 +19,7 @@ from custom_components.home_generative_agent.core.utils import (
 from .prompts import SYSTEM_PROMPT, USER_PROMPT_TEMPLATE
 
 if TYPE_CHECKING:
-    from custom_components.home_generative_agent.sentinel.models import AnomalyFinding
+    from ..sentinel.models import AnomalyFinding
 
 LOGGER = logging.getLogger(__name__)
 MAX_EXPLANATION_CHARS = 220
