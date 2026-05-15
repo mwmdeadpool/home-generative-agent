@@ -111,6 +111,7 @@ OLLAMA_BOOL_HINT_TAGS = {
     "qwen3",
     "deepseek-v3.1",
     "magistral",
+    "gemma4",
 }
 
 # ---- Global options ----
@@ -356,7 +357,14 @@ STT_RESPONSE_FORMATS = ("text", "json", "verbose_json", "srt", "vtt")
 # ---------------- Chat model ----------------
 CHAT_MODEL_TOP_P = 1.0
 # *SUPPORTED are used as defaults and fallbacks for Ollama in the UI.
-CHAT_MODEL_OLLAMA_SUPPORTED = Literal["gpt-oss", "qwen2.5:32b", "qwen3.5:cloud", "qwen3:8b"]
+CHAT_MODEL_OLLAMA_SUPPORTED = Literal[
+    "gemma4:31b",
+    "gemma4:e4b",
+    "gpt-oss",
+    "qwen2.5:32b",
+    "qwen3.5:cloud",
+    "qwen3:8b",
+]
 CHAT_MODEL_OPENAI_SUPPORTED = Literal[
     "gpt-5", "gpt-5-mini", "gpt-5-nano", "gpt-4o", "gpt-4.1", "o4-mini"
 ]
@@ -372,7 +380,7 @@ PROVIDERS = Literal["openai", "openai_compatible", "ollama", "gemini", "anthropi
 RECOMMENDED_CHAT_MODEL_PROVIDER: PROVIDERS = "ollama"
 
 CONF_OLLAMA_CHAT_MODEL = "ollama_chat_model"
-RECOMMENDED_OLLAMA_CHAT_MODEL: CHAT_MODEL_OLLAMA_SUPPORTED = "gpt-oss"
+RECOMMENDED_OLLAMA_CHAT_MODEL: CHAT_MODEL_OLLAMA_SUPPORTED = "gemma4:31b"
 CONF_OLLAMA_CHAT_KEEPALIVE = "ollama_chat_keepalive"
 RECOMMENDED_OLLAMA_CHAT_KEEPALIVE: KeepAliveSeconds = 300
 CONF_OLLAMA_CHAT_CONTEXT_SIZE = "ollama_chat_context_size"
@@ -511,7 +519,12 @@ VLM_IMAGE_HEIGHT = 1080
 
 # ---------------- Summarization ----------------
 SUMMARIZATION_MODEL_TOP_P = 1.0
-SUMMARIZATION_MODEL_OLLAMA_SUPPORTED = Literal["qwen3:1.7b", "qwen3:8b"]
+SUMMARIZATION_MODEL_OLLAMA_SUPPORTED = Literal[
+    "gemma4:e4b",
+    "gemma4:31b",
+    "qwen3:1.7b",
+    "qwen3:8b",
+]
 SUMMARIZATION_MODEL_OPENAI_SUPPORTED = Literal["gpt-5-nano", "gpt-4.1", "gpt-4.1-nano"]
 SUMMARIZATION_MODEL_GEMINI_SUPPORTED = Literal[
     "gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite"
@@ -527,7 +540,7 @@ RECOMMENDED_SUMMARIZATION_MODEL_PROVIDER: Literal[
 
 CONF_OLLAMA_SUMMARIZATION_MODEL = "ollama_summarization_model"
 RECOMMENDED_OLLAMA_SUMMARIZATION_MODEL: SUMMARIZATION_MODEL_OLLAMA_SUPPORTED = (
-    "qwen3:8b"
+    "gemma4:e4b"
 )
 CONF_OLLAMA_SUMMARIZATION_KEEPALIVE = "ollama_summarization_keepalive"
 RECOMMENDED_OLLAMA_SUMMARIZATION_KEEPALIVE: KeepAliveSeconds = 300

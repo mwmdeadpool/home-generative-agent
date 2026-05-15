@@ -73,6 +73,7 @@ from ..const import (  # noqa: TID252
 )
 from ..core.conversation_helpers import _resolve_entity_id  # noqa: TID252
 from ..core.utils import extract_final, verify_pin  # noqa: TID252
+from .camera_activity import get_camera_last_events_from_states
 from .helpers import (
     ConfigurableData,
     maybe_fill_lock_entity,
@@ -283,7 +284,11 @@ async def _perform_alarm_control(
 
 async def _get_camera_image(hass: HomeAssistant, camera_name: str) -> bytes | None:
     """Get an image from a given camera."""
-    camera_entity_id: str = f"camera.{camera_name.lower()}"
+    # The model sometimes passes a full entity_id ("camera.front_door_bell")
+    # instead of a bare name ("front_door_bell"). Strip the leading domain so
+    # we don't end up looking up "camera.camera.front_door_bell".
+    bare_name = camera_name.lower().removeprefix("camera.")
+    camera_entity_id: str = f"camera.{bare_name}"
     state = hass.states.get(camera_entity_id)
     if state and state.state in (STATE_UNAVAILABLE, STATE_UNKNOWN):
         LOGGER.warning(
@@ -1254,7 +1259,18 @@ async def get_camera_last_events(  # noqa: D417
     if "configurable" not in config:
         return "Configuration not found. Please check your setup."
 
+    hass = config["configurable"]["hass"]
+    results = get_camera_last_events_from_states(hass, camera_entity_id)
 
+    if not results:
+        return "No camera last event data available."
+
+    return yaml.dump(
+        {"camera_last_events": results},
+        default_flow_style=False,
+        allow_unicode=True,
+        sort_keys=False,
+    )
 
 
 

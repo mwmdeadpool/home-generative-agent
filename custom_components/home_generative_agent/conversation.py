@@ -49,52 +49,19 @@ from .agent.rag_embedding_text import (
 )
 from .agent.tools import (
     add_automation,
-    add_days,
     alarm_control,
     confirm_sensitive_action,
-    current_time,
-    date_diff,
-    define,
-    example_usage,
-    find_nearby_places,
     get_and_analyze_camera_image,
     get_camera_last_events,
     get_entity_history,
-    get_post_details,
-    get_subreddit_posts,
-    get_user_profile,
-    get_wikipedia_page,
-    is_leap_year,
-    next_weekday,
-    plex_add_to_playlist,
-    plex_create_playlist,
-    plex_delete_playlist,
-    plex_get_movie_details,
-    plex_get_movie_genres,
-    plex_get_playlist_items,
-    plex_list_playlists,
-    plex_recent_movies,
-    plex_search_movies,
-    query_lightrag,
     resolve_entity_ids,
-    search_reddit,
-    search_wikipedia,
-    subtract_days,
-    synonyms,
-    time_since,
     upsert_memory,
-    week_number,
     write_yaml_file,
 )
 from .const import (
     CONF_CRITICAL_ACTION_PIN_ENABLED,
-    CONF_GOOGLE_PLACES_ENABLED,
-    CONF_LIGHTRAG_ENABLED,
-    CONF_PLEX_ENABLED,
     CONF_PROMPT,
-    CONF_REDDIT_ENABLED,
     CONF_SCHEMA_FIRST_YAML,
-    CONF_WIKIPEDIA_ENABLED,
     CRITICAL_ACTION_PROMPT,
     DOMAIN,
     LANGCHAIN_LOGGING_LEVEL,
@@ -795,49 +762,9 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             "alarm_control": alarm_control,
             "resolve_entity_ids": resolve_entity_ids,
             "write_yaml_file": write_yaml_file,
-            "current_time": current_time,
-            "time_since": time_since,
-            "add_days": add_days,
-            "subtract_days": subtract_days,
-            "date_diff": date_diff,
-            "next_weekday": next_weekday,
-            "is_leap_year": is_leap_year,
-            "week_number": week_number,
-            "define": define,
-            "example_usage": example_usage,
-            "synonyms": synonyms,
         }
         if not options.get(CONF_SCHEMA_FIRST_YAML, False):
             langchain_tools["add_automation"] = add_automation
-
-        # Conditionally add custom integration tools based on config
-        if options.get(CONF_GOOGLE_PLACES_ENABLED, False):
-            langchain_tools["find_nearby_places"] = find_nearby_places
-
-        if options.get(CONF_WIKIPEDIA_ENABLED, False):
-            langchain_tools["search_wikipedia"] = search_wikipedia
-            langchain_tools["get_wikipedia_page"] = get_wikipedia_page
-
-        if options.get(CONF_LIGHTRAG_ENABLED, False):
-            langchain_tools["query_lightrag"] = query_lightrag
-
-        if options.get(CONF_REDDIT_ENABLED, False):
-            langchain_tools["search_reddit"] = search_reddit
-            langchain_tools["get_subreddit_posts"] = get_subreddit_posts
-            langchain_tools["get_post_details"] = get_post_details
-            langchain_tools["get_user_profile"] = get_user_profile
-
-        if options.get(CONF_PLEX_ENABLED, False):
-            langchain_tools["plex_search_movies"] = plex_search_movies
-            langchain_tools["plex_get_movie_details"] = plex_get_movie_details
-            langchain_tools["plex_create_playlist"] = plex_create_playlist
-            langchain_tools["plex_list_playlists"] = plex_list_playlists
-            langchain_tools["plex_get_playlist_items"] = plex_get_playlist_items
-            langchain_tools["plex_delete_playlist"] = plex_delete_playlist
-            langchain_tools["plex_add_to_playlist"] = plex_add_to_playlist
-            langchain_tools["plex_recent_movies"] = plex_recent_movies
-            langchain_tools["plex_get_movie_genres"] = plex_get_movie_genres
-
         tools.extend(langchain_tools.values())
 
         return tools, langchain_tools
@@ -1048,17 +975,31 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             # If streaming ended without committing a final AssistantContent
             # (e.g. the generator raised before the last LLM turn), recover the
             # final AIMessage from the graph state so the caller can return it.
-            if not isinstance(
-                chat_log.content[-1] if chat_log.content else None,
-                conversation.AssistantContent,
-            ):
+            #
+            # Also treat an empty/whitespace-only AssistantContent as
+            # "streaming did not complete" — this happens when a tool failure
+            # mid-stream causes the synthetic-rejection path in
+            # _stream_langgraph_to_ha to emit, leaving chat_log.content[-1]
+            # as a blank AssistantContent. Without this, the user sees an
+            # empty bubble.
+            last = chat_log.content[-1] if chat_log.content else None
+            is_blank_assistant = (
+                isinstance(last, conversation.AssistantContent)
+                and not (last.content or "").strip()
+                and not last.tool_calls
+            )
+            if not isinstance(last, conversation.AssistantContent) or is_blank_assistant:
+                if is_blank_assistant:
+                    chat_log.content.pop()
                 messages = final_state.values.get("messages", [])
+                recovered = ""
                 if messages and isinstance(messages[-1], AIMessage):
-                    final_msg = messages[-1]
+                    recovered = _normalize_ai_content(messages[-1].content) or ""
+                if recovered.strip():
                     chat_log.async_add_assistant_content_without_tools(
                         conversation.AssistantContent(
                             agent_id=self.entity_id,
-                            content=_normalize_ai_content(final_msg.content),
+                            content=recovered,
                         )
                     )
                     _LOGGER.debug(
@@ -1067,8 +1008,10 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                     )
                 else:
                     # Graph state has no usable AI response (e.g. model timed out
-                    # before generating a reply). Emit a user-visible error message
-                    # so the chat UI shows something instead of a blank bubble.
+                    # before generating a reply, OR last AIMessage exists but has
+                    # empty content because the tool error short-circuited the
+                    # post-tool turn). Emit a user-visible error message so the
+                    # chat UI shows something instead of a blank bubble.
                     chat_log.async_add_assistant_content_without_tools(
                         conversation.AssistantContent(
                             agent_id=self.entity_id,
@@ -1355,48 +1298,11 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
             "alarm_control": alarm_control,
             "resolve_entity_ids": resolve_entity_ids,
             "write_yaml_file": write_yaml_file,
-            "current_time": current_time,
-            "time_since": time_since,
-            "add_days": add_days,
-            "subtract_days": subtract_days,
-            "date_diff": date_diff,
-            "next_weekday": next_weekday,
-            "is_leap_year": is_leap_year,
-            "week_number": week_number,
-            "define": define,
-            "example_usage": example_usage,
-            "synonyms": synonyms,
         }
         # Mirror the dispatch-time guard: add_automation is excluded when
         # schema_first_yaml=True so the index and langchain_tools stay in sync.
         if not self.entry.options.get(CONF_SCHEMA_FIRST_YAML, False):
             local_tools["add_automation"] = add_automation
-
-        # Conditionally add custom integration tools for indexing
-        options = self.entry.runtime_data.options
-        if options.get(CONF_GOOGLE_PLACES_ENABLED, False):
-            local_tools["find_nearby_places"] = find_nearby_places
-        if options.get(CONF_WIKIPEDIA_ENABLED, False):
-            local_tools["search_wikipedia"] = search_wikipedia
-            local_tools["get_wikipedia_page"] = get_wikipedia_page
-        if options.get(CONF_LIGHTRAG_ENABLED, False):
-            local_tools["query_lightrag"] = query_lightrag
-        if options.get(CONF_REDDIT_ENABLED, False):
-            local_tools["search_reddit"] = search_reddit
-            local_tools["get_subreddit_posts"] = get_subreddit_posts
-            local_tools["get_post_details"] = get_post_details
-            local_tools["get_user_profile"] = get_user_profile
-        if options.get(CONF_PLEX_ENABLED, False):
-            local_tools["plex_search_movies"] = plex_search_movies
-            local_tools["plex_get_movie_details"] = plex_get_movie_details
-            local_tools["plex_create_playlist"] = plex_create_playlist
-            local_tools["plex_list_playlists"] = plex_list_playlists
-            local_tools["plex_get_playlist_items"] = plex_get_playlist_items
-            local_tools["plex_delete_playlist"] = plex_delete_playlist
-            local_tools["plex_add_to_playlist"] = plex_add_to_playlist
-            local_tools["plex_recent_movies"] = plex_recent_movies
-            local_tools["plex_get_movie_genres"] = plex_get_movie_genres
-
         for t_name, t_func in local_tools.items():
             try:
                 # Extract the JSON schema for local tools.
