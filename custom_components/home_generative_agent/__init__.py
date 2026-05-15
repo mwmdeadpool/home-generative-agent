@@ -39,7 +39,24 @@ from homeassistant.helpers.target import (
     async_extract_referenced_entity_ids,
 )
 from homeassistant.util import dt as dt_util
+from homeassistant.util.ssl import SSL_ALPN_HTTP11, client_context
+from langchain_anthropic import ChatAnthropic
 from langchain_core.runnables import ConfigurableField
+
+# langchain_anthropic caches the sync httpx client with @lru_cache but omits it
+# for the async path, causing a repeated blocking SSL context creation inside the
+# HA event loop. Patch parity: cache the async function the same way.
+try:
+    import langchain_anthropic.chat_models as _lc_anthropic_chat
+
+    if not hasattr(_lc_anthropic_chat._get_default_async_httpx_client, "cache_info"):  # noqa: SLF001  # type: ignore[reportPrivateImportUsage]
+        from functools import lru_cache as _lru_cache
+
+        _lc_anthropic_chat._get_default_async_httpx_client = _lru_cache(  # noqa: SLF001  # type: ignore[reportPrivateImportUsage]
+            _lc_anthropic_chat._get_default_async_httpx_client  # noqa: SLF001  # type: ignore[reportPrivateImportUsage]
+        )
+except Exception:  # noqa: BLE001, S110
+    pass
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 from langchain_ollama import ChatOllama, OllamaEmbeddings
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
@@ -57,6 +74,10 @@ from .const import (
     CHAT_MODEL_MAX_TOKENS,
     CHAT_MODEL_REPEAT_PENALTY,
     CHAT_MODEL_TOP_P,
+    CONF_ANTHROPIC_API_KEY,
+    CONF_ANTHROPIC_CHAT_MODEL,
+    CONF_ANTHROPIC_SUMMARIZATION_MODEL,
+    CONF_ANTHROPIC_VLM,
     CONF_AUDIT_HOT_MAX_RECORDS,
     CONF_CHAT_MODEL_PROVIDER,
     CONF_CHAT_MODEL_TEMPERATURE,
@@ -133,6 +154,9 @@ from .const import (
     HGA_CARD_STATIC_PATH,
     HGA_CARD_STATIC_PATH_LEGACY,
     MODEL_CATEGORY_SPECS,
+    RECOMMENDED_ANTHROPIC_CHAT_MODEL,
+    RECOMMENDED_ANTHROPIC_SUMMARIZATION_MODEL,
+    RECOMMENDED_ANTHROPIC_VLM,
     RECOMMENDED_AUDIT_HOT_MAX_RECORDS,
     RECOMMENDED_CHAT_MODEL_PROVIDER,
     RECOMMENDED_CHAT_MODEL_TEMPERATURE,
@@ -213,6 +237,7 @@ from .core.subentry_resolver import (
     resolve_runtime_options,
 )
 from .core.utils import (
+    anthropic_healthy,
     configured_ollama_urls,
     dispatch_on_loop,
     ensure_http_url,
@@ -1060,6 +1085,11 @@ class NullStore:
         return
 
 
+def _ollama_httpx_client_kwargs() -> dict[str, Any]:
+    """Return httpx kwargs that avoid creating SSL contexts in the event loop."""
+    return {"verify": client_context(alpn_protocols=SSL_ALPN_HTTP11)}
+
+
 def _register_services(hass: HomeAssistant, entry: HGAConfigEntry) -> None:
     """Register integration services."""
 
@@ -1256,6 +1286,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     openai_secret = SecretStr(api_key) if api_key else None
     gemini_key = conf.get(CONF_GEMINI_API_KEY) or _provider_api_key(providers, "gemini")
     gemini_secret = SecretStr(gemini_key) if gemini_key else None
+    anthropic_key = conf.get(CONF_ANTHROPIC_API_KEY) or _provider_api_key(
+        providers, "anthropic"
+    )
+    anthropic_secret = SecretStr(anthropic_key) if anthropic_key else None
     openai_compatible_base_url = conf.get(
         CONF_OPENAI_COMPATIBLE_BASE_URL
     ) or _provider_setting(providers, "openai_compatible", "base_url")
@@ -1293,7 +1327,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         )
         ollama_health = dict(zip(ollama_urls, ollama_results, strict=False))
 
-    openai_ok, gemini_ok, openai_compatible_ok = await asyncio.gather(
+    openai_ok, gemini_ok, openai_compatible_ok, anthropic_ok = await asyncio.gather(
         openai_healthy(hass, api_key, timeout_s=health_timeout),
         gemini_healthy(hass, gemini_key, timeout_s=health_timeout),
         openai_compatible_healthy(
@@ -1302,6 +1336,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             openai_compatible_api_key,
             timeout_s=health_timeout,
         ),
+        anthropic_healthy(hass, anthropic_key, timeout_s=health_timeout),
     )
     ollama_any_ok = any(ollama_health.values())
 
@@ -1319,6 +1354,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                 timeout=120,
                 http_client=openai_http_client,
                 http_async_client=http_async_client,
+                streaming=True,
+                stream_usage=True,
             ).configurable_fields(
                 model_name=ConfigurableField(id="model_name"),
                 temperature=ConfigurableField(id="temperature"),
@@ -1328,16 +1365,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         except Exception:
             LOGGER.exception("OpenAI provider init failed; continuing without it.")
 
-    async def _build_ollama_provider(
+    def _build_ollama_provider(
         url: str,
     ) -> RunnableSerializable[LanguageModelInput, BaseMessage]:
-        # ChatOllama() constructs an httpx.Client which calls
-        # ssl.SSLContext.load_verify_locations on the certifi CA bundle —
-        # blocking filesystem I/O on the event loop. Build in an executor.
-        chat_ollama = await hass.async_add_executor_job(
-            partial(ChatOllama, model=RECOMMENDED_OLLAMA_CHAT_MODEL, base_url=url)
-        )
-        return chat_ollama.configurable_fields(
+        httpx_kwargs = _ollama_httpx_client_kwargs()
+        return ChatOllama(
+            model=RECOMMENDED_OLLAMA_CHAT_MODEL,
+            base_url=url,
+            sync_client_kwargs=httpx_kwargs,
+            async_client_kwargs=httpx_kwargs,
+        ).configurable_fields(
             model=ConfigurableField(id="model"),
             format=ConfigurableField(id="format"),
             temperature=ConfigurableField(id="temperature"),
@@ -1357,7 +1394,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         if not healthy:
             continue
         try:
-            ollama_providers[url] = await _build_ollama_provider(url)
+            ollama_providers[url] = _build_ollama_provider(url)
         except Exception:
             LOGGER.exception(
                 "Ollama provider init failed for %s; continuing without it.", url
@@ -1365,11 +1402,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
 
     gemini_provider: RunnableSerializable[LanguageModelInput, BaseMessage] | None = None
     if gemini_ok:
-        # Workaround for langchain_google_genai's converter dropping `items`
-        # on array-typed properties produced via voluptuous-openapi anyOf
-        # (HA's GetLiveContextTool `domain` field). Idempotent monkey-patch.
-        from .agent.gemini_compat import apply_gemini_tool_schema_fix
-        apply_gemini_tool_schema_fix()
         try:
             gemini_provider = ChatGoogleGenerativeAI(
                 google_api_key=gemini_secret,
@@ -1382,6 +1414,36 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             )
         except Exception:
             LOGGER.exception("Gemini provider init failed; continuing without it.")
+
+    anthropic_provider: RunnableSerializable[LanguageModelInput, BaseMessage] | None = (
+        None
+    )
+    if anthropic_ok:
+        try:
+            anthropic_provider = ChatAnthropic(  # type: ignore[call-arg]
+                anthropic_api_key=anthropic_secret,  # type: ignore[call-arg]
+                model=RECOMMENDED_ANTHROPIC_CHAT_MODEL,  # type: ignore[call-arg]
+                model_kwargs={"cache_control": {"type": "ephemeral"}},
+                streaming=True,
+            ).configurable_fields(
+                model=ConfigurableField(id="model"),
+                temperature=ConfigurableField(id="temperature"),
+            )
+            # Pre-warm the now-cached async httpx client in a thread so the first
+            # API call doesn't trigger a blocking SSL context load in the event loop.
+            _warm_fn = getattr(
+                globals().get("_lc_anthropic_chat"),
+                "_get_default_async_httpx_client",
+                None,
+            )
+            if callable(_warm_fn):
+                await hass.async_add_executor_job(
+                    partial(
+                        _warm_fn, base_url="https://api.anthropic.com", timeout=None
+                    )
+                )
+        except Exception:
+            LOGGER.exception("Anthropic provider init failed; continuing without it.")
 
     openai_compatible_provider: (
         RunnableSerializable[LanguageModelInput, BaseMessage] | None
@@ -1424,19 +1486,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     ollama_embeddings: OllamaEmbeddings | None = None
     if ollama_health.get(base_ollama_url):
         try:
-            # Same blocking-I/O issue as ChatOllama (3.12.8): the Ollama
-            # constructor builds an httpx.Client that loads the certifi CA
-            # bundle synchronously. Defer to the executor.
-            ollama_embeddings = await hass.async_add_executor_job(
-                partial(
-                    OllamaEmbeddings,
-                    model=options.get(
-                        CONF_OLLAMA_EMBEDDING_MODEL,
-                        RECOMMENDED_OLLAMA_EMBEDDING_MODEL,
-                    ),
-                    base_url=base_ollama_url,
-                    num_ctx=EMBEDDING_MODEL_CTX,
-                )
+            ollama_embeddings = OllamaEmbeddings(
+                model=options.get(
+                    CONF_OLLAMA_EMBEDDING_MODEL, RECOMMENDED_OLLAMA_EMBEDDING_MODEL
+                ),
+                base_url=base_ollama_url,
+                num_ctx=EMBEDDING_MODEL_CTX,
+                sync_client_kwargs=_ollama_httpx_client_kwargs(),
+                async_client_kwargs=_ollama_httpx_client_kwargs(),
             )
         except Exception:
             LOGGER.exception("Ollama embeddings init failed; continuing without them.")
@@ -1663,6 +1720,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                 }
             }
         )
+    elif chat_provider == "anthropic":
+        chat_model = (anthropic_provider or NullChat()).with_config(
+            config={
+                "configurable": {
+                    "model": options.get(
+                        CONF_ANTHROPIC_CHAT_MODEL, RECOMMENDED_ANTHROPIC_CHAT_MODEL
+                    ),
+                    "temperature": chat_temp,
+                }
+            }
+        )
     else:
         ollama_chat_model = options.get(
             CONF_OLLAMA_CHAT_MODEL, RECOMMENDED_OLLAMA_CHAT_MODEL
@@ -1716,6 +1784,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                     "model": options.get(CONF_GEMINI_VLM, RECOMMENDED_GEMINI_VLM),
                     "temperature": vlm_temp,
                     "top_p": VLM_TOP_P,
+                }
+            }
+        )
+    elif vlm_provider == "anthropic":
+        vision_model = (anthropic_provider or NullChat()).with_config(
+            config={
+                "configurable": {
+                    "model": options.get(CONF_ANTHROPIC_VLM, RECOMMENDED_ANTHROPIC_VLM),
+                    "temperature": vlm_temp,
                 }
             }
         )
@@ -1786,6 +1863,18 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
                     ),
                     "temperature": sum_temp,
                     "top_p": SUMMARIZATION_MODEL_TOP_P,
+                }
+            }
+        )
+    elif sum_provider == "anthropic":
+        summarization_model = (anthropic_provider or NullChat()).with_config(
+            config={
+                "configurable": {
+                    "model": options.get(
+                        CONF_ANTHROPIC_SUMMARIZATION_MODEL,
+                        RECOMMENDED_ANTHROPIC_SUMMARIZATION_MODEL,
+                    ),
+                    "temperature": sum_temp,
                 }
             }
         )
@@ -2036,7 +2125,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
     msg = (
         "Home Generative Agent initialized with the following models: "
         "chat=%s, vlm=%s, summarization=%s. embeddings=%s. "
-        "OpenAI ok=%s, Ollama ok=%s, Gemini ok=%s."
+        "OpenAI ok=%s, Ollama ok=%s, Gemini ok=%s, Anthropic ok=%s."
     )
     LOGGER.info(
         msg,
@@ -2047,6 +2136,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
         openai_ok,
         ollama_any_ok,
         gemini_ok,
+        anthropic_ok,
     )
 
     async def _handle_enroll_person(call: ServiceCall) -> None:

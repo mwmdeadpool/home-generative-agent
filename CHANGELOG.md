@@ -2,104 +2,166 @@
 
 All notable changes to this project will be documented in this file.
 
-## [3.12.11] - 2026-05-09
-
-### Fixed
-
-- **Recovery after mid-stream tool failure could still emit a blank bubble.**
-  3.12.10 added a recovery path that pulls the last AIMessage from graph
-  state when streaming dies. But when the model never produced a reply
-  (e.g. a tool error short-circuited the post-tool turn), that AIMessage
-  exists with empty `content` — and the recovery happily committed the
-  empty string. Reproduction: "Pause the TV" with a tool that fails
-  during the streaming response. Check the recovered content for non-blank
-  characters; if blank, fall through to the user-visible
-  "unable to respond in time" message.
-
-## [3.12.10] - 2026-05-09
-
-### Fixed
-
-- **`GetLiveContext` rejected by per-turn tool router** — for state-lookup
-  queries like "Is the front door locked?" the RAG retriever scored other
-  tools higher on keyword overlap and crowded out `GetLiveContext`. The
-  model still tried to call it but `_invoke_one` rejected any call outside
-  the per-turn routing_map, leaving the user with an empty answer. Add
-  `_get_always_available_provider_tools()` that force-injects
-  `GetLiveContext` (and any future entries in
-  `_ALWAYS_AVAILABLE_PROVIDER_TOOLS`) into the routing map every turn,
-  mirroring the existing pin-tools force-injection pattern.
-- **`_get_camera_image()` doubled the `camera.` prefix** — the model
-  sometimes passed a full entity_id (`camera.front_door_bell`) instead of
-  a bare name. The f-string blindly prepended another `camera.`, producing
-  `camera.camera.front_door_bell` and three failed capture attempts. Strip
-  the leading domain if present.
-- **Empty assistant bubble after mid-stream tool failure** — when a tool
-  errored mid-stream, `_stream_langgraph_to_ha` emitted synthetic
-  rejections and re-raised, leaving `chat_log.content[-1]` as a blank
-  AssistantContent. The recovery branch in `_async_run_astream` skipped
-  because the last entry IS an AssistantContent (just empty), and the user
-  saw an empty response. Treat blank/no-tool-calls AssistantContent as
-  "streaming did not complete," pop it, and let recovery emit either the
-  graph state's last AIMessage or the "unable to respond in time" fallback.
-
-## [3.12.9] - 2026-05-09
-
-### Fixed
-
-- **`OllamaEmbeddings()` constructor blocks the event loop** — same pattern
-  the 3.12.8 ChatOllama fix addressed, missed in the embeddings init path.
-  Defer construction to `hass.async_add_executor_job`.
-
-## [3.12.8] - 2026-05-09
-
-### Fixed
-
-- **Sentinel discovery loop crash on list-shaped LLM content** —
-  `discovery_engine._run_once()` called `json.loads()` on `result.content`
-  directly. Some providers return a `list[dict]` for content blocks instead
-  of `str`, raising `TypeError: the JSON object must be str, bytes or
-  bytearray, not list`. The exception escaped the JSONDecodeError handler
-  and propagated up through the discovery task; on integration unload it
-  prevented the loop from draining cleanly, wedging the entry into
-  `ConfigEntryState.FAILED_UNLOAD`. Route content through `extract_final()`
-  (which already handles both str and list shapes plus leaked `<think>`
-  reasoning) before `json.loads`.
-- **Gemini 400 on tools whose array properties lack `items`** —
-  `ChatGoogleGenerativeAI` rejected requests with
-  `properties[domain].items: missing field`. Root cause is a converter
-  incompatibility, not an HGA tool definition: HA's `GetLiveContextTool`
-  declares `domain` as `vol.Any(cv.string, [cv.string])`, voluptuous-openapi
-  emits `anyOf: [{type: string}, {type: array}]`, and
-  `langchain_google_genai._format_json_schema_to_gapic` produces a Gemini
-  `Schema` with `type=ARRAY` but no `items`. New `agent/gemini_compat.py`
-  applies a one-shot, idempotent monkey-patch that wraps the converter and
-  injects `items: {type: STRING}` into any array node missing them.
-  Patch is applied only when the Gemini provider is being built; no effect
-  on Ollama, OpenAI, or openai_compatible.
-- **`ChatOllama()` constructor blocks the event loop** — HA logged
-  `Detected blocking call to load_verify_locations ... by ChatOllama(...)`
-  on every integration setup. The constructor builds an `httpx.Client`
-  which loads the certifi CA bundle synchronously. Move construction into
-  `hass.async_add_executor_job`, matching the pattern already used for the
-  OpenAI provider's `httpx.Client`.
-
-## [3.12.7] - 2026-05-09
+## [3.14.4] - 2026-05-12
 
 ### Changed
 
-- **Default Ollama chat model: `gemma4:31b`** (was `gpt-oss`). Gemma 4 added
-  to `CHAT_MODEL_OLLAMA_SUPPORTED` so it appears in the UI dropdown alongside
-  the existing options (kept for back-compat).
-- **Default Ollama summarization model: `gemma4:e4b`** (was `qwen3:8b`).
-  Gemma 4 added to `SUMMARIZATION_MODEL_OLLAMA_SUPPORTED`.
-- **Reasoning hint: added `gemma4` to `OLLAMA_BOOL_HINT_TAGS`.** Gemma 4
-  reports `thinking` capability and defaults to thinking-on at the Ollama
-  layer, the same pattern that caused Sentinel timeouts on Qwen3-family
-  models. With this hint, `reasoning_field()` explicitly passes
-  `{"reasoning": False}` for Gemma 4 when reasoning is disabled, mirroring
-  the Qwen3 fix from 3.12.6.
-- VLM stays on `qwen3-vl:8b`. No Gemma 4 vision variant adopted yet.
+- **OpenAI and Anthropic providers now stream tokens natively** — Both providers are
+  constructed with `streaming=True`, so visible words appear in the chat window as
+  they are generated rather than arriving all at once at the end. OpenAI additionally
+  sets `stream_usage=True` so token-count telemetry is preserved in streamed responses
+  (without this flag the usage metadata would be empty). The existing non-streaming
+  fallback path remains active for Ollama, Gemini, and any provider that does not emit
+  token chunks. The `schema_first_yaml=True` dashboard-generation path is unaffected —
+  it invokes the model directly via `ainvoke` and was already independent of the
+  streaming flag.
+
+## [3.14.3] - 2026-05-11
+
+### Fixed
+
+- **Appliance duration alerts now name the actual appliance** — Notifications for
+  `appliance_power_duration` findings previously fell back to the generic phrase
+  "An appliance" because the LLM explanation lacked a display name. The rule now
+  includes `friendly_name` in finding evidence, and a new deterministic message
+  builder formats the mobile copy directly — e.g. `Washer drew about 296 W for
+  633 min, above the 60 min threshold. Check it.` — bypassing the LLM path
+  entirely for this finding type. Power-sensor suffixes (`Power`, `Energy`, etc.)
+  are stripped case-insensitively so user-set names like `EV Charger Power` render
+  as `EV Charger`. When no friendly name is present the entity ID is used as
+  fallback. The same formatter is reused for persistent notifications. Closes
+  [#391](https://github.com/goruck/home-generative-agent/issues/391).
+
+## [3.14.2] - 2026-05-11
+
+### Fixed
+
+- **Streaming silent for Anthropic and OpenAI** — Both providers default to
+  `streaming=False` in LangChain, so no `on_chat_model_stream` events fire and
+  the chat window stayed blank until the full response arrived. A new
+  `on_chat_model_end` fallback in `_stream_langgraph_to_ha` yields the complete
+  text for text-only responses when no streaming chunks were delivered in a turn.
+  Anthropic streaming chunks (type `text_delta`) are now also recognised by
+  `_normalize_ai_content`, so Anthropic works correctly in both streaming and
+  non-streaming modes.
+- **OpenAI 400 "object schema missing properties" on `confirm_sensitive_action`**
+  — Tool schema extraction was calling `args_schema.schema()`, which fails on
+  `InjectedStore` annotations and produced a bare `{"type": "object"}` without the
+  `properties` field that OpenAI requires. Schema extraction now uses
+  `tool_call_schema.model_json_schema()` (which correctly excludes injected
+  arguments) as the primary path, with a `properties: {}` safety net added to
+  `_format_and_dedupe_tools` for any schema that declares `type: object` but omits
+  `properties`.
+- **`get_entity_history` not retrieved for history questions** — The tool's RAG
+  embedding description was too terse to match natural-language queries like "how
+  many times was the front door opened". The description was rewritten to enumerate
+  concrete use-cases (open/close counts, on-durations, motion trigger times, run
+  frequency) so cosine similarity retrieval picks it up reliably.
+- **Blocking `ssl.load_verify_locations` in the HA event loop** — `langchain_anthropic`
+  lazily constructs an async `httpx` client (and triggers SSL context loading) on
+  every call to `_get_default_async_httpx_client`. The function is now patched at
+  import time with `lru_cache` so the client is created once; the first call is
+  pre-warmed in a thread-pool executor after provider initialisation so SSL I/O
+  never blocks the HA event loop.
+
+## [3.14.1] - 2026-05-10
+
+### Fixed
+
+- **Anthropic API rejects tools with missing `input_schema.type`** — Tools whose
+  parameters schema had no top-level `type` field (e.g. tools with no parameters,
+  returning `{}`) caused a `400 invalid_request_error` from the Anthropic API on
+  every chat query. `_format_and_dedupe_tools` now injects `"type": "object"` when
+  the field is absent, and replaces non-dict parameter values (null, array) with
+  `{"type": "object"}` to prevent a downstream `AttributeError`.
+
+## [3.14.0] - 2026-05-10
+
+### Added
+
+- **Video analyzer caption deduplication** — The video analyzer now suppresses
+  repeated low-value camera notifications within a configurable window
+  (`VIDEO_ANALYZER_CAPTION_DEDUPE_WINDOW_SEC`, default 30 minutes). A new
+  `CaptionNoveltyDecision` result type carries the suppression reason and match
+  details, enabling structured debug logging and future metadata storage.
+
+### Fixed
+
+- **Caption novelty used weakest vector match** — `_is_anomaly` treated any
+  single below-threshold result as novel, even when the best matching caption was
+  highly similar. Replaced with a best-score check so only the closest stored
+  caption governs the suppress/notify decision. Renamed to `_is_caption_novel`
+  to match the new semantics.
+- **Generic "animal" subject not recognized** — Captions describing "a dark
+  animal stands on the path" were incorrectly suppressed against days-old matches
+  because `animal` was absent from the subject-term list. Added `animal` to
+  `_SUBJECT_RE` so generic animal descriptions trigger the stale-match re-notify
+  path alongside `cat`, `dog`, `deer`, and other named species.
+- **Dead regex stems in action detector** — Partial stems `arriv`, `leav`,
+  `driv`, and `mov` in `_ACTION_RE` could never match at a word boundary.
+  Replaced with the correct infinitive forms: `arrive`, `leave`, `drive`, `move`.
+
+## [3.13.1] - 2026-05-05
+
+### Fixed
+
+- **Home Assistant blocking I/O during model setup** — Ollama chat and embeddings
+  clients now use Home Assistant's SSL context helper, and tool binding is moved
+  into the executor path. This avoids blocking `httpx` client setup work on the
+  event loop during integration setup and model calls.
+- **Video analyzer face API client ownership** — The video analyzer now uses Home
+  Assistant's shared async `httpx` client for face API calls and passes the face
+  timeout per request, avoiding direct async client construction and shutdown in
+  the integration.
+- **Sentinel log noise** — Repeated Sentinel operational failures are now rate
+  limited with recovery messages, and routine cycle/debug logs were removed from
+  the hot path. Discovery, triage, suppression, execution, and trigger handling
+  should be quieter while still surfacing first failures and repeated issues.
+- **Sentinel LLM calls off the event loop** — Sentinel model calls now prefer the
+  synchronous `invoke` path in a worker thread when available, preserving
+  admission/defer semantics while reducing event-loop pressure.
+- **Video analyzer priority typecheck coverage** — Tests were tightened around
+  `NullChat`, Ollama server logging, and nested mock accessors so priority-path
+  coverage remains compatible with Pyright.
+
+## [3.13.0] - 2026-05-03
+
+### Added
+
+- **Anthropic Claude provider** — You can now select Anthropic Claude models
+  (claude-opus-4-5, claude-sonnet-4-5, claude-haiku-4-5, and their successors)
+  as the chat, vision (VLM), and summarization provider. Configure by adding an
+  Anthropic model-provider subentry and entering your API key. Prompt caching is
+  enabled automatically via `cache_control: ephemeral`, reducing latency and cost
+  on repeated conversation turns.
+- **Anthropic API key validation** — The config flow validates the API key against
+  `https://api.anthropic.com/v1/models` before saving, with distinct errors for
+  authentication failures and connectivity issues.
+- **`extract_final` list-content support** — `extract_final()` now accepts
+  Anthropic's multi-block content format (`list[{"type":"text","text":"..."}]`) in
+  addition to plain strings. This fixes triage, discovery, and explain responses
+  when Anthropic returns structured content blocks.
+
+### Fixed
+
+- **Sentinel triage with Anthropic provider** — `_parse_response` used `str(content)`
+  which produced a Python dict repr when Anthropic returned multi-block content,
+  causing every alert to bypass triage (fail-open to notify). Fixed to use
+  `extract_final(content)`.
+- **LLM explain with Anthropic provider** — `extract_final(str(content))` → 
+  `extract_final(content)` so list-format Anthropic responses are rendered
+  correctly in push notifications instead of showing raw dict repr.
+- **Discovery engine with Anthropic provider** — `json.loads(content)` raised
+  `TypeError` (not caught by the bare `json.JSONDecodeError` handler) when
+  Anthropic returned a list. Fixed to use `extract_final(content)` before parsing
+  and added `TypeError` to the handler.
+- **Config flow `else` branch hardened** — The Anthropic API-key schema builder
+  used a bare `else:` that would silently present the Anthropic form for any
+  future unknown provider. Changed to explicit `elif provider_type == "anthropic":`
+  with a fallback empty schema.
+- **Config flow: API key stored on validation failure** — `settings["api_key"]`
+  was assigned even when `validate_anthropic_key` raised an exception. Moved
+  inside the success path.
 
 ## [3.12.6] - 2026-05-03
 
@@ -272,6 +334,7 @@ DROP TABLE IF EXISTS vector_migrations;
 ```
 
 The tables are recreated automatically on the next startup.
+
 
 ## [3.12.0] - 2026-04-21
 

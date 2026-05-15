@@ -21,8 +21,13 @@ from custom_components.home_generative_agent.const import (
 )
 from custom_components.home_generative_agent.sentinel.models import AnomalyFinding
 from custom_components.home_generative_agent.sentinel.notifier import (
+    MAX_MOBILE_MESSAGE_CHARS,
     SentinelNotifier,
+    _alarm_disarmed_mobile_message,
+    _appliance_power_duration_mobile_message,
+    _build_actions,
     _friendly_type,
+    _mobile_message,
     _redact_if_sensitive,
 )
 from custom_components.home_generative_agent.sentinel.suppression import (
@@ -959,6 +964,114 @@ def test_friendly_type_strips_rule_number_prefix() -> None:
     assert _friendly_type("rule_custom_check") == "Rule custom check"
 
 
+def test_friendly_type_alarm_disarmed_external_threat() -> None:
+    """alarm_disarmed_during_external_threat gets a clean user-facing label."""
+    assert (
+        _friendly_type("alarm_disarmed_during_external_threat")
+        == "Outdoor activity while alarm disarmed"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 15. alarm_disarmed_during_external_threat — deterministic mobile copy
+# ---------------------------------------------------------------------------
+
+
+def _alarm_finding(
+    anomaly_id: str = "adt1",
+    evidence: dict[str, Any] | None = None,
+) -> AnomalyFinding:
+    return AnomalyFinding(
+        anomaly_id=anomaly_id,
+        type="alarm_disarmed_during_external_threat",
+        severity="low",
+        confidence=0.9,
+        triggering_entities=["alarm_control_panel.home_alarm", "camera.front_door"],
+        evidence=evidence or {},
+        suggested_actions=["arm_alarm"],
+        is_sensitive=False,
+    )
+
+
+def test_build_actions_arm_alarm_label() -> None:
+    """suggested_actions containing arm_alarm should yield 'Arm Alarm', not 'Execute'."""
+    finding = _alarm_finding()
+    actions = _build_actions(finding)
+    primary = actions[0]
+    assert primary["title"] == "Arm Alarm"
+    assert "execute_adt1" in primary["action"]
+
+
+def test_build_actions_execute_label_for_other_actions() -> None:
+    """Findings with other suggested_actions keep the generic 'Execute' label."""
+    finding = _finding(ftype="camera_entry_unsecured", anomaly_id="xyz")
+    # _finding sets suggested_actions=["close_entry"]
+    actions = _build_actions(finding)
+    assert actions[0]["title"] == "Execute"
+
+
+def test_alarm_disarmed_mobile_message_full_evidence() -> None:
+    """Full evidence produces a camera-name + age + alarm-time message."""
+    ev: dict[str, Any] = {
+        "camera_friendly_name": "Front Door",
+        "camera_entity_id": "camera.front_door",
+        "camera_activity_age_minutes": 3.0,
+        "alarm_last_changed": "2025-01-01T18:14:00+00:00",
+    }
+    msg = _alarm_disarmed_mobile_message(_alarm_finding(evidence=ev))
+    assert "Front Door" in msg
+    assert "3 min ago" in msg
+    assert "disarmed since" in msg
+    assert len(msg) <= MAX_MOBILE_MESSAGE_CHARS
+
+
+def test_alarm_disarmed_mobile_message_missing_timestamps() -> None:
+    """Missing timestamps fall back to 'reported' verb and 'currently disarmed'."""
+    ev: dict[str, Any] = {
+        "camera_friendly_name": "Front Door",
+        "camera_entity_id": "camera.front_door",
+        "camera_activity_age_minutes": None,
+        "alarm_last_changed": None,
+    }
+    msg = _alarm_disarmed_mobile_message(_alarm_finding(evidence=ev))
+    assert "Front Door" in msg
+    assert "reported" in msg
+    assert "currently disarmed" in msg
+    assert "recently" not in msg
+    assert len(msg) <= MAX_MOBILE_MESSAGE_CHARS
+
+
+def test_alarm_disarmed_mobile_message_no_camera_name() -> None:
+    """Missing camera name falls back to 'A camera'."""
+    ev: dict[str, Any] = {
+        "camera_friendly_name": None,
+        "camera_entity_id": None,
+        "camera_activity_age_minutes": 7.0,
+        "alarm_last_changed": None,
+    }
+    msg = _alarm_disarmed_mobile_message(_alarm_finding(evidence=ev))
+    assert msg.startswith("A camera")
+    assert "7 min ago" in msg
+    assert len(msg) <= MAX_MOBILE_MESSAGE_CHARS
+
+
+def test_alarm_disarmed_mobile_message_no_llm_fallback() -> None:
+    """Deterministic builder is used even when an LLM explanation is available."""
+    finding = _alarm_finding(
+        evidence={
+            "camera_friendly_name": "Backyard",
+            "camera_activity_age_minutes": 2.0,
+            "alarm_last_changed": None,
+        }
+    )
+    llm_explanation = (
+        "The home alarm was recently disarmed while someone is still inside."
+    )
+    msg = _mobile_message(llm_explanation, finding)
+    assert "someone is still inside" not in msg
+    assert "Backyard" in msg
+
+
 # ---------------------------------------------------------------------------
 # 14. Appliance completion subtitle
 # ---------------------------------------------------------------------------
@@ -1011,6 +1124,103 @@ async def test_async_notify_non_completion_subtitle_uses_friendly_type() -> None
     subtitle = hass.services.calls[0]["data"]["data"]["subtitle"]
     # "candidate_" stripped → "Appliance power spike away"
     assert subtitle == "Appliance power spike away"
+
+
+# ---------------------------------------------------------------------------
+# 15. Appliance power duration deterministic message
+# ---------------------------------------------------------------------------
+
+
+def _appliance_finding(
+    anomaly_id: str = "apd1",
+    evidence: dict[str, Any] | None = None,
+) -> AnomalyFinding:
+    return AnomalyFinding(
+        anomaly_id=anomaly_id,
+        type="appliance_power_duration",
+        severity="medium",
+        confidence=0.6,
+        triggering_entities=["sensor.washer_power"],
+        evidence=evidence
+        or {
+            "entity_id": "sensor.washer_power",
+            "area": "Laundry",
+            "power_w": 296.0,
+            "duration_min": 633,
+            "threshold_min": 60,
+            "friendly_name": "Washer Power",
+        },
+        suggested_actions=["check_appliance"],
+        is_sensitive=False,
+    )
+
+
+def test_appliance_power_duration_strips_power_suffix() -> None:
+    """'Washer Power' friendly_name should render as 'Washer' in the message."""
+    msg = _appliance_power_duration_mobile_message(_appliance_finding())
+    assert msg.startswith("Washer ")
+    assert "Power" not in msg.split()[0]
+    assert "296" in msg
+    assert "633 min" in msg
+    assert "60 min" in msg
+    assert len(msg) <= MAX_MOBILE_MESSAGE_CHARS
+
+
+def test_appliance_power_duration_preserves_casing() -> None:
+    """User-authored casing (e.g. 'EV Charger') must not be title-cased away."""
+    ev: dict[str, Any] = {
+        "entity_id": "sensor.ev_charger_power",
+        "area": "Garage",
+        "power_w": 7200.0,
+        "duration_min": 120,
+        "threshold_min": 60,
+        "friendly_name": "EV Charger Power",
+    }
+    msg = _appliance_power_duration_mobile_message(_appliance_finding(evidence=ev))
+    assert msg.startswith("EV Charger ")
+
+
+def test_appliance_power_duration_lowercase_friendly_name() -> None:
+    """Lowercase friendly_name suffix should still be stripped correctly."""
+    ev: dict[str, Any] = {
+        "entity_id": "sensor.washer_power",
+        "area": "Laundry",
+        "power_w": 250.0,
+        "duration_min": 90,
+        "threshold_min": 60,
+        "friendly_name": "washer power",
+    }
+    msg = _appliance_power_duration_mobile_message(_appliance_finding(evidence=ev))
+    assert msg.startswith("washer ")
+    assert "power" not in msg.split()[0].lower() or msg.startswith("washer ")
+
+
+def test_appliance_power_duration_fallback_to_entity_id() -> None:
+    """None and empty-string friendly_name both fall back to the entity ID display name."""
+    for name_val in (None, ""):
+        ev: dict[str, Any] = {
+            "entity_id": "sensor.washer_power",
+            "area": "Laundry",
+            "power_w": 250.0,
+            "duration_min": 90,
+            "threshold_min": 60,
+            "friendly_name": name_val,
+        }
+        msg = _appliance_power_duration_mobile_message(_appliance_finding(evidence=ev))
+        assert msg.startswith("Washer drew ")
+        assert len(msg) <= MAX_MOBILE_MESSAGE_CHARS
+
+
+def test_appliance_power_duration_mobile_message_wins_over_llm() -> None:
+    """Deterministic copy is used even when the LLM explanation mentions 'An appliance'."""
+    finding = _appliance_finding()
+    llm_explanation = (
+        "An appliance in Laundry recently drew about 296 W for 633 minutes,"
+        " exceeding the 60-minute threshold. Check the appliance."
+    )
+    msg = _mobile_message(llm_explanation, finding)
+    assert msg.startswith("Washer ")
+    assert "An appliance" not in msg
 
 
 # ---------------------------------------------------------------------------

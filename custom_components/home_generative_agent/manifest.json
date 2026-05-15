@@ -13,15 +13,14 @@
     "conversation",
     "recorder"
   ],
-  "documentation": "https://github.com/goruck/home_generative_agent",
+  "documentation": "https://github.com/goruck/home-generative-agent",
   "integration_type": "service",
   "iot_class": "cloud_polling",
-  "issue_tracker": "https://github.com/goruck/home_generative_agent/issues",
+  "issue_tracker": "https://github.com/goruck/home-generative-agent/issues",
   "requirements": [
     "aiofiles==25.1.0",
-    "dateparser==1.4.0",
     "langchain==1.2.12",
-    "langchain-core==1.2.19",
+    "langchain-core==1.3.2",
     "langchain-openai==1.0.3",
     "langchain-ollama==0.3.10",
     "langgraph==1.1.2",
@@ -32,7 +31,8 @@
     "psycopg-binary==3.3.3",
     "psycopg-pool==3.3.0",
     "transformers==4.57.1",
-    "langchain-google-genai==3.1.0"
+    "langchain-google-genai==3.1.0",
+    "langchain-anthropic==1.4.3"
   ],
-  "version": "3.12.11"
+  "version": "3.14.5"
 }

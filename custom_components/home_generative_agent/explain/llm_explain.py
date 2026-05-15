@@ -9,17 +9,17 @@ from typing import TYPE_CHECKING, Any, Final
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from custom_components.home_generative_agent.core.utils import (
+from ..core.utils import (
     SENTINEL_ADMISSION_TIMEOUT_S,
     SentinelLLMDeferredError,
     extract_final,
-    run_sentinel_llm_call,
+    run_sentinel_model_call,
 )
 
 from .prompts import SYSTEM_PROMPT, USER_PROMPT_TEMPLATE
 
 if TYPE_CHECKING:
-    from custom_components.home_generative_agent.sentinel.models import AnomalyFinding
+    from ..sentinel.models import AnomalyFinding
 
 LOGGER = logging.getLogger(__name__)
 MAX_EXPLANATION_CHARS = 220
@@ -55,8 +55,9 @@ class LLMExplainer:
         messages = [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=prompt)]
 
         try:
-            result = await run_sentinel_llm_call(
-                lambda: self._model.ainvoke(messages),
+            result = await run_sentinel_model_call(
+                self._model,
+                messages,
                 deployment=self._deployment,
                 category="explain",
                 admission_timeout_s=SENTINEL_ADMISSION_TIMEOUT_S,
@@ -79,7 +80,7 @@ class LLMExplainer:
         content = getattr(result, "content", None)
         if not content:
             return None
-        text = extract_final(str(content)).replace("**", "").replace("`", "")
+        text = extract_final(content).replace("**", "").replace("`", "")
         if not text:
             return _compact_fallback(finding)
         if len(text) > MAX_EXPLANATION_CHARS:
@@ -96,6 +97,9 @@ def _friendly_type(anomaly_type: str) -> str:
         "open_any_window_at_night_while_away": "Window open at night",
         "unlocked_lock_at_night": "Door lock left unlocked",
         "camera_entry_unsecured": "Activity near unsecured entry",
+        "alarm_disarmed_during_external_threat": (
+            "Outdoor activity while alarm disarmed"
+        ),
     }
     if anomaly_type in known:
         return known[anomaly_type]

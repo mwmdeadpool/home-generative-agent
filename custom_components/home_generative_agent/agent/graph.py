@@ -42,6 +42,7 @@ from pydantic import PydanticInvalidForJsonSchema, ValidationError
 
 from custom_components.home_generative_agent.const import (
     ACTUATION_KEYWORDS_REGEX,
+    CONF_ANTHROPIC_CHAT_MODEL,
     CONF_CHAT_MODEL_PROVIDER,
     CONF_CRITICAL_ACTION_PIN_ENABLED,
     CONF_CRITICAL_ACTION_PIN_HASH,
@@ -62,6 +63,7 @@ from custom_components.home_generative_agent.const import (
     SUMMARIZATION_PROMPT_TEMPLATE,
     SUMMARIZATION_SYSTEM_PROMPT,
     TOOL_CALL_ERROR_TEMPLATE,
+    sanitize_for_prompt,
     TOOL_CALL_TRANSIENT_ERROR_TEMPLATE,
 )
 
@@ -123,6 +125,8 @@ def _determine_model_name(provider: str, opts: dict[str, Any]) -> str:
         return opts.get(CONF_OPENAI_COMPATIBLE_CHAT_MODEL, "")
     if provider == "gemini":
         return opts.get(CONF_GEMINI_CHAT_MODEL, "")
+    if provider == "anthropic":
+        return opts.get(CONF_ANTHROPIC_CHAT_MODEL, "")
     return opts.get(CONF_OLLAMA_CHAT_MODEL, "")
 
 
@@ -563,7 +567,8 @@ def _parse_open_entries_from_live_context(raw: str) -> list[str]:
             continue
 
     if current_name and is_on and is_opening:
-        open_entries.append(current_name)
+        # Sanitize to prevent prompt injection via entity names
+        open_entries.append(sanitize_for_prompt(current_name))
     return open_entries
 
 
@@ -588,7 +593,8 @@ async def _find_open_entries(
         if str(state_obj.state).lower() not in {"on", "open", "opening"}:
             continue
         friendly = state_obj.attributes.get("friendly_name") or entity_id
-        open_entries.append(str(friendly))
+        # Sanitize to prevent prompt injection via entity names
+        open_entries.append(sanitize_for_prompt(str(friendly)))
     return open_entries
 
 
@@ -685,8 +691,8 @@ async def _get_rag_retrieved_tools(
             api_id = item.value.get("api_id")
             if api_id not in allowed_api_ids:
                 continue
-            # score is (1 - distance) for pgvector cosine
-            score = getattr(item, "score", 0.0)
+            # score is (1 - distance) for pgvector cosine; None when no embedding
+            score = getattr(item, "score", None) or 0.0
             if score >= threshold and (name not in best or score > best[name][0]):
                 best[name] = (score, item)
 
@@ -761,7 +767,7 @@ async def _get_actuation_safety_tools(
 
     # Sort by relevance score descending so the merge can cap to the top-N.
     sorted_results = sorted(
-        results, key=lambda i: getattr(i, "score", 0.0), reverse=True
+        results, key=lambda i: getattr(i, "score", None) or 0.0, reverse=True
     )
     safety_tools: list[RawTool] = []
     for item in sorted_results:
@@ -849,13 +855,21 @@ def _format_and_dedupe_tools(
             continue
 
         routing_map[name] = tool["api_id"]
+        parameters = json.loads(tool["parameters"])
+        if not isinstance(parameters, dict):
+            parameters = {"type": "object", "properties": {}}
+        elif not parameters.get("type"):
+            parameters["type"] = "object"
+        # OpenAI requires 'properties' on all type:object schemas.
+        if parameters.get("type") == "object" and "properties" not in parameters:
+            parameters["properties"] = {}
         selected_tools.append(
             {
                 "type": "function",
                 "function": {
                     "name": name,
                     "description": tool["description"],
-                    "parameters": json.loads(tool["parameters"]),
+                    "parameters": parameters,
                 },
             }
         )
@@ -944,49 +958,6 @@ def _has_pending_pin_confirmation(messages: Sequence[AnyMessage]) -> bool:
     return False
 
 
-# HA-provided info tools that should always be available to the model — even
-# when RAG retrieval scores them low for a given query. These are state-lookup
-# tools the model needs reflexively (e.g. "is the door locked?") but whose
-# generic descriptions lose against keyword-matching action tools.
-_ALWAYS_AVAILABLE_PROVIDER_TOOLS: tuple[str, ...] = ("GetLiveContext",)
-
-
-async def _get_always_available_provider_tools(
-    store: BaseStore | None,
-    allowed_api_ids: list[str],
-) -> list[RawTool]:
-    """Force-inject a small set of state-lookup tools the model needs reflexively.
-
-    Without this, the RAG retriever can starve out tools like GetLiveContext
-    when an actuation-shaped query happens to keyword-match other tools more
-    strongly. Mirrors the pin_tools force-injection pattern.
-    """
-    if store is None or not allowed_api_ids:
-        return []
-
-    out: list[RawTool] = []
-    for tool_name in _ALWAYS_AVAILABLE_PROVIDER_TOOLS:
-        for api_id in allowed_api_ids:
-            try:
-                item = await store.aget(("system", "tools"), key=f"{api_id}::{tool_name}")
-            except Exception:  # noqa: BLE001
-                continue
-            if item is None:
-                continue
-            val = item.value
-            out.append(
-                RawTool(
-                    name=val["name"],
-                    api_id=val["api_id"],
-                    description=val["description"],
-                    parameters=val["parameters"],
-                    is_actuation=val.get("is_actuation", False),
-                )
-            )
-            break  # first hit across api_ids is enough
-    return out
-
-
 async def _get_pending_pin_tools(
     messages: list[AnyMessage],
     store: BaseStore | None,
@@ -1043,11 +1014,10 @@ async def _retrieve_tools(
     limit = int(opts.get(CONF_TOOL_RETRIEVAL_LIMIT, 5))
 
     # 1. Gather candidates
-    rag_tools, safety_tools, pin_tools, always_tools = await asyncio.gather(
+    rag_tools, safety_tools, pin_tools = await asyncio.gather(
         _get_rag_retrieved_tools(store, config, query, allowed_api_ids),
         _get_actuation_safety_tools(store, config, query, allowed_api_ids),
         _get_pending_pin_tools(state["messages"], store),
-        _get_always_available_provider_tools(store, allowed_api_ids),
     )
 
     # 2. Merge: safety tools take priority; RAG fills remaining slots.
@@ -1061,22 +1031,19 @@ async def _retrieve_tools(
     # the per-sub-query RAG budget, but is capped at safety_cap + limit to avoid
     # unbounded growth.
     #
-    # pin_tools and always_tools are force-injected outside the limit —
-    # they must always be present (PIN confirmations, GetLiveContext-style
-    # info lookups) regardless of RAG scores.
+    # pin_tools are force-injected outside the limit — they must always be present
+    # when a PIN confirmation is pending, regardless of RAG scores.
     pin_names = {t["name"] for t in pin_tools}
-    always_names = {t["name"] for t in always_tools}
-    forced_names = pin_names | always_names
     safety_cap = min(len(safety_tools), max(1, limit * 3 // 4))
-    safety_capped = [t for t in safety_tools[:safety_cap] if t["name"] not in forced_names]
+    safety_capped = [t for t in safety_tools[:safety_cap] if t["name"] not in pin_names]
     safety_names = {t["name"] for t in safety_capped}
     rag_only = [
         t
         for t in rag_tools
-        if t["name"] not in safety_names and t["name"] not in forced_names
+        if t["name"] not in safety_names and t["name"] not in pin_names
     ]
     effective_limit = min(safety_cap + len(rag_only), safety_cap + limit)
-    all_candidates = pin_tools + always_tools + (safety_capped + rag_only)[:effective_limit]
+    all_candidates = pin_tools + (safety_capped + rag_only)[:effective_limit]
 
     # 3. Fallback: vector store unavailable or index not yet ready.
     # Still apply the limit so the user-configured cap is always respected.
@@ -1100,15 +1067,13 @@ async def _retrieve_tools(
     selected_tools, routing_map = _format_and_dedupe_tools(all_candidates)
 
     LOGGER.debug(
-        "Tool retrieval: limit=%d eff=%d rag=%d safety=%d/%d pin=%d always=%d "
-        "merged=%d tools=%s",
+        "Tool retrieval: limit=%d eff=%d rag=%d safety=%d/%d pin=%d merged=%d tools=%s",
         limit,
         effective_limit,
         len(rag_tools),
         safety_cap,
         len(safety_tools),
         len(pin_tools),
-        len(always_tools),
         len(all_candidates),
         [t["function"]["name"] for t in selected_tools],
     )
@@ -1126,7 +1091,7 @@ async def _trim_messages_for_model(
     hass: HomeAssistant,
 ) -> list[AnyMessage]:
     """Trim messages to manage context window length."""
-    _known_providers = {"openai", "openai_compatible", "gemini", "ollama"}
+    _known_providers = {"openai", "openai_compatible", "gemini", "ollama", "anthropic"}
     provider_raw = opts.get(CONF_CHAT_MODEL_PROVIDER)
     provider = str(provider_raw) if provider_raw else "openai"
     if provider not in _known_providers:
@@ -1206,6 +1171,40 @@ async def _invoke_model(
     except Exception as err:
         msg = f"Model invocation failed: {err}"
         raise HomeAssistantError(msg) from err
+    raise HomeAssistantError("Model invocation failed unexpectedly.")
+
+
+def _bind_model_tools(
+    model: Any, selected_tools: list[Any], *, disable_reasoning: bool
+) -> Any:
+    """Bind tools to a model in a worker thread."""
+    if disable_reasoning:
+        model = model.with_config(config={"configurable": {"reasoning": False}})
+    return model.bind_tools(selected_tools)
+
+
+async def _search_memories(store: BaseStore, user_id: str, query: str | None) -> list:
+    """Search the memory store, falling back gracefully on embedding errors."""
+    try:
+        return await store.asearch((user_id, "memories"), query=query, limit=10)
+    except AttributeError:
+        # Some OpenAI-compatible servers (e.g. llama-server) return a raw JSON
+        # list from /v1/embeddings instead of {"data": [...]}, which causes the
+        # OpenAI SDK parser to raise AttributeError.  Fall back to recency search.
+        LOGGER.warning(
+            "Memory semantic search failed — embedding endpoint returned an "
+            "incompatible response (not OpenAI-standard). Falling back to "
+            "recency-based memory retrieval. Check the /v1/embeddings response "
+            "format of your OpenAI-compatible server."
+        )
+        try:
+            return await store.asearch((user_id, "memories"), limit=10)
+        except Exception:
+            LOGGER.exception("Memory recency search also failed; no memories injected")
+            return []
+    except Exception:
+        LOGGER.exception("Unexpected memory store search failure; no memories injected")
+        return []
 
 
 async def _call_model(
@@ -1232,7 +1231,7 @@ async def _call_model(
             query=last_message.content
         )
 
-    mems = await store.asearch((user_id, "memories"), query=query_prompt, limit=10)
+    mems = await _search_memories(store, user_id, query_prompt)
 
     # Recent camera activity.
     camera_activity = await get_recent_camera_activity(hass, store)
@@ -1257,9 +1256,14 @@ async def _call_model(
         # Disable reasoning/thinking before binding tools: Qwen3's <think> tokens
         # interleave with tool call JSON output and break Ollama's qwen3.go parser
         # (ResponseError: "invalid character 'g' looking for beginning of value").
-        if chat_model_options.get("reasoning"):
-            model = model.with_config(config={"configurable": {"reasoning": False}})
-        model = model.bind_tools(selected_tools)
+        model = await hass.async_add_executor_job(
+            partial(
+                _bind_model_tools,
+                model,
+                selected_tools,
+                disable_reasoning=bool(chat_model_options.get("reasoning")),
+            )
+        )
 
     # Pass routing map to MultiLLMAPI
     routing_map = state.get("tool_routing_map", {})
@@ -1270,7 +1274,8 @@ async def _call_model(
     raw_response = await _invoke_model(model, trimmed_messages, config)
     LOGGER.debug("Raw chat model response: %s", raw_response)
 
-    response = extract_final(getattr(raw_response, "content", "") or "")
+    content = getattr(raw_response, "content", "") or ""
+    response = extract_final(content)
 
     tool_calls = getattr(raw_response, "tool_calls", []) or []
 
@@ -1340,7 +1345,9 @@ async def _summarize_and_remove_messages(
     raw_response = await _invoke_model(model, messages, {})
     LOGGER.debug("Raw summary response: %s", raw_response)
 
-    response = extract_final(getattr(raw_response, "content", "") or "")
+    response = extract_final(
+        getattr(raw_response, "content", "") or ""
+    )  # content may be list
 
     return {
         "summary": response,

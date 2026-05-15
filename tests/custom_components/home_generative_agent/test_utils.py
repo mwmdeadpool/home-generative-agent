@@ -11,9 +11,11 @@ import pytest
 from custom_components.home_generative_agent.core.utils import (
     CannotConnectError,
     InvalidAuthError,
+    anthropic_healthy,
     extract_final,
     openai_compatible_healthy,
     reasoning_field,
+    validate_anthropic_key,
     validate_openai_compatible_url,
 )
 
@@ -54,6 +56,14 @@ def test_extract_final_handles_list_of_strings() -> None:
     assert extract_final(["text block"]) == "text block"
 
 
+def test_extract_final_list_of_text_blocks_joins_text() -> None:
+    blocks: list[Any] = [
+        {"type": "text", "text": "hello"},
+        {"type": "text", "text": "world"},
+    ]
+    assert extract_final(blocks) == "hello world"
+
+
 def test_extract_final_handles_list_of_text_blocks() -> None:
     payload = [
         {"type": "text", "text": "hello"},
@@ -80,6 +90,16 @@ def test_extract_final_ignores_non_text_blocks() -> None:
 
 def test_extract_final_handles_none_text_value() -> None:
     assert extract_final([{"type": "text", "text": None}]) == ""
+
+
+def test_extract_final_list_mixed_entries_keeps_text_content() -> None:
+    blocks: list[Any] = [
+        {"type": "tool_use", "id": "abc"},
+        {"type": "text", "text": "answer"},
+        "bare string",
+        42,
+    ]
+    assert extract_final(blocks) == "answer bare string"
 
 
 def test_extract_final_with_think_blocks_in_list() -> None:
@@ -340,3 +360,128 @@ def test_reasoning_field_qwen3_disabled_returns_false_registry_url() -> None:
         model="registry.ollama.ai/library/qwen3.5:35b", enabled=False
     )
     assert result == {"reasoning": False}
+
+
+# ---------------------------------------------------------------------------
+# validate_anthropic_key tests
+# ---------------------------------------------------------------------------
+
+ANTHROPIC_MODELS_URL = "https://api.anthropic.com/v1/models"
+
+
+@pytest.mark.asyncio
+async def test_validate_anthropic_key_success(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """HTTP 200 from Anthropic /v1/models does not raise."""
+    client = _FakeClient(status_code=HTTP_OK)
+    monkeypatch.setattr(
+        "custom_components.home_generative_agent.core.utils.get_async_client",
+        lambda _hass: client,
+    )
+    await validate_anthropic_key(hass, "sk-ant-valid")
+    assert client.last_url == ANTHROPIC_MODELS_URL
+    assert client.last_headers.get("x-api-key") == "sk-ant-valid"
+    assert "anthropic-version" in client.last_headers
+
+
+@pytest.mark.asyncio
+async def test_validate_anthropic_key_401_raises_invalid_auth(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """HTTP 401 raises InvalidAuthError."""
+    client = _FakeClient(status_code=HTTP_UNAUTHORIZED)
+    monkeypatch.setattr(
+        "custom_components.home_generative_agent.core.utils.get_async_client",
+        lambda _hass: client,
+    )
+    with pytest.raises(InvalidAuthError):
+        await validate_anthropic_key(hass, "sk-ant-bad")
+
+
+@pytest.mark.asyncio
+async def test_validate_anthropic_key_network_error_raises_cannot_connect(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Network failure raises CannotConnectError."""
+    request = httpx.Request("GET", ANTHROPIC_MODELS_URL)
+    client = _FakeClient(exc=httpx.ConnectError("refused", request=request))
+    monkeypatch.setattr(
+        "custom_components.home_generative_agent.core.utils.get_async_client",
+        lambda _hass: client,
+    )
+    with pytest.raises(CannotConnectError):
+        await validate_anthropic_key(hass, "sk-ant-any")
+
+
+@pytest.mark.asyncio
+async def test_validate_anthropic_key_server_error_raises_cannot_connect(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """HTTP 5xx raises CannotConnectError."""
+    client = _FakeClient(status_code=HTTP_SERVER_ERROR)
+    monkeypatch.setattr(
+        "custom_components.home_generative_agent.core.utils.get_async_client",
+        lambda _hass: client,
+    )
+    with pytest.raises(CannotConnectError):
+        await validate_anthropic_key(hass, "sk-ant-any")
+
+
+@pytest.mark.asyncio
+async def test_validate_anthropic_key_empty_key_returns_without_error(
+    hass: HomeAssistant,
+) -> None:
+    """Empty api_key returns immediately without making any network call."""
+    await validate_anthropic_key(hass, "")
+
+
+# ---------------------------------------------------------------------------
+# anthropic_healthy tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_anthropic_healthy_no_key_returns_false(hass: HomeAssistant) -> None:
+    """Missing api_key returns False immediately."""
+    assert await anthropic_healthy(hass, None) is False
+
+
+@pytest.mark.asyncio
+async def test_anthropic_healthy_returns_true_on_success(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Reachable Anthropic endpoint returns True."""
+    client = _FakeClient(status_code=HTTP_OK)
+    monkeypatch.setattr(
+        "custom_components.home_generative_agent.core.utils.get_async_client",
+        lambda _hass: client,
+    )
+    assert await anthropic_healthy(hass, "sk-ant-valid") is True
+
+
+@pytest.mark.asyncio
+async def test_anthropic_healthy_returns_false_on_connect_error(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Network failure returns False instead of propagating."""
+    request = httpx.Request("GET", ANTHROPIC_MODELS_URL)
+    client = _FakeClient(exc=httpx.ConnectError("refused", request=request))
+    monkeypatch.setattr(
+        "custom_components.home_generative_agent.core.utils.get_async_client",
+        lambda _hass: client,
+    )
+    assert await anthropic_healthy(hass, "sk-ant-any") is False
+
+
+@pytest.mark.asyncio
+async def test_anthropic_healthy_returns_false_on_auth_error(
+    hass: HomeAssistant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """HTTP 401 returns False instead of propagating."""
+    client = _FakeClient(status_code=HTTP_UNAUTHORIZED)
+    monkeypatch.setattr(
+        "custom_components.home_generative_agent.core.utils.get_async_client",
+        lambda _hass: client,
+    )
+    assert await anthropic_healthy(hass, "sk-ant-bad") is False

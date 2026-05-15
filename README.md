@@ -237,7 +237,7 @@ Security / presence:
 
 Appliances / sensors:
 
-- `appliance_power_duration` — appliance drawing power beyond a configurable duration threshold
+- `appliance_power_duration` — appliance drawing power beyond a configurable duration threshold; notification names the actual appliance (e.g. `Washer drew about 296 W for 633 min, above the 60 min threshold. Check it.`)
 
 Cameras:
 
@@ -256,7 +256,8 @@ When Sentinel notifications are enabled:
 
 - Mobile push explanation text is compact and plain-language (targeted for small screens).
 - Explanation text is normalized before send (markdown/backticks removed, whitespace collapsed).
-- If explanation text is missing or too long, Sentinel uses a deterministic fallback message.
+- Some finding types use a dedicated deterministic message builder regardless of LLM explanation availability — `appliance_power_duration` and `alarm_disarmed_during_external_threat` always produce deterministic mobile copy that names the relevant entity.
+- For all other finding types, if explanation text is missing or too long, Sentinel uses a deterministic fallback message.
 - Fallback urgency wording depends on severity:
   - `high`: `Urgent: check and secure it now.`
   - `medium`: `Check soon and secure it if unexpected.`
@@ -752,6 +753,7 @@ Normalization fallbacks for common LLM-generated patterns:
   - `Rule registry ignored duplicate rule ...`
   - `... covered_by_existing_rule ...`
 - Existing stored proposal drafts are not auto-migrated; statuses update when proposals are re-processed.
+- **llama-server embedding incompatibility** — If you use llama-server as an OpenAI-compatible provider and see `Memory semantic search failed — embedding endpoint returned an incompatible response` in the logs, the agent has automatically fallen back to recency-based memory retrieval. This happens because llama-server's `/v1/embeddings` response format does not match the OpenAI SDK's expected structure. Semantic search (memory and RAG tool retrieval) will degrade silently. For reliable semantic embeddings, use a dedicated embedding model via Ollama (`mxbai-embed-large` is recommended) and set its provider as the **Embedding** provider in the integration settings. Chat and embedding providers can be different — e.g. llama-server for chat, Ollama for embeddings.
 
 ## Image and Sensor Entities
 
@@ -1004,14 +1006,17 @@ Category | Provider | Default model | Purpose
 Chat | OpenAI | gpt-5 | High-level reasoning and planning
 Chat | Ollama | gpt-oss | High-level reasoning and planning
 Chat | Gemini | gemini-2.5-flash-lite | High-level reasoning and planning
+Chat | Anthropic | claude-sonnet-4-6 | High-level reasoning and planning
 Chat | OpenAI Compatible | gpt-4o | High-level reasoning and planning
 VLM | Ollama | qwen3-vl:8b | Image scene analysis
 VLM | OpenAI | gpt-5-nano | Image scene analysis
 VLM | Gemini | gemini-2.5-flash-lite | Image scene analysis
+VLM | Anthropic | claude-sonnet-4-6 | Image scene analysis
 VLM | OpenAI Compatible | gpt-4o | Image scene analysis
 Summarization | Ollama | qwen3:1.7b | Primary model context summarization
 Summarization | OpenAI | gpt-5-nano | Primary model context summarization
 Summarization | Gemini | gemini-2.5-flash-lite | Primary model context summarization
+Summarization | Anthropic | claude-haiku-4-5-20251001 | Primary model context summarization
 Summarization | OpenAI Compatible | gpt-4o | Primary model context summarization
 Embeddings | Ollama | mxbai-embed-large | Embedding generation for semantic search
 Embeddings | OpenAI | text-embedding-3-small | Embedding generation for semantic search
@@ -1039,7 +1044,7 @@ Parameter | Description | Default
 ### Latency
 The latency between user requests or the agent taking timely action on the user's behalf is critical for you to consider in the design. I used several techniques to reduce latency, including using specialized, smaller helper LLMs running on the edge and facilitating primary model prompt caching by structuring the prompts to put static content, such as instructions and examples, upfront and variable content, such as user-specific information at the end. These techniques also reduce primary model usage costs considerably.
 
-Native LLM streaming (v3.12.0+) means the first tokens appear in the HA conversation UI within milliseconds of the model starting its response — total response time is unchanged, but perceived latency drops significantly. Multi-tool turns also benefit from parallel tool execution: tools in the same model turn run concurrently rather than serially.
+Native LLM streaming (v3.12.0+) means the first tokens appear in the HA conversation UI within milliseconds of the model starting its response — total response time is unchanged, but perceived latency drops significantly. Multi-tool turns also benefit from parallel tool execution: tools in the same model turn run concurrently rather than serially. As of v3.14.4, OpenAI and Anthropic providers are constructed with `streaming=True` so they emit token chunks directly, while other providers continue to use their existing streaming or fallback behavior.
 
 You can see the typical latency performance in the table below.
 
@@ -1156,6 +1161,8 @@ The agent uses a tool that in turn uses the HA Blueprint `hga_scene_analysis.yam
 ### Proactive Camera Video Analysis.
 
 You can enable proactive video scene analysis from cameras visible to Home Assistant. When enabled, motion detection will trigger the analysis which will be stored in a database for use by the agent, and optionally, notifications of the analysis will be sent to the mobile app. You can also enable anomaly detection which will only send notifications based on semantic search of the current analysis vis-a-vis the database. These options are set in the integration's config UI.
+
+**Caption deduplication:** In anomaly mode, repeated low-value notifications are suppressed. If the new caption is semantically close to a recent caption (vector similarity ≥ 0.89), the notification is withheld. A 30-minute lexical fast path additionally suppresses repeated artifact captions (nighttime glare, monochrome blur scenes, empty walkway descriptions) even when the vector score falls below the threshold. Notifications for scenes with real subjects (people, vehicles, packages, animals) are always preserved — and if a subject was last seen more than 30 minutes ago, notification resumes even if the vector score is high.
 
 **Resource management on edge deployments:** The video pipeline enforces a per-entry semaphore that limits how many VLM and summary model calls run concurrently. The default limit is 1 (sequential). Frames that cannot acquire the semaphore within 30 s are dropped so stale results never accumulate. If a chat turn starts while the video pipeline is waiting for the model, it waits briefly for the chat turn to complete before dropping the frame — avoiding GPU contention. The video token budget is intentionally capped (256 tokens for VLM scene descriptions, 128 tokens for summaries) so video frames do not monopolize the model's context window at the expense of other callers.
 

@@ -271,6 +271,7 @@ async def wait_for_chat_idle(timeout_s: float) -> bool:
         return False
     else:
         return True
+    return _chat_idle.is_set()
 
 
 async def _cancel_active_sentinel_llm_tasks(category: str) -> None:
@@ -336,11 +337,6 @@ async def sentinel_admission(
         # Re-evaluate after timeout: both could still be blocking.
         chat_blocking = not _chat_idle.is_set()
         video_blocking = not _video_idle.is_set()
-        defer_reason = (
-            "chat_and_video_active"
-            if chat_blocking and video_blocking
-            else ("chat_active" if chat_blocking else "video_active")
-        )
         _sentinel_defer_count += 1
         if chat_blocking:
             _sentinel_admissions_deferred_chat += 1
@@ -370,14 +366,6 @@ async def sentinel_admission(
                 _sentinel_defer_count,
                 starved_for_s,
             )
-        else:
-            LOGGER.debug(
-                "sentinel_admission category=%s decision=deferred reason=%s "
-                "consecutive_deferrals=%d",
-                category,
-                defer_reason,
-                _sentinel_defer_count,
-            )
         return False
     _sentinel_last_run = time.monotonic()
     _sentinel_first_defer = 0.0
@@ -387,7 +375,6 @@ async def sentinel_admission(
         health_stats["sentinel_admission_degraded_category"] = None
         health_stats["sentinel_admission_consecutive_deferrals"] = 0
         health_stats["sentinel_admission_starved_for_s"] = 0
-    LOGGER.debug("sentinel_admission category=%s decision=admitted", category)
     return True
 
 
@@ -431,6 +418,67 @@ async def run_sentinel_llm_call(  # noqa: PLR0913
         ) from err
     finally:
         _sentinel_llm_tasks.discard(task)
+
+
+async def run_sentinel_llm_call_in_executor(  # noqa: PLR0913
+    call_factory: Callable[[], Any],
+    *,
+    deployment: str,
+    category: str,
+    admission_timeout_s: float,
+    call_timeout_s: float,
+    health_stats: MutableMapping[str, Any] | None = None,
+) -> Any:
+    """Run a blocking Sentinel LLM call off the event loop."""
+    if not await sentinel_admission(
+        deployment,
+        category=category,
+        timeout_s=admission_timeout_s,
+        health_stats=health_stats,
+    ):
+        raise SentinelLLMDeferredError(category, "deferred; chat is active")
+
+    task = asyncio.create_task(asyncio.to_thread(call_factory))
+    _sentinel_llm_tasks.add(task)
+    try:
+        return await asyncio.wait_for(task, timeout=call_timeout_s)
+    except asyncio.CancelledError as err:
+        raise SentinelLLMDeferredError(
+            category, "interrupted by foreground chat"
+        ) from err
+    finally:
+        _sentinel_llm_tasks.discard(task)
+
+
+async def run_sentinel_model_call(  # noqa: PLR0913
+    model: Any,
+    messages: Any,
+    *,
+    deployment: str,
+    category: str,
+    admission_timeout_s: float,
+    call_timeout_s: float,
+    health_stats: MutableMapping[str, Any] | None = None,
+) -> Any:
+    """Run a Sentinel model call, preferring sync ``invoke`` off the event loop."""
+    invoke = getattr(model, "invoke", None)
+    if callable(invoke):
+        return await run_sentinel_llm_call_in_executor(
+            lambda: invoke(messages),
+            deployment=deployment,
+            category=category,
+            admission_timeout_s=admission_timeout_s,
+            call_timeout_s=call_timeout_s,
+            health_stats=health_stats,
+        )
+    return await run_sentinel_llm_call(
+        lambda: model.ainvoke(messages),
+        deployment=deployment,
+        category=category,
+        admission_timeout_s=admission_timeout_s,
+        call_timeout_s=call_timeout_s,
+        health_stats=health_stats,
+    )
 
 
 async def generate_embeddings(
@@ -697,6 +745,49 @@ async def validate_gemini_key(
             raise CannotConnectError
 
 
+async def validate_anthropic_key(
+    hass: HomeAssistant, api_key: str, timeout_s: float = 10.0
+) -> None:
+    """Validate that an Anthropic API key is authorized and reachable."""
+    if not api_key:
+        return
+    client = get_async_client(hass)
+    try:
+        async with asyncio.timeout(timeout_s):
+            resp = await client.get(
+                "https://api.anthropic.com/v1/models",
+                headers={
+                    "x-api-key": api_key,
+                    "anthropic-version": "2023-06-01",
+                },
+            )
+    except (TimeoutError, httpx.RequestError) as err:
+        LOGGER.debug("Anthropic connectivity exception: %s", err)
+        raise CannotConnectError from err
+    else:
+        if resp.status_code == HTTP_STATUS_UNAUTHORIZED:
+            raise InvalidAuthError
+        if resp.status_code >= HTTP_STATUS_BAD_REQUEST:
+            raise CannotConnectError
+
+
+async def anthropic_healthy(
+    hass: HomeAssistant, api_key: str | None, timeout_s: float = 2.0
+) -> bool:
+    """Return True if Anthropic API is reachable, False otherwise."""
+    if not api_key:
+        LOGGER.debug("Anthropic health check skipped: not configured.")
+        return False
+    try:
+        await validate_anthropic_key(hass, api_key, timeout_s)
+    except (CannotConnectError, InvalidAuthError) as err:
+        LOGGER.warning("Anthropic health check failed: %s", err)
+        return False
+    else:
+        return True
+    return False
+
+
 async def validate_face_api_url(
     hass: HomeAssistant, base_url: str, timeout_s: float = 10.0
 ) -> None:
@@ -800,9 +891,8 @@ def extract_final(raw: str | list[Any], max_chars: int | None = None) -> str:
     """Return plain text with <think> blocks removed."""
     if not raw:
         return ""
-
-    # Handle list content blocks (e.g. from tool-calling models).
     if isinstance(raw, list):
+        # Handle mixed content blocks from provider responses and tool calls.
         parts: list[str] = []
         for block in raw:
             if isinstance(block, str):
@@ -812,10 +902,8 @@ def extract_final(raw: str | list[Any], max_chars: int | None = None) -> str:
                 if text_value is not None:
                     parts.append(str(text_value))
         raw = " ".join(parts)
-
-    if not raw:
-        return ""
-
+        if not raw:
+            return ""
     # Remove any leaked reasoning
     s = _THINK_BLOCK.sub("", raw)
     # Collapse whitespace
