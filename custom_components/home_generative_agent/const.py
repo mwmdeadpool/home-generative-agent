@@ -213,6 +213,12 @@ RECOMMENDED_SENTINEL_STALENESS_THRESHOLD_SECONDS: int = 1800
 # Only fire the rule when camera activity is within this many minutes of the snapshot.
 SENTINEL_CAMERA_ACTIVITY_STALENESS_MINUTES: int = 10
 
+# HA alarm modes that allow motion detection while occupants are present. These states
+# are the intended operating condition when expected_presence="home" — never anomalous.
+SENTINEL_OCCUPANCY_ARMED_STATES: frozenset[str] = frozenset(
+    {"armed_home", "armed_night"}
+)
+
 # ---- Sentinel auto-execution (Level 2+) ----
 CONF_SENTINEL_AUTO_EXECUTION_ENABLED = "sentinel_auto_execution_enabled"
 RECOMMENDED_SENTINEL_AUTO_EXECUTION_ENABLED: bool = False
@@ -967,6 +973,33 @@ ACTUATION_KEYWORDS_REGEX = (
     r"disarm|start|stop|dim|brighten|play|pause|mute|run|trigger|enable|"
     r"disable|toggle)\b"
 )
+
+# Read-only state query signals: used to suppress actuation safety injection
+# when "open" appears as a state description rather than a command.
+READ_ONLY_STATE_QUERY_REGEX = (
+    r"(?i)\b(list|show|which|what|where|are|is|status|state)\b"
+)
+
+# "open" used as a state description (not a command), no noun restriction.
+# Must be combined with READ_ONLY_STATE_QUERY_REGEX to avoid false positives
+# on pure actuation commands like "open the garage door".
+OPEN_AS_STATE_REGEX = r"(?i)\b(open|opened)\b"
+
+# Actuation commands other than "open/opened". If any of these are present,
+# the query should still get actuation safety tools even if it also contains
+# a read-only phrase (e.g. "show me open windows and then close them").
+# Must stay in sync with ACTUATION_KEYWORDS_REGEX — omits open/opened only.
+NON_OPEN_ACTUATION_KEYWORDS_REGEX = (
+    r"(?i)\b(turn|switch|lock|unlock|close|set|activate|deactivate|arm|"
+    r"disarm|start|stop|dim|brighten|play|pause|mute|run|trigger|enable|"
+    r"disable|toggle)\b"
+)
+
+# Compound state-then-command forms where "open" is used as a command verb
+# despite the query also containing read-only state language.
+# Covers: "show me open windows and then open the garage door".
+# Known gap: comma- or period-separated compound forms are not detected.
+OPEN_COMMAND_CLAUSE_REGEX = r"(?i)\b(?:then|and then|after that)\s+open\b"
 
 # Tool prefixes/names for actuation safety net
 ACTUATION_TOOL_PREFIXES = (
