@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from custom_components.home_generative_agent.const import (
+from ..const import (
     SENTINEL_OCCUPANCY_ARMED_STATES,
 )
 
