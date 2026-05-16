@@ -2,6 +2,47 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.14.7] - 2026-05-15
+
+### Fixed
+
+- **Read-only state queries like "list all open windows" no longer trigger
+  actuation tools** — The word "open" in phrases like "which windows are open"
+  or "show me all open doors" was matching the actuation-safety keyword list,
+  causing the agent to inject control tools (`HassTurnOn`, `HassTurnOff`, etc.)
+  into its context for what is really a read-only query. A four-regex heuristic
+  now distinguishes read-only use of "open" (as a state descriptor combined with
+  `list`, `show`, `which`, `what`, `are`, `is`, `status`, or `state`) from
+  command use of "open" (as an actuation verb). The `GetLiveContext` tool is
+  also promoted to the front of the candidate list for these queries so the
+  agent picks up the correct read tool first. Closes
+  [#394](https://github.com/goruck/home-generative-agent/issues/394).
+
+- **Tool-loop guard prevents `GraphRecursionError` on stuck tool cycles** — When
+  a weaker model or an ambiguous query caused the agent to request tool calls
+  indefinitely, LangGraph eventually threw a `GraphRecursionError` visible as an
+  error in the HA conversation UI. A new `tool_loop_guard` graph node caps
+  tool-use at 3 rounds per conversation turn and returns a friendly message
+  instead of crashing: "I wasn't able to complete this request after several
+  tool-use attempts. Please try rephrasing your query or breaking it into smaller
+  steps." The LangGraph `recursion_limit` is also raised from 10 to 20 so the
+  application-level guard fires well before the LangGraph backstop.
+
+## [3.14.6] - 2026-05-13
+
+### Fixed
+
+- **Sentinel no longer fires a false "disarm the alarm" notification when armed_home or
+  armed_night is active with occupants present** — `armed_home` and `armed_night` are
+  HA alarm modes designed for use while people are home. A three-layer guard now
+  prevents this combination from ever becoming an anomaly: the deterministic evaluator
+  suppresses it at runtime, the normalization layer rejects any future LLM-proposed
+  rule with this pattern, and the LLM explanation prompt is conditioned to never
+  describe the state as a problem when occupants are present. The constant defining
+  these occupancy-safe modes (`SENTINEL_OCCUPANCY_ARMED_STATES`) is now centralized
+  in `const.py` and shared across both sentinel modules. Five new regression tests
+  (plus three coverage tests) guard all paths.
+
 ## [3.14.4] - 2026-05-12
 
 ### Changed
