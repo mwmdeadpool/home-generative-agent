@@ -2,6 +2,38 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.14.10] - 2026-05-17
+
+### Fixed
+
+- **Open-state queries now work for users whose sensors use `device_class: window`
+  or `device_class: door`** — the parser that identifies open entry sensors from
+  a live-context response only accepted `device_class: opening`. Real Home
+  Assistant window and door contact sensors (registered by most Zigbee and Z-Wave
+  coordinators) use `device_class: window` and `device_class: door` respectively.
+  The same gap existed in the HA-state fallback path used when no prior live
+  context is available. Both paths now accept all four open-state device classes
+  (`door`, `garage_door`, `opening`, `window`). Four regression tests are added
+  that use the correct device classes (the prior test fixtures all used
+  `device_class: opening`, which matched the developer's own sensors but masked
+  the failure for anyone else).
+
+## [3.14.9] - 2026-05-17
+
+### Fixed
+
+- **Read-only open-state queries are more reliable across local tool-calling
+  models** — HGA now force-binds and promotes `GetLiveContext` for read-only
+  queries such as "list all open windows" and "list the open doors in my house",
+  even when semantic tool retrieval misses it or ranks less relevant tools
+  higher. The first `GetLiveContext` call for these queries is normalized to a
+  broad `binary_sensor` live-context request so local models that emit brittle
+  filters like `name: "Window"` or list-valued domains still get the needed
+  state. Broad live-context results are then filtered back to the requested
+  entity type, preventing door queries from volunteering open windows. Focused
+  regression tests cover retrieval, argument normalization, retry handling, and
+  scoped result filtering.
+
 ## [3.14.8] - 2026-05-16
 
 ### Fixed
