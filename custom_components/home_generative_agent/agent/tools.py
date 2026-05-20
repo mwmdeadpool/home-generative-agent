@@ -1057,6 +1057,10 @@ async def _get_existing_entity_id(
         msg = f"No '{domain}' entity found with friendly name '{name}'"
         raise ValueError(msg)
     if len(candidates) > 1:
+        # Prefer the canonical entity (no _N suffix) over duplicates from re-adds.
+        canonical = [e for e in candidates if not re.search(r"_\d+$", e)]
+        if len(canonical) == 1:
+            return canonical[0]
         msg = f"Multiple '{domain}' entities found for '{name}': {candidates}"
         raise ValueError(msg)
 
@@ -1077,7 +1081,7 @@ async def get_entity_history(  # noqa: D417
     *,
     # Hide these arguments from the model.
     config: Annotated[RunnableConfig, InjectedToolArg()],
-) -> dict[str, dict[str, list[dict[str, str]]]]:
+) -> dict[str, Any]:
     """
     Retrieve historical state changes for Home Assistant entities over a time range.
 
@@ -1102,6 +1106,8 @@ async def get_entity_history(  # noqa: D417
                     {"state": "on", "last_changed": "2025-07-24T04:47:28-0700"},
                     ...]}
             }.
+        On error, returns {"error": "<description>"} so the model can report the
+        problem to the user (e.g. ambiguous entity name) and request clarification.
 
     """
     if "configurable" not in config:
@@ -1123,9 +1129,9 @@ async def get_entity_history(  # noqa: D417
             await _get_existing_entity_id(n, hass, d)
             for n, d in zip(friendly_names, domains, strict=False)
         ]
-    except ValueError:
+    except ValueError as e:
         LOGGER.exception("Invalid name %s or domain: %s", friendly_names, domains)
-        return {}
+        return {"error": str(e)}
 
     now = dt_util.utcnow()
     one_day = timedelta(days=1)
