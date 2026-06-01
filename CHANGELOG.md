@@ -2,11 +2,47 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.14.15] - 2026-05-31
+
+### Fixed
+
+- **Gemini provider: 400 error on every chat interaction** — Gemini's Protobuf schema validation requires an explicit `items` field on all array-type tool parameters. `GetLiveContextTool.domain` (always injected on tool-retrieval turns) uses `vol.Any(cv.string, [cv.string])`, which `voluptuous_openapi` emits as an `anyOf` schema. `langchain_google_genai` resolved the `anyOf` to `type_:ARRAY` but checked `items` on the outer dict where it was absent, producing a declaration Gemini rejected. Added `_ensure_array_items()` to `_format_and_dedupe_tools()` which hoists `items` from `anyOf` array variants and recursively patches any bare `{"type": "array"}` node. Closes [#428](https://github.com/goruck/home-generative-agent/issues/428).
+
+## [3.14.14] - 2026-05-31
+
+### Added
+
+- **Sentinel built-in rule: `pet_detected_at_night_no_occupancy`** — fires when a pet (cat, dog, rabbit, hamster, bird, or parrot) is detected on any monitored camera at night while no residents are home. Requires at least one active motion or VMD signal. Severity: low, confidence: 0.85, informational only (no suggested action). Closes [#422](https://github.com/goruck/home-generative-agent/issues/422).
+
+### Changed
+
+- **`langchain-core` manifest pin loosened** — changed from `==1.3.2` to `>=1.3.2,<2.0.0` to prevent `uv` from silently skipping installation on hosts where a newer compatible version is already present.
+
 ## [3.14.13] - 2026-05-23
+
+Thanks to [Alex Ultra](https://github.com/alex-mextner) for contributing the original STT hallucination filter and model-provider fallback work in [#421](https://github.com/goruck/home-generative-agent/pull/421).
 
 ### Added
 
 - **Deploy script** — `scripts/deploy` syncs the integration to a running Home Assistant instance via rsync over SSH. Only changed files are transferred (checksum-based), `__pycache__` and `.pyc` files are excluded, and the script calls `ha core restart` after a successful sync. See [Contributing](docs/contributing.md) for setup instructions.
+- **Feature-level model provider fallbacks** — feature setup now supports an ordered fallback-provider list for chat, VLM, summarization, and embeddings. If the primary provider is unavailable at setup or fails with a retryable runtime error, HGA can use the next configured provider for that category.
+- **Fallback provider notifications** — when a fallback becomes active, HGA sends one deduplicated notification per category/provider for the current runtime. Mobile notifications use the configured `notify_service`; otherwise HGA creates a persistent notification. Cloud fallback notifications include a provider-cost warning.
+- **STT hallucination filters** — Options now include ignored substring and exact-phrase filters for speech-to-text prompts. Matching input is dropped before it reaches the LLM, reducing false activations from common silence/noise transcriptions.
+
+### Changed
+
+- **Fallback logging is clearer and less noisy** — startup, runtime fallback, unavailable-provider, sticky embedding-provider, and local resource-gate logs now distinguish configured deployment from the effective provider in use. Repeated unconfigured fallback messages are reduced to debug-level diagnostics where appropriate.
+- **Fallback models use their own configured defaults** — chat, VLM, and summarization fallbacks now preserve provider-specific model settings and category defaults from `const.py`, including Ollama tuning options when a provider does not override them.
+- **Fallback chat retry happens at the model-call boundary** — fallback chat chains no longer expose provider-level `astream`, avoiding mixed responses where a failed provider starts streaming partial text and a fallback provider finishes with different content.
+
+### Fixed
+
+- **Embedding fallback no longer leaves stale vector indexes active** — when the active embedding provider changes, HGA marks the tool index stale, rebuilds it on the next indexing pass, and discards retrieval results if the index becomes stale during search.
+- **Embedding dimensions are normalized for fallback providers** — Gemini embedding fallbacks are requested with HGA's configured vector dimension, preventing PostgreSQL vector errors such as `different vector dimensions 1024 and 3072`.
+- **VLM and summarization fallback wrappers preserve config overrides** — fallback wrappers now support `with_config()` and merge model config instead of replacing category-specific model settings, fixing video analyzer and summarization paths that use per-call config.
+- **Length-limited empty model responses trigger fallback** — empty responses caused by provider length limits are treated as retryable, so chat and summarization can fall back instead of returning blank content.
+- **Connectivity failures from HTTP transports are retryable** — local provider connection errors such as Ollama/httpx transport failures now activate configured fallbacks.
+- **Tool retrieval fallback diagnostics are safer** — known vector-store mismatch errors degrade to keyword-filtered tool selection or recency-based memory retrieval instead of surfacing repeated tracebacks during provider switches.
 
 ## [3.14.12] - 2026-05-19
 
@@ -476,7 +512,6 @@ DROP TABLE IF EXISTS vector_migrations;
 ```
 
 The tables are recreated automatically on the next startup.
-
 
 ## [3.12.0] - 2026-04-21
 

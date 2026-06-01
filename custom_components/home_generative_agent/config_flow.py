@@ -21,6 +21,8 @@ from homeassistant.core import callback
 from homeassistant.helpers import llm
 from homeassistant.helpers.selector import (
     BooleanSelector,
+    ConstantSelector,
+    ConstantSelectorConfig,
     NumberSelector,
     NumberSelectorConfig,
     SelectOptionDict,
@@ -61,6 +63,8 @@ from .const import (
     CONF_REDDIT_ENABLED,
     CONF_REDDIT_USER_AGENT,
     CONF_SCHEMA_FIRST_YAML,
+    CONF_STT_HALLUCINATION_EXACT_PATTERNS,
+    CONF_STT_HALLUCINATION_PATTERNS,
     CONF_TOOL_RELEVANCE_THRESHOLD,
     CONF_TOOL_RETRIEVAL_LIMIT,
     CONF_VIDEO_ANALYZER_MODE,
@@ -115,6 +119,8 @@ if TYPE_CHECKING:
 
 LOGGER = logging.getLogger(__name__)
 
+_CONF_STT_FILTERS_SECTION = "stt_filters_section"
+
 DEFAULT_OPTIONS = {
     CONF_LLM_HASS_API: [llm.LLM_API_ASSIST],
     CONF_PROMPT: llm.DEFAULT_INSTRUCTIONS_PROMPT,
@@ -143,6 +149,15 @@ DEFAULT_OPTIONS = {
 def _get_str(src: Mapping[str, Any], key: str) -> str:
     """Get a trimmed string from a mapping (missing -> '')."""
     return str(src.get(key, "") or "").strip()
+
+
+def _patterns_as_text(raw: Any) -> str:
+    """Render list/string pattern options as one pattern per line."""
+    if isinstance(raw, list):
+        return "\n".join(str(item).strip() for item in raw if str(item).strip())
+    if isinstance(raw, str):
+        return raw
+    return ""
 
 
 async def _schema_for_options(
@@ -232,11 +247,6 @@ async def _schema_for_options(
             },
             default=opts.get(CONF_CRITICAL_ACTION_PIN_ENABLED, False),
         ): BooleanSelector(),
-        vol.Optional(
-            CONF_SCHEMA_FIRST_YAML,
-            description={"suggested_value": opts.get(CONF_SCHEMA_FIRST_YAML, False)},
-            default=opts.get(CONF_SCHEMA_FIRST_YAML, False),
-        ): BooleanSelector(),
     }
 
     if opts.get(CONF_CRITICAL_ACTION_PIN_ENABLED, False):
@@ -249,6 +259,14 @@ async def _schema_for_options(
                 },
             )
         ] = TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD))
+
+    schema[
+        vol.Optional(
+            CONF_SCHEMA_FIRST_YAML,
+            description={"suggested_value": opts.get(CONF_SCHEMA_FIRST_YAML, False)},
+            default=opts.get(CONF_SCHEMA_FIRST_YAML, False),
+        )
+    ] = BooleanSelector()
 
     video_analyzer_mode = opts.get(
         CONF_VIDEO_ANALYZER_MODE, RECOMMENDED_VIDEO_ANALYZER_MODE
@@ -283,165 +301,35 @@ async def _schema_for_options(
                 )
             )
 
-    # ---- Custom Tool Integrations (custom addition) ----
-    schema[
-        vol.Optional(
-            CONF_GOOGLE_PLACES_ENABLED,
-            description={"suggested_value": opts.get(CONF_GOOGLE_PLACES_ENABLED, False)},
-            default=RECOMMENDED_GOOGLE_PLACES_ENABLED,
-        )
-    ] = BooleanSelector()
-
-    schema[
-        vol.Optional(
-            CONF_WIKIPEDIA_ENABLED,
-            description={"suggested_value": opts.get(CONF_WIKIPEDIA_ENABLED, False)},
-            default=RECOMMENDED_WIKIPEDIA_ENABLED,
-        )
-    ] = BooleanSelector()
-
-    schema[
-        vol.Optional(
-            CONF_LIGHTRAG_ENABLED,
-            description={"suggested_value": opts.get(CONF_LIGHTRAG_ENABLED, False)},
-            default=RECOMMENDED_LIGHTRAG_ENABLED,
-        )
-    ] = BooleanSelector()
-
-    schema[
-        vol.Optional(
-            CONF_REDDIT_ENABLED,
-            description={"suggested_value": opts.get(CONF_REDDIT_ENABLED, False)},
-            default=RECOMMENDED_REDDIT_ENABLED,
-        )
-    ] = BooleanSelector()
-
-    schema[
-        vol.Optional(
-            CONF_PLEX_ENABLED,
-            description={"suggested_value": opts.get(CONF_PLEX_ENABLED, False)},
-            default=RECOMMENDED_PLEX_ENABLED,
-        )
-    ] = BooleanSelector()
-
-    schema[
-        vol.Optional(
-            CONF_FAST_INTENT_ENABLED,
-            description={"suggested_value": opts.get(CONF_FAST_INTENT_ENABLED, False)},
-            default=RECOMMENDED_FAST_INTENT_ENABLED,
-        )
-    ] = BooleanSelector()
-
-    # Conditional fields based on enabled features
-    if opts.get(CONF_FAST_INTENT_ENABLED, False):
-        schema[
+    schema.update(
+        {
             vol.Optional(
-                CONF_FAST_INTENT_QDRANT_URL,
-                description={
-                    "suggested_value": opts.get(
-                        CONF_FAST_INTENT_QDRANT_URL,
-                        RECOMMENDED_FAST_INTENT_QDRANT_URL,
-                    )
-                },
-                default=RECOMMENDED_FAST_INTENT_QDRANT_URL,
-            )
-        ] = TextSelector()
-        schema[
+                _CONF_STT_FILTERS_SECTION,
+                default="speech_input_filters",
+            ): ConstantSelector(
+                ConstantSelectorConfig(
+                    label="Speech input filters",
+                    value="speech_input_filters",
+                )
+            ),
             vol.Optional(
-                CONF_FAST_INTENT_COLLECTION,
-                description={
-                    "suggested_value": opts.get(
-                        CONF_FAST_INTENT_COLLECTION,
-                        RECOMMENDED_FAST_INTENT_COLLECTION,
-                    )
-                },
-                default=RECOMMENDED_FAST_INTENT_COLLECTION,
-            )
-        ] = TextSelector()
-
-    if opts.get(CONF_GOOGLE_PLACES_ENABLED, False):
-        schema[
+                CONF_STT_HALLUCINATION_PATTERNS,
+                default=_patterns_as_text(
+                    opts.get(CONF_STT_HALLUCINATION_PATTERNS, [])
+                ),
+            ): TextSelector(
+                TextSelectorConfig(type=TextSelectorType.TEXT, multiline=True)
+            ),
             vol.Optional(
-                CONF_GOOGLE_PLACES_API_KEY,
-                description={
-                    "suggested_value": opts.get(CONF_GOOGLE_PLACES_API_KEY, ""),
-                    "placeholder": "Google Places API Key",
-                },
-            )
-        ] = TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD))
-
-    if opts.get(CONF_LIGHTRAG_ENABLED, False):
-        schema[
-            vol.Optional(
-                CONF_LIGHTRAG_URL,
-                description={"suggested_value": opts.get(CONF_LIGHTRAG_URL, RECOMMENDED_LIGHTRAG_URL)},
-                default=RECOMMENDED_LIGHTRAG_URL,
-            )
-        ] = TextSelector()
-        schema[
-            vol.Optional(
-                CONF_LIGHTRAG_API_KEY,
-                description={
-                    "suggested_value": opts.get(CONF_LIGHTRAG_API_KEY, RECOMMENDED_LIGHTRAG_API_KEY),
-                    "placeholder": "LightRAG API Key",
-                },
-                default=RECOMMENDED_LIGHTRAG_API_KEY,
-            )
-        ] = TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD))
-
-    if opts.get(CONF_REDDIT_ENABLED, False):
-        schema[
-            vol.Optional(
-                CONF_REDDIT_CLIENT_ID,
-                description={
-                    "suggested_value": opts.get(CONF_REDDIT_CLIENT_ID, ""),
-                    "placeholder": "Reddit Client ID",
-                },
-                default="",
-            )
-        ] = TextSelector()
-        schema[
-            vol.Optional(
-                CONF_REDDIT_CLIENT_SECRET,
-                description={
-                    "suggested_value": opts.get(CONF_REDDIT_CLIENT_SECRET, ""),
-                    "placeholder": "Reddit Client Secret",
-                },
-            )
-        ] = TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD))
-        schema[
-            vol.Optional(
-                CONF_REDDIT_USER_AGENT,
-                description={
-                    "suggested_value": opts.get(
-                        CONF_REDDIT_USER_AGENT, RECOMMENDED_REDDIT_USER_AGENT
-                    ),
-                    "placeholder": "Reddit User Agent",
-                },
-                default=RECOMMENDED_REDDIT_USER_AGENT,
-            )
-        ] = TextSelector()
-
-    if opts.get(CONF_PLEX_ENABLED, False):
-        schema[
-            vol.Optional(
-                CONF_PLEX_SERVER_URL,
-                description={
-                    "suggested_value": opts.get(CONF_PLEX_SERVER_URL, ""),
-                    "placeholder": "http://192.168.1.100:32400",
-                },
-                default="",
-            )
-        ] = TextSelector()
-        schema[
-            vol.Optional(
-                CONF_PLEX_TOKEN,
-                description={
-                    "suggested_value": opts.get(CONF_PLEX_TOKEN, ""),
-                    "placeholder": "Plex Token",
-                },
-            )
-        ] = TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD))
+                CONF_STT_HALLUCINATION_EXACT_PATTERNS,
+                default=_patterns_as_text(
+                    opts.get(CONF_STT_HALLUCINATION_EXACT_PATTERNS, [])
+                ),
+            ): TextSelector(
+                TextSelectorConfig(type=TextSelectorType.TEXT, multiline=True)
+            ),
+        }
+    )
 
     return schema
 
@@ -584,6 +472,10 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
         if not options.get(CONF_LLM_HASS_API):
             options.pop(CONF_LLM_HASS_API, None)
 
+    def _cleanup_ui_only_options(self, options: dict[str, Any]) -> None:
+        """Remove schema-only fields before storing options."""
+        options.pop(_CONF_STT_FILTERS_SECTION, None)
+
     # ---- main step ----
 
     async def async_step_init(
@@ -619,5 +511,6 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
             )
 
         self._cleanup_none_llm_api(options)
+        self._cleanup_ui_only_options(options)
         self._drop_empty_fields(options)
         return self.async_create_entry(title="", data=options)
