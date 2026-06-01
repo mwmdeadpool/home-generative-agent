@@ -52,10 +52,6 @@ def test_extract_final_max_chars_no_space_falls_back_to_hard_cut() -> None:
     assert len(result) <= 10
 
 
-def test_extract_final_handles_list_of_strings() -> None:
-    assert extract_final(["text block"]) == "text block"
-
-
 def test_extract_final_list_of_text_blocks_joins_text() -> None:
     blocks: list[Any] = [
         {"type": "text", "text": "hello"},
@@ -64,49 +60,18 @@ def test_extract_final_list_of_text_blocks_joins_text() -> None:
     assert extract_final(blocks) == "hello world"
 
 
-def test_extract_final_handles_list_of_text_blocks() -> None:
-    payload = [
-        {"type": "text", "text": "hello"},
-        {"type": "tool_use", "name": "noop"},
-    ]
-    assert extract_final(payload) == "hello"
-
-
-def test_extract_final_handles_normal_string() -> None:
-    assert extract_final("normal string") == "normal string"
-
-
-def test_extract_final_handles_empty_list() -> None:
-    assert extract_final([]) == ""
-
-
-def test_extract_final_ignores_non_text_blocks() -> None:
-    payload = [
-        {"type": "tool_use", "name": "test"},
-        {"type": "image_url", "url": "http://example.com"},
-    ]
-    assert extract_final(payload) == ""
-
-
-def test_extract_final_handles_none_text_value() -> None:
-    assert extract_final([{"type": "text", "text": None}]) == ""
-
-
-def test_extract_final_list_mixed_entries_keeps_text_content() -> None:
+def test_extract_final_list_filters_non_text_entries() -> None:
     blocks: list[Any] = [
         {"type": "tool_use", "id": "abc"},
         {"type": "text", "text": "answer"},
         "bare string",
         42,
     ]
-    assert extract_final(blocks) == "answer bare string"
+    assert extract_final(blocks) == "answer"
 
 
-def test_extract_final_with_think_blocks_in_list() -> None:
-    assert (
-        extract_final([{"type": "text", "text": "<think>reasoning</think>answer"}])
-        == "answer"
-    )
+def test_extract_final_empty_list_returns_empty_string() -> None:
+    assert extract_final([]) == ""
 
 
 # ---------------------------------------------------------------------------

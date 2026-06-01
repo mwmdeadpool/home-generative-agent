@@ -6,10 +6,10 @@ from typing import TYPE_CHECKING
 
 from homeassistant.util import dt as dt_util
 
-from ...const import (
+from custom_components.home_generative_agent.const import (
     SENTINEL_CAMERA_ACTIVITY_STALENESS_MINUTES,
 )
-from ..models import (
+from custom_components.home_generative_agent.sentinel.models import (
     AnomalyFinding,
     build_anomaly_id,
 )

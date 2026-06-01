@@ -755,8 +755,11 @@ async def _get_rag_retrieved_tools(
         LOGGER.warning("Store is None; skipping RAG tool retrieval")
         return []
 
-    tool_index_ready = config.get("configurable", {}).get("tool_index_ready", True)
+    tool_index_ready, _tool_indexing_in_progress, _tool_index_failed = (
+        _tool_index_state(config)
+    )
     if not tool_index_ready:
+        LOGGER.debug("Skipping RAG tool retrieval: tool index is not ready")
         return []
 
     opts = config.get("configurable", {}).get("options", {})
@@ -767,6 +770,10 @@ async def _get_rag_retrieved_tools(
 
     # best_score[tool_key] -> (score, SearchItem)
     best: dict[str, tuple[float, Any]] = {}
+    total_results = 0
+    allowed_results = 0
+    below_threshold = 0
+    top_seen: list[tuple[str, float]] = []
 
     for sub_query in sub_queries:
         try:
@@ -777,6 +784,7 @@ async def _get_rag_retrieved_tools(
             InvalidNamespaceError,
             psycopg.OperationalError,
             psycopg.ProgrammingError,
+            psycopg.DataError,
             ValueError,
         ) as err:
             LOGGER.warning("RAG tool retrieval search failed (known error): %s", err)
@@ -785,15 +793,45 @@ async def _get_rag_retrieved_tools(
             LOGGER.exception("Unexpected RAG tool retrieval search failure")
             continue
 
+        tool_index_ready, _tool_indexing_in_progress, _tool_index_failed = (
+            _tool_index_state(config)
+        )
+        if not tool_index_ready:
+            LOGGER.debug(
+                "Discarding RAG tool retrieval results because the tool index "
+                "became stale during vector search"
+            )
+            return []
+
+        total_results += len(results)
         for item in results:
             name = item.value.get("name", "")
             api_id = item.value.get("api_id")
             if api_id not in allowed_api_ids:
                 continue
+            allowed_results += 1
             # score is (1 - distance) for pgvector cosine; None when no embedding
             score = getattr(item, "score", None) or 0.0
+            top_seen.append((name, score))
             if score >= threshold and (name not in best or score > best[name][0]):
                 best[name] = (score, item)
+            else:
+                below_threshold += 1
+
+    if not best:
+        top_seen.sort(key=lambda item: item[1], reverse=True)
+        LOGGER.debug(
+            "RAG tool retrieval produced no candidates: sub_queries=%d "
+            "raw_results=%d allowed_results=%d below_threshold=%d "
+            "threshold=%.3f allowed_api_ids=%s top_scores=%s",
+            len(sub_queries),
+            total_results,
+            allowed_results,
+            below_threshold,
+            threshold,
+            sorted(allowed_api_ids),
+            top_seen[:5],
+        )
 
     # Sort by best score descending and return top `limit`
     sorted_items = sorted(best.values(), key=lambda t: t[0], reverse=True)
@@ -889,6 +927,23 @@ def _query_needs_actuation_safety(query: str) -> bool:
     return not _query_is_read_only_open_state(query)
 
 
+def _tool_index_state(config: RunnableConfig) -> tuple[bool, bool, bool]:
+    """Return current tool-index state, preferring live runtime data if present."""
+    configurable = config.get("configurable", {})
+    runtime_data = configurable.get("hga_runtime_data")
+    if runtime_data is not None:
+        return (
+            bool(getattr(runtime_data, "tool_index_ready", True)),
+            bool(getattr(runtime_data, "tool_indexing_in_progress", False)),
+            bool(getattr(runtime_data, "tool_index_failed", False)),
+        )
+    return (
+        bool(configurable.get("tool_index_ready", True)),
+        bool(configurable.get("tool_indexing_in_progress", False)),
+        bool(configurable.get("tool_index_failed", False)),
+    )
+
+
 async def _get_actuation_safety_tools(
     store: BaseStore | None,
     config: RunnableConfig,
@@ -900,8 +955,12 @@ async def _get_actuation_safety_tools(
         LOGGER.warning("Store is None; skipping actuation safety tools")
         return []
 
-    tool_index_ready = config.get("configurable", {}).get("tool_index_ready", True)
+    tool_index_ready, _tool_indexing_in_progress, _tool_index_failed = (
+        _tool_index_state(config)
+    )
     if not tool_index_ready or not _query_needs_actuation_safety(query):
+        if not tool_index_ready and _query_needs_actuation_safety(query):
+            LOGGER.debug("Skipping actuation safety tools: tool index is not ready")
         return []
 
     try:
@@ -918,6 +977,7 @@ async def _get_actuation_safety_tools(
         InvalidNamespaceError,
         psycopg.OperationalError,
         psycopg.ProgrammingError,
+        psycopg.DataError,
         ValueError,
     ) as err:
         LOGGER.warning("Deterministic safety tool filter failed (known error): %s", err)
@@ -927,6 +987,7 @@ async def _get_actuation_safety_tools(
             InvalidNamespaceError,
             psycopg.OperationalError,
             psycopg.ProgrammingError,
+            psycopg.DataError,
             ValueError,
         ) as err2:
             LOGGER.warning(
@@ -1017,6 +1078,71 @@ def _get_fallback_tools(
     return fallback_tools
 
 
+def _tool_retrieval_fallback_reason(
+    *,
+    store: BaseStore | None,
+    config: RunnableConfig,
+) -> tuple[str, bool, bool, bool]:
+    """Return a concise reason for falling back to keyword-filtered tools."""
+    tool_index_ready, tool_indexing_in_progress, tool_index_failed = _tool_index_state(
+        config
+    )
+    if store is None:
+        reason = "store unavailable"
+    elif tool_index_failed:
+        reason = "tool index failed"
+    elif not tool_index_ready:
+        reason = (
+            "tool index still building"
+            if tool_indexing_in_progress
+            else "tool index not ready"
+        )
+    else:
+        reason = "vector search returned no usable tool candidates"
+    return reason, tool_index_ready, tool_indexing_in_progress, tool_index_failed
+
+
+def _ensure_array_items(schema: dict[str, Any]) -> dict[str, Any]:
+    """
+    Recursively ensure every array-type node has an ``items`` field.
+
+    Gemini rejects function declarations where an array property lacks ``items``.
+    OpenAI tolerates the omission; this normalisation is a no-op for other providers.
+
+    Also handles anyOf schemas such as ``vol.Any(cv.string, [cv.string])`` which
+    safe_convert emits as ``{"anyOf": [{}, {"type": "array", "items": {...}}]}``.
+    langchain_google_genai resolves these to type_:ARRAY but then checks
+    ``v.get("items")`` on the outer anyOf dict (where items is absent), so it
+    never populates properties_item["items"].  Hoisting items to the top level
+    of the anyOf schema makes it visible to the library's check.
+    """
+    # anyOf with an array variant: hoist items upward so langchain_google_genai
+    # can find them when it resolves the anyOf to type_:ARRAY.
+    if "anyOf" in schema and "items" not in schema:
+        array_variants = [
+            v
+            for v in schema["anyOf"]
+            if isinstance(v, dict) and v.get("type") == "array"
+        ]
+        if array_variants:
+            schema = {
+                **schema,
+                "items": array_variants[-1].get("items", {"type": "string"}),
+            }
+    if schema.get("type") == "array" and "items" not in schema:
+        schema = {**schema, "items": {"type": "string"}}
+    if "properties" in schema:
+        schema = {
+            **schema,
+            "properties": {
+                k: _ensure_array_items(v) for k, v in schema["properties"].items()
+            },
+        }
+    if isinstance(schema.get("items"), dict):
+        schema = {**schema, "items": _ensure_array_items(schema["items"])}
+    return schema
+
+
 def _format_and_dedupe_tools(
     raw_tools: list[RawTool],
 ) -> tuple[list[dict[str, Any]], dict[str, str]]:
@@ -1038,6 +1164,8 @@ def _format_and_dedupe_tools(
         # OpenAI requires 'properties' on all type:object schemas.
         if parameters.get("type") == "object" and "properties" not in parameters:
             parameters["properties"] = {}
+        # Gemini requires 'items' on all type:array properties.
+        parameters = _ensure_array_items(parameters)
         selected_tools.append(
             {
                 "type": "function",
@@ -1270,11 +1398,21 @@ async def _retrieve_tools(
     # queries promote GetLiveContext to the front; otherwise use declaration order.
     if not all_candidates:
         fallback = _get_fallback_tools(config, allowed_api_ids)
+        (
+            fallback_reason,
+            tool_index_ready,
+            tool_indexing_in_progress,
+            tool_index_failed,
+        ) = _tool_retrieval_fallback_reason(store=store, config=config)
         LOGGER.warning(
-            "Tool index not ready or returned no results; "
-            "applying keyword-filtered fallback (limit=%d, total=%d).",
+            "Tool retrieval using keyword-filtered fallback: %s "
+            "(limit=%d, total=%d, ready=%s, indexing=%s, failed=%s).",
+            fallback_reason,
             limit,
             len(fallback),
+            tool_index_ready,
+            tool_indexing_in_progress,
+            tool_index_failed,
         )
         if _query_needs_actuation_safety(query):
             actuation = [t for t in fallback if t["is_actuation"]]
@@ -1450,6 +1588,50 @@ async def _search_memories(store: BaseStore, user_id: str, query: str | None) ->
             "incompatible response (not OpenAI-standard). Falling back to "
             "recency-based memory retrieval. Check the /v1/embeddings response "
             "format of your OpenAI-compatible server."
+        )
+        try:
+            return await store.asearch((user_id, "memories"), limit=10)
+        except Exception:
+            LOGGER.exception("Memory recency search also failed; no memories injected")
+            return []
+    except Exception:
+        LOGGER.exception("Unexpected memory store search failure; no memories injected")
+        return []
+
+
+def _bind_model_tools(
+    model: Any, selected_tools: list[Any], *, disable_reasoning: bool
+) -> Any:
+    """Bind tools to a model in a worker thread."""
+    if disable_reasoning:
+        model = model.with_config(config={"configurable": {"reasoning": False}})
+    return model.bind_tools(selected_tools)
+
+
+async def _search_memories(store: BaseStore, user_id: str, query: str | None) -> list:
+    """Search the memory store, falling back gracefully on embedding errors."""
+    try:
+        return await store.asearch((user_id, "memories"), query=query, limit=10)
+    except AttributeError:
+        # Some OpenAI-compatible servers (e.g. llama-server) return a raw JSON
+        # list from /v1/embeddings instead of {"data": [...]}, which causes the
+        # OpenAI SDK parser to raise AttributeError.  Fall back to recency search.
+        LOGGER.warning(
+            "Memory semantic search failed — embedding endpoint returned an "
+            "incompatible response (not OpenAI-standard). Falling back to "
+            "recency-based memory retrieval. Check the /v1/embeddings response "
+            "format of your OpenAI-compatible server."
+        )
+        try:
+            return await store.asearch((user_id, "memories"), limit=10)
+        except Exception:
+            LOGGER.exception("Memory recency search also failed; no memories injected")
+            return []
+    except psycopg.DataError as err:
+        LOGGER.warning(
+            "Memory semantic search failed due to vector store data mismatch: %s. "
+            "Falling back to recency-based memory retrieval.",
+            err,
         )
         try:
             return await store.asearch((user_id, "memories"), limit=10)

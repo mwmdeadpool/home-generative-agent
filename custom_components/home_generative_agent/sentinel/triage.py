@@ -40,7 +40,7 @@ from ..core.utils import (
     extract_final,
     run_sentinel_model_call,
 )
-from .logging_utils import (
+from custom_components.home_generative_agent.sentinel.logging_utils import (
     RepeatingLogLimiter,
 )
 
