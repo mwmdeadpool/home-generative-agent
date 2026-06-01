@@ -1840,12 +1840,23 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
             "No embeddings provider available; vector store will be limited.",
         )
     else:
+        # Use the type of the *active* provider at setup time, which may differ
+        # from `embedding_provider` when the fallback chain skipped the primary.
+        if _emb_fb and _emb_chain:
+            _active_emb_prov = providers.get(_emb_chain[0][2])
+            _effective_emb_type = (
+                _active_emb_prov.provider_type
+                if _active_emb_prov is not None
+                else embedding_provider
+            )
+        else:
+            _effective_emb_type = embedding_provider
         embedding_dims = (
             options.get(
                 CONF_OPENAI_COMPATIBLE_EMBEDDING_DIMS,
                 RECOMMENDED_OPENAI_COMPATIBLE_EMBEDDING_DIMS,
             )
-            if embedding_provider == "openai_compatible"
+            if _effective_emb_type == "openai_compatible"
             else EMBEDDING_MODEL_DIMS
         )
         index_config = PostgresIndexConfig(
