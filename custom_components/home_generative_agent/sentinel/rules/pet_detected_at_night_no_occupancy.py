@@ -4,13 +4,13 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from custom_components.home_generative_agent.sentinel.models import (
+from ..models import (
     AnomalyFinding,
     build_anomaly_id,
 )
 
 if TYPE_CHECKING:
-    from custom_components.home_generative_agent.snapshot.schema import (
+    from ...snapshot.schema import (
         FullStateSnapshot,
     )
 
