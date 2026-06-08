@@ -1,4 +1,5 @@
 """Client for interacting with a mem0 MCP server."""
+
 from __future__ import annotations
 
 import asyncio
@@ -35,7 +36,9 @@ class Mem0Client:
         try:
             # Connect to SSE endpoint
             # We assume the URL is the full SSE endpoint e.g. http://host:port/sse
-            read, write = await self._exit_stack.enter_async_context(sse_client(self._url))
+            read, write = await self._exit_stack.enter_async_context(
+                sse_client(self._url)
+            )
 
             # Create and initialize session
             self._session = await self._exit_stack.enter_async_context(
@@ -77,7 +80,9 @@ class Mem0Client:
 
     async def search_memories(self, query: str, limit: int = 3) -> str:
         """Search memories."""
-        return await self._call_tool("search_memories", {"query": query, "limit": limit})
+        return await self._call_tool(
+            "search_memories", {"query": query, "limit": limit}
+        )
 
     async def _call_tool(self, tool_name: str, args: dict[str, Any]) -> str:
         """Helper to execute a tool."""
@@ -89,7 +94,7 @@ class Mem0Client:
         if not target_tool:
             # Fallback simple search if prefixes are involved (e.g. server name?)
             # But here we only have one session, so likely no prefix unless server enforced.
-             for name, tool in self._tools.items():
+            for name, tool in self._tools.items():
                 if name.endswith(tool_name.replace("mem0_", "")):
                     target_tool = tool
                     break

@@ -11,7 +11,7 @@ from homeassistant.const import (
     CONF_USERNAME,
 )
 
-from ..const import CONF_DB_NAME, CONF_DB_PARAMS  # noqa: TID252
+from ..const import CONF_DB_NAME, CONF_DB_PARAMS
 
 
 def parse_postgres_uri(uri: str) -> dict[str, Any]:

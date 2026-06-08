@@ -14,7 +14,7 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.restore_state import RestoreEntity as _RestoreEntity
 
-from ..const import SIGNAL_HGA_RECOGNIZED  # noqa: TID252
+from ..const import SIGNAL_HGA_RECOGNIZED
 
 # During type checking, avoid mixed-base attribute conflicts.
 if TYPE_CHECKING:

@@ -14,7 +14,7 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.util import dt as dt_util
 
-from ..const import SIGNAL_TOOL_INDEX_UPDATED  # noqa: TID252
+from ..const import SIGNAL_TOOL_INDEX_UPDATED
 
 LOGGER = logging.getLogger(__name__)
 

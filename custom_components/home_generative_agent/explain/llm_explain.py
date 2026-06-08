@@ -15,7 +15,6 @@ from ..core.utils import (
     extract_final,
     run_sentinel_model_call,
 )
-
 from .prompts import SYSTEM_PROMPT, USER_PROMPT_TEMPLATE
 
 if TYPE_CHECKING:

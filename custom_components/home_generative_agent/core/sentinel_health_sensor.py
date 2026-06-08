@@ -11,7 +11,7 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.util import dt as dt_util
 
-from ..const import (  # noqa: TID252
+from ..const import (
     CONF_SENTINEL_ENABLED,
     RECOMMENDED_SENTINEL_ENABLED,
     SIGNAL_SENTINEL_RUN_COMPLETE,

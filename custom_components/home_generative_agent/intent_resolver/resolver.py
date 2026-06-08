@@ -154,7 +154,9 @@ async def resolve_intent(
         elapsed = (time.monotonic() - start) * 1000
         _LOGGER.debug(
             "Tier 2 (compound): %.1fms - %s - %d matches",
-            elapsed, text, len(matches),
+            elapsed,
+            text,
+            len(matches),
         )
         # Build partial actions from what we can resolve
         actions = []
@@ -220,7 +222,12 @@ async def resolve_intent(
         elapsed = (time.monotonic() - start) * 1000
         _LOGGER.info(
             "Tier 1 (direct): %.1fms - '%s' → %s.%s(%s) [%.2f]",
-            elapsed, text, domain, service, best["entity_id"], best["score"],
+            elapsed,
+            text,
+            domain,
+            service,
+            best["entity_id"],
+            best["score"],
         )
         return IntentResult(
             tier=IntentTier.DIRECT,
@@ -233,7 +240,9 @@ async def resolve_intent(
     elapsed = (time.monotonic() - start) * 1000
     _LOGGER.debug(
         "Tier 3 (low confidence): %.1fms - %s - best=%.2f",
-        elapsed, text, best["score"],
+        elapsed,
+        text,
+        best["score"],
     )
     return IntentResult(
         tier=IntentTier.FULL_LLM,
@@ -246,17 +255,23 @@ def _default_service_for_domain(domain: str, text: str) -> str:
     """Infer the most likely service for a domain based on context."""
     text_lower = text.lower()
     defaults = {
-        "light": "turn_off" if any(w in text_lower for w in ["off", "dim"]) else "turn_on",
+        "light": "turn_off"
+        if any(w in text_lower for w in ["off", "dim"])
+        else "turn_on",
         "switch": "turn_off" if "off" in text_lower else "turn_on",
         "fan": "turn_off" if "off" in text_lower else "turn_on",
         "cover": "close_cover" if "close" in text_lower else "open_cover",
         "lock": "unlock" if "unlock" in text_lower else "lock",
         "climate": "set_temperature",
-        "media_player": "media_pause" if any(w in text_lower for w in ["pause", "stop"]) else "media_play",
+        "media_player": "media_pause"
+        if any(w in text_lower for w in ["pause", "stop"])
+        else "media_play",
         "scene": "turn_on",
         "script": "turn_on",
         # automation excluded from fast intent — too easily confused with device entities
         "vacuum": "start" if "start" in text_lower else "return_to_base",
-        "alarm_control_panel": "alarm_disarm" if "disarm" in text_lower else "alarm_arm_away",
+        "alarm_control_panel": "alarm_disarm"
+        if "disarm" in text_lower
+        else "alarm_arm_away",
     }
     return defaults.get(domain, "turn_on")

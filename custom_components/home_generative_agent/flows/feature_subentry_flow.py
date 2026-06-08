@@ -32,7 +32,7 @@ from homeassistant.helpers.selector import (
     TextSelectorType,
 )
 
-from ..const import (  # noqa: TID252
+from ..const import (
     CONF_DB_NAME,
     CONF_DB_PARAMS,
     CONF_DISABLED_FEATURES,
@@ -63,8 +63,8 @@ from ..const import (  # noqa: TID252
     SUBENTRY_TYPE_FEATURE,
     SUBENTRY_TYPE_MODEL_PROVIDER,
 )
-from ..core.db_utils import build_postgres_uri  # noqa: TID252
-from ..core.utils import (  # noqa: TID252
+from ..core.db_utils import build_postgres_uri
+from ..core.utils import (
     CannotConnectError,
     InvalidAuthError,
     list_ollama_models,

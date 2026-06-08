@@ -12,7 +12,7 @@ import tiktoken
 from langchain_core.messages import BaseMessage
 from langchain_core.messages.utils import count_tokens_approximately
 
-from ..const import (  # noqa: TID252
+from ..const import (
     CONF_GEMINI_API_KEY,
     CONF_OLLAMA_CHAT_URL,
     CONF_OLLAMA_URL,

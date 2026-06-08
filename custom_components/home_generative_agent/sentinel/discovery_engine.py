@@ -33,7 +33,6 @@ from ..snapshot.builder import (
 from ..snapshot.discovery_reducer import (
     reduce_snapshot_for_discovery,
 )
-
 from .discovery_schema import DISCOVERY_OUTPUT_SCHEMA, DISCOVERY_SCHEMA_VERSION
 from .discovery_semantic import candidate_semantic_key, rule_semantic_key
 from .logging_utils import RepeatingLogLimiter

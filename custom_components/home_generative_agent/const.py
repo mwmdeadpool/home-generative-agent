@@ -53,7 +53,7 @@ CONF_DB_URI = "db_uri"
 CONF_DB_NAME = "db_name"
 CONF_DB_PARAMS = "db_params"
 RECOMMENDED_DB_USERNAME = "ha_user"
-RECOMMENDED_DB_PASSWORD = "ha_password"  # noqa: S105
+RECOMMENDED_DB_PASSWORD = "ha_password"
 RECOMMENDED_DB_HOST = "localhost"
 RECOMMENDED_DB_PORT = 5432
 RECOMMENDED_DB_NAME = "ha_db"
@@ -521,7 +521,7 @@ Example outputs:
 
 Do not wrap the answer in JSON, lists, quotes, or markup.
 Return plain English text only.
-"""  # noqa: E501
+"""
 VLM_USER_PROMPT = """
 FRAME DESCRIPTION REQUEST
 
@@ -536,7 +536,7 @@ Primary attention: {key_words}
 Describe this image clearly and factually in 1-3 sentences, focusing on the listed items if present.
 Follow the style and rules from the system prompt.
 Do not add names, timestamps, or speculation.
-"""  # noqa: E501
+"""
 VLM_IMAGE_WIDTH = 1920
 VLM_IMAGE_HEIGHT = 1080
 
@@ -721,7 +721,7 @@ Input:
 Output (≤150 chars):
 Lindo St. Angel steps onto the porch, then leans on the railing.
 END_EXAMPLE
-"""  # noqa: E501
+"""
 VIDEO_ANALYZER_PROMPT = """
 Write ≤150 characters (≤2 sentences). Obey all rules and narrate in order.
 """
@@ -1056,11 +1056,15 @@ _PROMPT_INJECTION_PATTERNS: list[re.Pattern[str]] = [
     # Role prefix patterns (system:, assistant:, user:)
     re.compile(r"(?i)^(system|assistant|user|developer|model)\s*[:\-]\s*"),
     # Newline-based injection attempts
-    re.compile(r"[\n\r]+(?:system|assistant|user|developer|model)\s*[:\-]", re.IGNORECASE),
+    re.compile(
+        r"[\n\r]+(?:system|assistant|user|developer|model)\s*[:\-]", re.IGNORECASE
+    ),
     # XML tag injection patterns
     re.compile(r"(?i)</?(?:system|assistant|user|instruction|prompt)[^>]*>"),
     # Delimiter injection patterns
-    re.compile(r"(?i)(<\|(?:im|end|start|system|user|assistant).*?\|>|\[\[|\]\]|<<<|>>>)"),
+    re.compile(
+        r"(?i)(<\|(?:im|end|start|system|user|assistant).*?\|>|\[\[|\]\]|<<<|>>>)"
+    ),
 ]
 
 # Valid entity_id format pattern
@@ -1096,7 +1100,12 @@ def sanitize_for_prompt(text: str | None) -> str:
 
     # Remove control characters except normal whitespace
     text = "".join(
-        char for char in text if char == "\t" or char == "\n" or char == "\r" or (ord(char) >= 32 and ord(char) != 127)
+        char
+        for char in text
+        if char == "\t"
+        or char == "\n"
+        or char == "\r"
+        or (ord(char) >= 32 and ord(char) != 127)
     )
 
     # Replace newlines with spaces to prevent injection via line breaks

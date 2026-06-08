@@ -53,9 +53,7 @@ class CompositeStore(BaseStore):
         if self.mem0_store and namespace and namespace[-1] == "memories":
             content = value.get("content", "")
             context = value.get("context", "")
-            await self.mem0_store.save_memory(
-                f"Content: {content}\nContext: {context}"
-            )
+            await self.mem0_store.save_memory(f"Content: {content}\nContext: {context}")
         else:
             await self.postgres_store.aput(namespace, key, value)
 
@@ -70,7 +68,9 @@ class CompositeStore(BaseStore):
             if not query:
                 return []
             results = await self.mem0_store.search_memories(query, limit=limit)
-            return [SearchResult(key="", value={"content": r}, score=0.0) for r in results]
+            return [
+                SearchResult(key="", value={"content": r}, score=0.0) for r in results
+            ]
         return await self.postgres_store.asearch(namespace, query, limit)
 
     def acreate(

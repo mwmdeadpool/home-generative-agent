@@ -6,7 +6,6 @@ These tests verify that user-controlled strings (entity names, friendly_names,
 state attributes) are properly sanitized before inclusion in LLM prompts.
 """
 
-
 from custom_components.home_generative_agent.const import (
     MAX_PROMPT_INPUT_LENGTH,
     sanitize_entity_for_prompt,

@@ -1,4 +1,5 @@
-"""Gemini-side compatibility shims for tool schema conversion.
+"""
+Gemini-side compatibility shims for tool schema conversion.
 
 Background
 ----------
@@ -23,6 +24,7 @@ Until either HA core or langchain_google_genai fixes this upstream, we
 post-process the converter's output and inject a default ``items`` schema
 into any array node that lacks one.
 """
+
 from __future__ import annotations
 
 import logging
@@ -57,7 +59,8 @@ def apply_gemini_tool_schema_fix() -> None:
 
 
 def _inject_array_items(node: Any) -> None:
-    """Recursively walk dict/list and add items={'type':'STRING'} to bare arrays.
+    """
+    Recursively walk dict/list and add items={'type':'STRING'} to bare arrays.
 
     The langchain_google_genai converter labels array types inconsistently:
     inner ``anyOf`` variants use the string key ``type`` with value
