@@ -158,7 +158,9 @@ def _validate_expression(expression: str) -> str | None:
     # Resource limit: expression length
     MAX_EXPRESSION_LENGTH = 1000
     if len(expression) > MAX_EXPRESSION_LENGTH:
-        return f"expression exceeds maximum length of {MAX_EXPRESSION_LENGTH} characters"
+        return (
+            f"expression exceeds maximum length of {MAX_EXPRESSION_LENGTH} characters"
+        )
 
     try:
         tree = ast.parse(expression, mode="eval")

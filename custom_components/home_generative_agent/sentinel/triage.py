@@ -45,10 +45,10 @@ from .logging_utils import (
 )
 
 if TYPE_CHECKING:
-    from .models import AnomalyFinding
     from ..snapshot.schema import (
         FullStateSnapshot,
     )
+    from .models import AnomalyFinding
 
 LOGGER = logging.getLogger(__name__)
 _PARSE_LOG_LIMITER = RepeatingLogLimiter(LOGGER)

@@ -46,7 +46,7 @@ from langgraph.prebuilt.tool_node import InjectedStore
 from langgraph.store.base import BaseStore  # noqa: TC002
 from voluptuous import MultipleInvalid
 
-from ..const import (  # noqa: TID252
+from ..const import (
     AUTOMATION_TOOL_BLUEPRINT_NAME,
     AUTOMATION_TOOL_EVENT_REGISTERED,
     CONF_CRITICAL_ACTION_PIN_HASH,
@@ -71,8 +71,8 @@ from ..const import (  # noqa: TID252
     VLM_USER_PROMPT,
     sanitize_for_prompt,
 )
-from ..core.conversation_helpers import _resolve_entity_id  # noqa: TID252
-from ..core.utils import extract_final, verify_pin  # noqa: TID252
+from ..core.conversation_helpers import _resolve_entity_id
+from ..core.utils import extract_final, verify_pin
 from .camera_activity import get_camera_last_events_from_states
 from .helpers import (
     ConfigurableData,
@@ -93,7 +93,7 @@ LOGGER = logging.getLogger(__name__)
 
 
 @tool(parse_docstring=True)
-async def resolve_entity_ids(  # noqa: D417
+async def resolve_entity_ids(
     entity_ids: list[str],
     *,
     config: Annotated[RunnableConfig, InjectedToolArg()],
@@ -419,7 +419,7 @@ async def analyze_image(
 
 
 @tool(parse_docstring=True)
-async def get_and_analyze_camera_image(  # noqa: D417
+async def get_and_analyze_camera_image(
     camera_name: str,
     detection_keywords: list[str] | None = None,
     *,
@@ -448,7 +448,7 @@ async def get_and_analyze_camera_image(  # noqa: D417
 
 
 @tool(parse_docstring=True)
-async def upsert_memory(  # noqa: D417
+async def upsert_memory(
     content: str,
     context: str = "",
     *,
@@ -502,7 +502,7 @@ async def upsert_memory(  # noqa: D417
 
 
 @tool(parse_docstring=True)
-async def add_automation(  # noqa: D417
+async def add_automation(
     automation_yaml: str = "",
     time_pattern: str = "",
     message: str = "",
@@ -595,7 +595,7 @@ async def add_automation(  # noqa: D417
 
 
 @tool(parse_docstring=True)
-async def write_yaml_file(  # noqa: D417
+async def write_yaml_file(
     yaml_text: Any,
     filename_prefix: str = "hga",
     *,
@@ -646,7 +646,7 @@ async def write_yaml_file(  # noqa: D417
 
 
 @tool(parse_docstring=True)
-async def confirm_sensitive_action(  # noqa: D417, PLR0911
+async def confirm_sensitive_action(  # noqa: PLR0911
     action_id: str,
     pin: str,
     *,
@@ -804,7 +804,7 @@ async def _execute_pending_action(
 
 
 @tool(parse_docstring=True)
-async def alarm_control(  # noqa: D417, PLR0913
+async def alarm_control(
     name: str | None = None,
     entity_id: str | None = None,
     state: str | None = None,
@@ -1074,7 +1074,7 @@ async def _get_existing_entity_id(
 
 
 @tool(parse_docstring=True)
-async def get_entity_history(  # noqa: D417
+async def get_entity_history(
     friendly_names: list[str],
     domains: list[str],
     local_start_time: str,
@@ -1196,7 +1196,7 @@ async def get_entity_history(  # noqa: D417
 # It is no longer used. Keeping it here for reference only.
 ###
 @tool(parse_docstring=True)
-async def get_current_device_state(  # noqa: D417
+async def get_current_device_state(
     names: list[str],
     *,
     # Hide these arguments from the model.
@@ -1245,7 +1245,7 @@ async def get_current_device_state(  # noqa: D417
 
 
 @tool(parse_docstring=True)
-async def get_camera_last_events(  # noqa: D417
+async def get_camera_last_events(
     camera_entity_id: str | None = None,
     *,
     config: Annotated[RunnableConfig, InjectedToolArg()],
@@ -1278,7 +1278,6 @@ async def get_camera_last_events(  # noqa: D417
         allow_unicode=True,
         sort_keys=False,
     )
-
 
 
 @tool(parse_docstring=True)
@@ -1393,7 +1392,15 @@ def next_weekday(
         weekday: The name of the weekday (e.g., 'Monday', 'Friday').
 
     """
-    weekdays = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+    weekdays = [
+        "monday",
+        "tuesday",
+        "wednesday",
+        "thursday",
+        "friday",
+        "saturday",
+        "sunday",
+    ]
     w = weekday.lower()
     if w not in weekdays:
         return "Invalid weekday name."
@@ -1544,7 +1551,11 @@ def percentage_diff(
     percent = ((new - original) / abs(original)) * 100
     return {
         "percentage_change": round(percent, 2),
-        "direction": "increase" if percent > 0 else "decrease" if percent < 0 else "no change"
+        "direction": "increase"
+        if percent > 0
+        else "decrease"
+        if percent < 0
+        else "no change",
     }
 
 
@@ -1561,10 +1572,7 @@ def round_number(
         places: Number of decimal places.
 
     """
-    return {
-        "rounded_value": round(value, places),
-        "decimal_places": places
-    }
+    return {"rounded_value": round(value, places), "decimal_places": places}
 
 
 # ----- Dictionary Tools -----
@@ -1573,7 +1581,7 @@ API_BASE = "https://api.dictionaryapi.dev/api/v2/entries/en/"
 
 
 @tool(parse_docstring=True)
-async def define(  # noqa: D417
+async def define(
     word: str,
     *,
     config: Annotated[RunnableConfig, InjectedToolArg()],
@@ -1598,22 +1606,26 @@ async def define(  # noqa: D417
 
         # data is a list of entries
         if not isinstance(data, list):
-             return {"error": "Unexpected API response format"}
+            return {"error": "Unexpected API response format"}
 
         meanings = []
         for entry in data:
             for meaning in entry.get("meanings", []):
-                meanings.append({
-                    "part_of_speech": meaning.get("partOfSpeech"),
-                    "definitions": [d.get("definition") for d in meaning.get("definitions", [])]
-                })
+                meanings.append(
+                    {
+                        "part_of_speech": meaning.get("partOfSpeech"),
+                        "definitions": [
+                            d.get("definition") for d in meaning.get("definitions", [])
+                        ],
+                    }
+                )
         return {"word": word, "meanings": meanings}
     except Exception as err:
         return {"error": f"Error fetching definition: {err}"}
 
 
 @tool(parse_docstring=True)
-async def example_usage(  # noqa: D417
+async def example_usage(
     word: str,
     *,
     config: Annotated[RunnableConfig, InjectedToolArg()],
@@ -1637,7 +1649,7 @@ async def example_usage(  # noqa: D417
             return []
 
         if not isinstance(data, list):
-             return {"error": "Unexpected API response format"}
+            return {"error": "Unexpected API response format"}
 
         examples = []
         for entry in data:
@@ -1652,7 +1664,7 @@ async def example_usage(  # noqa: D417
 
 
 @tool(parse_docstring=True)
-async def synonyms(  # noqa: D417
+async def synonyms(
     word: str,
     *,
     config: Annotated[RunnableConfig, InjectedToolArg()],
@@ -1676,7 +1688,7 @@ async def synonyms(  # noqa: D417
             return []
 
         if not isinstance(data, list):
-             return {"error": "Unexpected API response format"}
+            return {"error": "Unexpected API response format"}
 
         synonyms_set = set()
         for entry in data:
@@ -1691,11 +1703,13 @@ async def synonyms(  # noqa: D417
 
 # ----- Google Places Tool -----
 
-GOOGLE_PLACES_TEXT_SEARCH_URL = "https://maps.googleapis.com/maps/api/place/textsearch/json"
+GOOGLE_PLACES_TEXT_SEARCH_URL = (
+    "https://maps.googleapis.com/maps/api/place/textsearch/json"
+)
 
 
 @tool(parse_docstring=True)
-async def find_nearby_places(  # noqa: D417
+async def find_nearby_places(
     query: str,
     max_results: int = 5,
     *,
@@ -1733,10 +1747,10 @@ async def find_nearby_places(  # noqa: D417
         data = response.json()
 
         if data.get("status") != "OK":
-             error_msg = data.get("error_message", data.get("status"))
-             if data.get("status") == "ZERO_RESULTS":
-                 return []
-             return {"error": f"Google Places API Error: {error_msg}"}
+            error_msg = data.get("error_message", data.get("status"))
+            if data.get("status") == "ZERO_RESULTS":
+                return []
+            return {"error": f"Google Places API Error: {error_msg}"}
 
         results = data.get("results", [])
         output = []
@@ -1753,8 +1767,11 @@ async def find_nearby_places(  # noqa: D417
                 "place_id": place.get("place_id"),
                 "types": place.get("types", []),
             }
-            if place.get("opening_hours") and place["opening_hours"].get("open_now") is not None:
-                 item["open_now"] = place["opening_hours"]["open_now"]
+            if (
+                place.get("opening_hours")
+                and place["opening_hours"].get("open_now") is not None
+            ):
+                item["open_now"] = place["opening_hours"]["open_now"]
 
             output.append(item)
 
@@ -1770,7 +1787,7 @@ WIKIPEDIA_API_URL = "https://en.wikipedia.org/w/api.php"
 
 
 @tool(parse_docstring=True)
-async def search_wikipedia(  # noqa: D417
+async def search_wikipedia(
     query: str,
     limit: int = 10,
     *,
@@ -1809,11 +1826,15 @@ async def search_wikipedia(  # noqa: D417
 
         output = []
         for item in search_results:
-            output.append({
-                "title": item.get("title"),
-                "snippet": item.get("snippet", "").replace('<span class="searchmatch">', "").replace("</span>", ""),
-                "pageid": item.get("pageid"),
-            })
+            output.append(
+                {
+                    "title": item.get("title"),
+                    "snippet": item.get("snippet", "")
+                    .replace('<span class="searchmatch">', "")
+                    .replace("</span>", ""),
+                    "pageid": item.get("pageid"),
+                }
+            )
 
         return output
     except Exception as err:
@@ -1821,7 +1842,7 @@ async def search_wikipedia(  # noqa: D417
 
 
 @tool(parse_docstring=True)
-async def get_wikipedia_page(  # noqa: D417
+async def get_wikipedia_page(
     title: str,
     *,
     config: Annotated[RunnableConfig, InjectedToolArg()],
@@ -1846,7 +1867,7 @@ async def get_wikipedia_page(  # noqa: D417
         "explaintext": 1,
         "inprop": "url",
         "titles": title,
-        "pithumbsize": 500
+        "pithumbsize": 500,
     }
 
     try:
@@ -1858,7 +1879,7 @@ async def get_wikipedia_page(  # noqa: D417
 
         pages = data.get("query", {}).get("pages", {})
         if not pages:
-             return {"error": "Page not found."}
+            return {"error": "Page not found."}
 
         # 'pages' is a dict keyed by pageid, but we typically just want the first one found
         page = next(iter(pages.values()))
@@ -1870,7 +1891,7 @@ async def get_wikipedia_page(  # noqa: D417
             "title": page.get("title"),
             "summary": page.get("extract"),
             "url": page.get("fullurl"),
-            "image": page.get("thumbnail", {}).get("source")
+            "image": page.get("thumbnail", {}).get("source"),
         }
     except Exception as err:
         return {"error": f"Error getting Wikipedia page: {err}"}
@@ -1880,7 +1901,7 @@ async def get_wikipedia_page(  # noqa: D417
 
 
 @tool(parse_docstring=True)
-async def query_lightrag(  # noqa: D417
+async def query_lightrag(
     query: str,
     mode: str = "mix",
     *,
@@ -1915,19 +1936,18 @@ async def query_lightrag(  # noqa: D417
 
     try:
         response = await client.post(
-            f"{base_url}/query",
-            json=payload,
-            headers=headers,
-            timeout=60
+            f"{base_url}/query", json=payload, headers=headers, timeout=60
         )
 
         if response.status_code != 200:
-            return {"error": f"LightRAG Error ({response.status_code}): {response.text}"}
+            return {
+                "error": f"LightRAG Error ({response.status_code}): {response.text}"
+            }
 
         data = response.json()
         return {
             "response": data.get("response", "No response generated."),
-            "mode": mode
+            "mode": mode,
         }
     except Exception as err:
         return {"error": f"Error querying LightRAG: {err}"}
@@ -1950,11 +1970,12 @@ def _get_reddit_client(config: RunnableConfig) -> Any:
         raise ValueError("Reddit credentials not configured")
 
     import praw
+
     return praw.Reddit(
         client_id=client_id,
         client_secret=client_secret,
         user_agent=user_agent,
-        check_for_async=False
+        check_for_async=False,
     )
 
 
@@ -1996,15 +2017,19 @@ async def get_subreddit_posts(
 
         results = []
         for post in posts:
-            results.append({
-                "title": post.title,
-                "author": str(post.author) if post.author else "[deleted]",
-                "score": post.score,
-                "url": post.url,
-                "id": post.id,
-                "is_self": post.is_self,
-                "text": post.selftext[:500] + "..." if len(post.selftext) > 500 else post.selftext
-            })
+            results.append(
+                {
+                    "title": post.title,
+                    "author": str(post.author) if post.author else "[deleted]",
+                    "score": post.score,
+                    "url": post.url,
+                    "id": post.id,
+                    "is_self": post.is_self,
+                    "text": post.selftext[:500] + "..."
+                    if len(post.selftext) > 500
+                    else post.selftext,
+                }
+            )
         return results
 
     try:
@@ -2051,12 +2076,16 @@ async def get_post_details(
             submission.comments.replace_more(limit=0)
             comments = []
             for comment in submission.comments[:10]:
-                 if hasattr(comment, "body"):
-                    comments.append({
-                        "author": str(comment.author) if comment.author else "[deleted]",
-                        "body": comment.body[:300],
-                        "score": comment.score
-                    })
+                if hasattr(comment, "body"):
+                    comments.append(
+                        {
+                            "author": str(comment.author)
+                            if comment.author
+                            else "[deleted]",
+                            "body": comment.body[:300],
+                            "score": comment.score,
+                        }
+                    )
             data["comments"] = comments
 
         return data
@@ -2099,13 +2128,15 @@ async def search_reddit(
 
         results = []
         for post in api.search(query, sort=sort, time_filter=time_filter, limit=limit):
-            results.append({
-                "title": post.title,
-                "subreddit": str(post.subreddit),
-                "score": post.score,
-                "url": post.url,
-                "id": post.id
-            })
+            results.append(
+                {
+                    "title": post.title,
+                    "subreddit": str(post.subreddit),
+                    "score": post.score,
+                    "url": post.url,
+                    "id": post.id,
+                }
+            )
         return results
 
     try:
@@ -2138,7 +2169,7 @@ async def get_user_profile(
             "link_karma": user.link_karma,
             "created_utc": user.created_utc,
             "is_mod": user.is_mod,
-            "is_employee": user.is_employee
+            "is_employee": user.is_employee,
         }
 
     try:
@@ -2163,6 +2194,7 @@ def _get_plex_server(config: RunnableConfig) -> Any:
         raise ValueError("Plex configuration missing (URL or Token)")
 
     from plexapi.server import PlexServer
+
     return PlexServer(base_url, token)
 
 
@@ -2196,12 +2228,14 @@ async def plex_search_movies(
         results = plex.library.search(**kwargs)
         data = []
         for vid in results[:limit]:
-             data.append({
-                 "title": vid.title,
-                 "year": vid.year,
-                 "key": vid.ratingKey,
-                 "summary": vid.summary[:200]
-             })
+            data.append(
+                {
+                    "title": vid.title,
+                    "year": vid.year,
+                    "key": vid.ratingKey,
+                    "summary": vid.summary[:200],
+                }
+            )
         return data
 
     try:
@@ -2323,7 +2357,10 @@ async def plex_list_playlists(
 
     def _list():
         plex = _get_plex_server(config)
-        return [{"title": pl.title, "key": pl.ratingKey, "count": pl.leafCount} for pl in plex.playlists()]
+        return [
+            {"title": pl.title, "key": pl.ratingKey, "count": pl.leafCount}
+            for pl in plex.playlists()
+        ]
 
     try:
         return await hass.async_add_executor_job(_list)
@@ -2349,12 +2386,17 @@ async def plex_get_playlist_items(
     def _fetch():
         plex = _get_plex_server(config)
         try:
-            pl = plex.playlist(int(playlist_key)) # fetchItem doesnt always work for playlists?
+            pl = plex.playlist(
+                int(playlist_key)
+            )  # fetchItem doesnt always work for playlists?
             # Or fetchItem(key) works. Let's try to find it in playlists() list if fetch fails or just use fetchItem
             # plex.playlist() might need title?
             # safe way:
             pl = plex.fetchItem(int(playlist_key))
-            return [{"title": i.title, "year": i.year, "key": i.ratingKey} for i in pl.items()]
+            return [
+                {"title": i.title, "year": i.year, "key": i.ratingKey}
+                for i in pl.items()
+            ]
         except Exception as e:
             return [{"error": str(e)}]
 

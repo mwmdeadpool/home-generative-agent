@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING, Final
 from homeassistant.util import dt as dt_util
 from PIL import Image
 
-from ..const import (  # noqa: TID252
+from ..const import (
     VIDEO_ANALYZER_LATEST_NAME,
     VIDEO_ANALYZER_LATEST_SUBFOLDER,
 )

@@ -27,7 +27,7 @@ from homeassistant.helpers.selector import (
     TextSelectorType,
 )
 
-from ..const import (  # noqa: TID252
+from ..const import (
     CONF_STT_LANGUAGE,
     CONF_STT_MODEL_NAME,
     CONF_STT_OPENAI_PROVIDER_ID,
@@ -41,7 +41,7 @@ from ..const import (  # noqa: TID252
     SUBENTRY_TYPE_MODEL_PROVIDER,
     SUBENTRY_TYPE_STT_PROVIDER,
 )
-from ..core.utils import (  # noqa: TID252
+from ..core.utils import (
     CannotConnectError,
     InvalidAuthError,
     validate_openai_key,

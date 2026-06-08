@@ -20,11 +20,27 @@ _LOGGER = logging.getLogger(__name__)
 
 # Domains we care about for fast intent resolution
 ACTIONABLE_DOMAINS = {
-    "light", "switch", "fan", "cover", "lock", "climate",
-    "media_player", "scene", "script",
-    "vacuum", "humidifier", "water_heater", "valve",
-    "button", "input_boolean", "input_number", "input_select",
-    "number", "select", "siren", "alarm_control_panel",
+    "light",
+    "switch",
+    "fan",
+    "cover",
+    "lock",
+    "climate",
+    "media_player",
+    "scene",
+    "script",
+    "vacuum",
+    "humidifier",
+    "water_heater",
+    "valve",
+    "button",
+    "input_boolean",
+    "input_number",
+    "input_select",
+    "number",
+    "select",
+    "siren",
+    "alarm_control_panel",
 }
 
 # Domains excluded from fast intent resolution because their friendly names
@@ -167,14 +183,16 @@ async def collect_entities(hass: HomeAssistant) -> list[dict[str, Any]]:
             entry.entity_id, friendly_name, domain, area_name, aliases
         )
 
-        entities.append({
-            "entity_id": entry.entity_id,
-            "domain": domain,
-            "friendly_name": friendly_name,
-            "area_name": area_name,
-            "aliases": aliases,
-            "embedding_text": embedding_text,
-        })
+        entities.append(
+            {
+                "entity_id": entry.entity_id,
+                "domain": domain,
+                "friendly_name": friendly_name,
+                "area_name": area_name,
+                "aliases": aliases,
+                "embedding_text": embedding_text,
+            }
+        )
 
     _LOGGER.info("Collected %d actionable entities for embedding", len(entities))
     return entities
@@ -221,12 +239,17 @@ async def embed_entities(
             if create_resp.status_code not in (200, 201):
                 _LOGGER.error(
                     "Failed to create Qdrant collection '%s': %s %s",
-                    collection_name, create_resp.status_code, create_resp.text
+                    collection_name,
+                    create_resp.status_code,
+                    create_resp.text,
                 )
-                raise RuntimeError(f"Qdrant collection creation failed: {create_resp.status_code}")
+                raise RuntimeError(
+                    f"Qdrant collection creation failed: {create_resp.status_code}"
+                )
             _LOGGER.info(
                 "Created Qdrant collection '%s' with %d dimensions",
-                collection_name, dims,
+                collection_name,
+                dims,
             )
 
         # Generate embeddings in batches
@@ -238,18 +261,20 @@ async def embed_entities(
             embeddings = await embedding_model.aembed_documents(texts)
 
             for j, (entity, embedding) in enumerate(zip(batch, embeddings)):
-                all_points.append({
-                    "id": i + j,
-                    "vector": embedding,
-                    "payload": {
-                        "entity_id": entity["entity_id"],
-                        "domain": entity["domain"],
-                        "friendly_name": entity["friendly_name"],
-                        "area_name": entity["area_name"],
-                        "aliases": entity["aliases"],
-                        "embedding_text": entity["embedding_text"],
-                    },
-                })
+                all_points.append(
+                    {
+                        "id": i + j,
+                        "vector": embedding,
+                        "payload": {
+                            "entity_id": entity["entity_id"],
+                            "domain": entity["domain"],
+                            "friendly_name": entity["friendly_name"],
+                            "area_name": entity["area_name"],
+                            "aliases": entity["aliases"],
+                            "embedding_text": entity["embedding_text"],
+                        },
+                    }
+                )
 
         # Upsert all points
         total_upserted = 0
@@ -262,7 +287,9 @@ async def embed_entities(
             if upsert_resp.status_code not in (200, 201):
                 _LOGGER.error(
                     "Failed to upsert points to '%s': %s %s",
-                    collection_name, upsert_resp.status_code, upsert_resp.text
+                    collection_name,
+                    upsert_resp.status_code,
+                    upsert_resp.text,
                 )
                 raise RuntimeError(f"Qdrant upsert failed: {upsert_resp.status_code}")
             total_upserted += len(batch)
@@ -270,7 +297,10 @@ async def embed_entities(
     elapsed = (time.monotonic() - start) * 1000
     _LOGGER.info(
         "Embedded %d/%d entities in %.0fms into '%s'",
-        total_upserted, len(entities), elapsed, collection_name,
+        total_upserted,
+        len(entities),
+        elapsed,
+        collection_name,
     )
     return total_upserted
 
@@ -317,14 +347,16 @@ async def search_entities(
             priority = DOMAIN_PRIORITY.get(domain, 0.5)
             # Weighted score: 80% embedding similarity + 20% domain priority
             weighted_score = (raw_score * 0.8) + (priority * 0.2)
-            matches.append({
-                "entity_id": r["payload"]["entity_id"],
-                "domain": domain,
-                "friendly_name": r["payload"]["friendly_name"],
-                "area_name": r["payload"].get("area_name"),
-                "score": weighted_score,
-                "raw_score": raw_score,
-            })
+            matches.append(
+                {
+                    "entity_id": r["payload"]["entity_id"],
+                    "domain": domain,
+                    "friendly_name": r["payload"]["friendly_name"],
+                    "area_name": r["payload"].get("area_name"),
+                    "score": weighted_score,
+                    "raw_score": raw_score,
+                }
+            )
         # Re-sort by weighted score (highest first)
         matches.sort(key=lambda m: m["score"], reverse=True)
         return matches

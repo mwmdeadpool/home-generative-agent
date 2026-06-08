@@ -68,11 +68,11 @@ from custom_components.home_generative_agent.const import (
     SUMMARIZATION_PROMPT_TEMPLATE,
     SUMMARIZATION_SYSTEM_PROMPT,
     TOOL_CALL_ERROR_TEMPLATE,
-    sanitize_for_prompt,
     TOOL_CALL_TRANSIENT_ERROR_TEMPLATE,
+    sanitize_for_prompt,
 )
 
-from ..core.utils import extract_final  # noqa: TID252
+from ..core.utils import extract_final
 from .helpers import (
     format_tool,
     is_actuation_tool,

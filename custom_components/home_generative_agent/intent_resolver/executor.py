@@ -78,7 +78,9 @@ async def execute_direct(
 
         _LOGGER.info(
             "Tier 1 executed: %s.%s(%s) in %.0fms",
-            action.domain, action.service, action.entity_id,
+            action.domain,
+            action.service,
+            action.entity_id,
             result.resolution_ms,
         )
 
@@ -127,7 +129,9 @@ async def execute_compound(
 
     _LOGGER.info(
         "Tier 2 executed: %d/%d actions in %.0fms",
-        len(successes), len(result.actions), result.resolution_ms,
+        len(successes),
+        len(result.actions),
+        result.resolution_ms,
     )
 
     return _speech_result(speech, language)
@@ -164,7 +168,5 @@ def _error_result(
 ) -> conversation.ConversationResult:
     """Create an error conversation result."""
     intent_response = intent.IntentResponse(language=language)
-    intent_response.async_set_error(
-        intent.IntentResponseErrorCode.UNKNOWN, message
-    )
+    intent_response.async_set_error(intent.IntentResponseErrorCode.UNKNOWN, message)
     return conversation.ConversationResult(response=intent_response)

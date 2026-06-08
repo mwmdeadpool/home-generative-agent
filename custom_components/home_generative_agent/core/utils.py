@@ -21,7 +21,7 @@ from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.httpx_client import get_async_client
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 
-from ..const import (  # noqa: TID252
+from ..const import (
     CONF_OLLAMA_URL,
     EMBEDDING_MODEL_DIMS,
     HTTP_STATUS_BAD_REQUEST,

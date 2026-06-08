@@ -20,7 +20,7 @@ from homeassistant.helpers.selector import (
     TextSelectorType,
 )
 
-from ..const import (  # noqa: TID252
+from ..const import (
     CONF_DB_NAME,
     CONF_DB_PARAMS,
     RECOMMENDED_DB_HOST,
@@ -31,8 +31,8 @@ from ..const import (  # noqa: TID252
     RECOMMENDED_DB_USERNAME,
     SUBENTRY_TYPE_DATABASE,
 )
-from ..core.db_utils import build_postgres_uri  # noqa: TID252
-from ..core.utils import (  # noqa: TID252
+from ..core.db_utils import build_postgres_uri
+from ..core.utils import (
     CannotConnectError,
     InvalidAuthError,
     validate_db_uri,
