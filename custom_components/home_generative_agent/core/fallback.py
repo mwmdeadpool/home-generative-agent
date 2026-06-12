@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any, cast
 from homeassistant.exceptions import HomeAssistantError
 from langchain_google_genai import GoogleGenerativeAIEmbeddings
 
-from ..const import EMBEDDING_MODEL_DIMS
+from ..const import EMBEDDING_MODEL_DIMS  # noqa: TID252
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
