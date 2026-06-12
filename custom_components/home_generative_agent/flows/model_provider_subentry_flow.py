@@ -26,7 +26,7 @@ from homeassistant.helpers.selector import (
     TextSelectorType,
 )
 
-from ..const import (
+from ..const import (  # noqa: TID252
     CONF_ANTHROPIC_API_KEY,
     CONF_GEMINI_API_KEY,
     CONF_OPENAI_COMPATIBLE_EMBEDDING_DIMS,
@@ -34,7 +34,7 @@ from ..const import (
     RECOMMENDED_OPENAI_COMPATIBLE_EMBEDDING_DIMS,
     SUBENTRY_TYPE_MODEL_PROVIDER,
 )
-from ..core.utils import (
+from ..core.utils import (  # noqa: TID252
     CannotConnectError,
     InvalidAuthError,
     ensure_http_url,

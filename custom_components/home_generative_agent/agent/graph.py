@@ -69,10 +69,9 @@ from custom_components.home_generative_agent.const import (
     SUMMARIZATION_SYSTEM_PROMPT,
     TOOL_CALL_ERROR_TEMPLATE,
     TOOL_CALL_TRANSIENT_ERROR_TEMPLATE,
-    sanitize_for_prompt,
 )
 
-from ..core.utils import extract_final
+from ..core.utils import extract_final  # noqa: TID252
 from .helpers import (
     format_tool,
     is_actuation_tool,
@@ -105,7 +104,6 @@ _LC_TOOL_TIMEOUT_S: float = 30.0
 # can take tens of seconds.  Set high enough to cover gate wait + prefill +
 # generation for typical conversation history lengths.
 _LLM_INVOKE_TIMEOUT_S: float = 180.0
-
 
 _PIN_LOOKBACK = 20  # messages to scan for an unresolved requires_pin
 _ROUTING_REJECTION_MARKER = "is not available for this request"
@@ -577,8 +575,7 @@ def _parse_open_entries_from_live_context(raw: str) -> list[str]:
             continue
 
     if current_name and is_on and is_opening:
-        # Sanitize to prevent prompt injection via entity names
-        open_entries.append(sanitize_for_prompt(current_name))
+        open_entries.append(current_name)
     return open_entries
 
 
@@ -692,8 +689,7 @@ async def _find_open_entries(
         if str(state_obj.state).lower() not in {"on", "open", "opening"}:
             continue
         friendly = state_obj.attributes.get("friendly_name") or entity_id
-        # Sanitize to prevent prompt injection via entity names
-        open_entries.append(sanitize_for_prompt(str(friendly)))
+        open_entries.append(str(friendly))
     return open_entries
 
 
@@ -1563,40 +1559,6 @@ async def _invoke_model(
     except Exception as err:
         msg = f"Model invocation failed: {err}"
         raise HomeAssistantError(msg) from err
-    raise HomeAssistantError("Model invocation failed unexpectedly.")
-
-
-def _bind_model_tools(
-    model: Any, selected_tools: list[Any], *, disable_reasoning: bool
-) -> Any:
-    """Bind tools to a model in a worker thread."""
-    if disable_reasoning:
-        model = model.with_config(config={"configurable": {"reasoning": False}})
-    return model.bind_tools(selected_tools)
-
-
-async def _search_memories(store: BaseStore, user_id: str, query: str | None) -> list:
-    """Search the memory store, falling back gracefully on embedding errors."""
-    try:
-        return await store.asearch((user_id, "memories"), query=query, limit=10)
-    except AttributeError:
-        # Some OpenAI-compatible servers (e.g. llama-server) return a raw JSON
-        # list from /v1/embeddings instead of {"data": [...]}, which causes the
-        # OpenAI SDK parser to raise AttributeError.  Fall back to recency search.
-        LOGGER.warning(
-            "Memory semantic search failed — embedding endpoint returned an "
-            "incompatible response (not OpenAI-standard). Falling back to "
-            "recency-based memory retrieval. Check the /v1/embeddings response "
-            "format of your OpenAI-compatible server."
-        )
-        try:
-            return await store.asearch((user_id, "memories"), limit=10)
-        except Exception:
-            LOGGER.exception("Memory recency search also failed; no memories injected")
-            return []
-    except Exception:
-        LOGGER.exception("Unexpected memory store search failure; no memories injected")
-        return []
 
 
 def _bind_model_tools(
@@ -1707,8 +1669,7 @@ async def _call_model(
     raw_response = await _invoke_model(model, trimmed_messages, config)
     LOGGER.debug("Raw chat model response: %s", raw_response)
 
-    content = getattr(raw_response, "content", "") or ""
-    response = extract_final(content)
+    response = extract_final(getattr(raw_response, "content", "") or "")
 
     tool_calls = getattr(raw_response, "tool_calls", []) or []
 
@@ -1778,9 +1739,7 @@ async def _summarize_and_remove_messages(
     raw_response = await _invoke_model(model, messages, {})
     LOGGER.debug("Raw summary response: %s", raw_response)
 
-    response = extract_final(
-        getattr(raw_response, "content", "") or ""
-    )  # content may be list
+    response = extract_final(getattr(raw_response, "content", "") or "")
 
     return {
         "summary": response,
