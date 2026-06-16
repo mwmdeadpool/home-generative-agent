@@ -71,7 +71,7 @@ from custom_components.home_generative_agent.const import (
     TOOL_CALL_TRANSIENT_ERROR_TEMPLATE,
 )
 
-from ..core.utils import extract_final  # noqa: TID252
+from ..core.utils import extract_final
 from .helpers import (
     format_tool,
     is_actuation_tool,

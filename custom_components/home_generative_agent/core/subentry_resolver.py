@@ -14,7 +14,7 @@ from homeassistant.const import (
     CONF_USERNAME,
 )
 
-from ..const import (  # noqa: TID252
+from ..const import (
     CONF_ANTHROPIC_API_KEY,
     CONF_CHAT_MODEL_PROVIDER,
     CONF_DB_NAME,
