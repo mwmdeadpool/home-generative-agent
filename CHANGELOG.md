@@ -2,6 +2,31 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.14.26] - 2026-06-27
+
+### Fixed
+
+- **Sentinel discovery proposed unsupported candidates for cumulative energy sensors** — the baseline DB tracks all numeric entities, including kWh energy counters (`_energy` suffix). These appeared in the `unmonitored_baseline_entities` list injected into the discovery prompt, causing the LLM to propose appliance anomaly candidates (microwave, washing machine, fridge, dishwasher) that referenced cumulative sensors. Normalization correctly rejects them (`reason_code=cumulative_energy_sensor`) because a monotonically increasing counter cannot produce a meaningful rolling-average baseline, but the proposals showed as "unsupported" in the UI with no actionable path. Fix: added `_is_cumulative_energy_entity()` to filter cumulative sensors from the unmonitored list before prompt injection, and added an `ENERGY SENSOR RULE` hint to the discovery prompt directing the LLM to use `_power` (instantaneous Watts) sensors in `evidence_paths` instead of `_energy` (cumulative kWh) sensors. Corrected proposals map to the existing `baseline_deviation` or `time_of_day_anomaly` templates without any further code changes.
+
+## [3.14.25] - 2026-06-25
+
+### Fixed
+
+- **Video analyzer sent burst notifications from near-camera motion artifacts (e.g. spider webs)** — a spider web in front of a camera repeatedly triggers the motion sensor, causing the video analyzer to generate multiple notifications for the same static background scene. The LLM-generated captions described the same empty scene with slightly different phrasing (e.g. "paved patio enclosed by a white picket gate" vs "paved patio with a white picket fence"), scoring ~0.87 cosine similarity — just below the old 0.89 suppress threshold — so each one fired a mobile notification. Fix: lower `VIDEO_ANALYZER_SIMILARITY_THRESHOLD` from 0.89 to 0.85, catching "same scene, different wording" duplicates within the existing 30-minute dedup window. Genuine events with semantically different content (person arriving, vehicle with headlights) still score below 0.85 against empty-scene captions and correctly notify.
+
+## [3.14.24] - 2026-06-24
+
+### Fixed
+
+- **Sentinel notifications showed HA restart time instead of actual state-change time** — when Home Assistant restarts, entities re-report their current state with a new `last_changed` stamped at startup time. Three Sentinel rule categories were computing falsely short durations as a result ("Alarm disarmed since 5:16 AM", "Garage door lock unlocked for about 15 minutes", "Dishwasher running for 5 minutes" — all actually much older). Fixes:
+  - New `alarm_enrichment.py`: queries 30 days of HA recorder history (date-range query, replaces count-based `get_last_state_changes`), walks newest-to-oldest skipping `unavailable`/`unknown` transient states, finds the true `armed_*→disarmed` transition, and corrects `last_changed` before rule evaluation. Falls back to the oldest within-window disarmed record when the armed record has been purged from the DB; clears `last_changed` to `""` (suppressing the misleading timestamp) when the alarm has been disarmed for more than the 30-day lookback window.
+  - New `lock_enrichment.py`: same recorder-based pattern for unlocked lock entities. Finds the last `non-unlocked→unlocked` transition (handles `locked`, `locking`, `unlocking`, `jammed` as anchors); uses the oldest within-window record as a fallback for purged records; clears `last_changed` to `""` when the lock has been open for more than 30 days.
+  - New `power_enrichment.py`: for power sensors currently drawing more than 10 W, finds the last `off→on` transition in 30-day history. Handles both W and kW units. Leaves `last_changed` unchanged (rather than clearing) when no useful transition can be determined.
+  - `engine.py`: calls all three enrichments in sequence after snapshot build, before rule evaluation.
+  - `dynamic_rules.py`: lock evidence now uses `lock.get("last_changed") or None` so an empty-string `last_changed` (set by enrichment when the lock has been open >30 days) propagates as `None` to LLM context.
+
+- **Disarm notifications showed time-only for old disarms** — notifications like "Alarm disarmed since 1:46 PM" were ambiguous when the disarm occurred on a previous day. `notifier.py` now uses a `_format_disarm_since()` helper that prepends the date ("14 Jun at 1:46 PM") when the disarm was on a different calendar day, and shows time-only for same-day disarms.
+
 ## [3.14.23] - 2026-06-19
 
 ### Fixed
