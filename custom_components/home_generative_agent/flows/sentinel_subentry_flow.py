@@ -87,7 +87,7 @@ from ..const import (
     SENTINEL_SEVERITIES,
     SUBENTRY_TYPE_SENTINEL,
 )
-from ..core.utils import (  # noqa: TID252
+from ..core.utils import (
     hash_pin,
     list_mobile_notify_services,
     valid_exclusion_entry,
