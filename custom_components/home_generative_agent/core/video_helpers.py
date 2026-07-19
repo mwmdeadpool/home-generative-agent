@@ -21,7 +21,7 @@ from ..const import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Sequence
+    from collections.abc import Callable, Iterable, Sequence
 
     from homeassistant.core import HomeAssistant
 
@@ -100,17 +100,118 @@ def crop_resize_encode_jpeg(
 
 
 def dedupe_desc(descs: list[dict[str, list[str]]]) -> list[dict[str, list[str]]]:
-    """Collapse near-duplicate frame texts to reduce prompt size."""
+    """Collapse consecutive near-duplicate frame texts to reduce prompt size."""
+    deduped, _ = dedupe_desc_tagged(descs, list(range(len(descs))))
+    return deduped
+
+
+def dedupe_desc_tagged[T](
+    descs: list[dict[str, list[str]]],
+    tags: Sequence[T],
+    *,
+    tag_person_check: Callable[[list[str]], bool] | None = None,
+) -> tuple[list[dict[str, list[str]]], list[T]]:
+    """
+    Collapse consecutive near-duplicate frame texts, keeping tags aligned.
+
+    tags[i] labels descs[i] (typically its snapshot Path). When a duplicate
+    run merges, the tag of the run's first entry survives, mirroring the kept
+    text — unless tag_person_check is given and a later frame in the run is
+    the first whose OWN faces pass it, in which case that frame's tag replaces
+    the kept one. Merged identities would otherwise let the kept entry name a
+    person recognized only on a dropped duplicate, attaching an image where
+    that person is not actually identifiable.
+    """
     out: list[dict[str, list[str]]] = []
+    out_tags: list[T] = []
     last_norm: str | None = None
-    for d in descs:
+    kept_has_person = False
+    for d, tag in zip(descs, tags, strict=True):
         # dict has single key
-        text = next(iter(d.keys()))
-        norm = re.sub(r"\s+", " ", text.lower()).strip()
-        if norm != last_norm:
-            out.append(d)
-            last_norm = norm
-    return out
+        text, faces = next(iter(d.items()))
+        # Compare without the "t+<n>s." prefix — it differs on every frame,
+        # so leaving it in would prevent identical descriptions from merging.
+        core = re.sub(r"^t\+\d+s\.\s*", "", text)
+        norm = re.sub(r"\s+", " ", core.lower()).strip()
+        if norm == last_norm and out:
+            # Merge identities so a face recognized only on the dropped
+            # duplicate frame is not lost. Rebuild the kept entry instead of
+            # extending in place — out[-1] may alias a caller-owned dict.
+            kept_text, kept_faces = next(iter(out[-1].items()))
+            merged = kept_faces + [p for p in faces if p not in kept_faces]
+            out[-1] = {kept_text: merged}
+            if (
+                tag_person_check is not None
+                and not kept_has_person
+                and tag_person_check(faces)
+            ):
+                out_tags[-1] = tag
+                kept_has_person = True
+            continue
+        out.append(d)
+        out_tags.append(tag)
+        last_norm = norm
+        kept_has_person = (
+            tag_person_check(faces) if tag_person_check is not None else False
+        )
+    return out, out_tags
+
+
+# The VLM is prompted to reply with exactly "Scene unchanged." for repeated
+# static scenes (issue #493), but models drift from mandated phrasing, so the
+# sentinel is detected tolerantly: every sentence of a short reply must be, in
+# full, a no-change statement, AND at least one sentence must explicitly claim
+# equality with the previous frame. Activity-only phrases ("Still no
+# activity.") never qualify alone — a newly delivered package is "no activity"
+# yet a changed scene, and dropping such a frame would hide the change from
+# summaries and Sentinel. A missed sentinel is harmless — the reply is simply
+# treated as a normal description.
+_NO_CHANGE_MAX_CHARS = 120
+_NO_CHANGE_TAIL = (
+    r"(?: (?:since|from|compared (?:to|with)|as in) "
+    r"the (?:previous|last|prior) (?:frame|image|description|one))?"
+)
+# Phrases that assert the scene equals the previous one.
+_NO_CHANGE_EQUALITY_CORE = (
+    r"(?:the )?(?:scene|view|image|frame|setting|environment)"
+    r"(?: is| remains| appears| looks| stays)?"
+    r" (?:unchanged|identical|the same|same as before)"
+    + _NO_CHANGE_TAIL
+    + r"|unchanged"
+    r"|no changes?(?: (?:in|to) the (?:scene|view|image|frame))?"
+    + _NO_CHANGE_TAIL
+    + r"|nothing (?:has |is )?changed"
+    + _NO_CHANGE_TAIL
+    + r"|same (?:static )?(?:scene|setting|view)(?: as before)?"
+)
+# Phrases that merely report stillness; allowed only alongside an equality
+# claim, never sufficient on their own.
+_NO_CHANGE_SUPPORT_CORE = (
+    r"(?:the )?(?:scene|view|image|frame|setting|environment)"
+    r"(?: is| remains| appears| looks| stays)? static"
+    r"|(?:still )?no (?:new )?(?:activity|motion|movement)"
+    r"(?: (?:visible|detected|observed))?"
+)
+_NO_CHANGE_EQUALITY = re.compile(f"(?:{_NO_CHANGE_EQUALITY_CORE})")
+_NO_CHANGE_SENTENCE = re.compile(
+    f"(?:{_NO_CHANGE_EQUALITY_CORE}|{_NO_CHANGE_SUPPORT_CORE})"
+)
+
+
+def is_no_change_reply(text: str) -> bool:
+    """Return True if a VLM reply is a no-change sentinel ("Scene unchanged.")."""
+    if not text or len(text) > _NO_CHANGE_MAX_CHARS:
+        return False
+    sentences = [
+        re.sub(r"\s+", " ", re.sub(r"[^a-z0-9 ]", " ", s.lower())).strip()
+        for s in re.split(r"[.!?]", text)
+    ]
+    sentences = [s for s in sentences if s]
+    return (
+        bool(sentences)
+        and all(_NO_CHANGE_SENTENCE.fullmatch(s) for s in sentences)
+        and any(_NO_CHANGE_EQUALITY.fullmatch(s) for s in sentences)
+    )
 
 
 def hamming64(a: int, b: int) -> int:

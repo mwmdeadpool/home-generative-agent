@@ -91,7 +91,7 @@ This document covers the named constants that affect integration behaviour, orga
 
 | Constant | Allowed values |
 |---|---|
-| `VLM_OLLAMA_SUPPORTED` | `qwen2.5vl:7b`, `qwen3-vl:8b` |
+| `VLM_OLLAMA_SUPPORTED` | `qwen2.5vl:7b`, `qwen3-vl:8b`, `gemma3:4b` |
 | `VLM_OPENAI_SUPPORTED` | `gpt-5-nano`, `gpt-4.1`, `gpt-4.1-nano` |
 | `VLM_GEMINI_SUPPORTED` | `gemini-2.5-pro`, `gemini-2.5-flash`, `gemini-2.5-flash-lite` |
 | `VLM_ANTHROPIC_SUPPORTED` | `claude-opus-4-7`, `claude-sonnet-4-6`, `claude-haiku-4-5-20251001` |
@@ -231,13 +231,15 @@ This document covers the named constants that affect integration behaviour, orga
 | `VIDEO_ANALYZER_SNAPSHOT_ROOT` | `const.py` | `/media/snapshots` | Root directory for saved camera snapshots |
 | `VIDEO_ANALYZER_TIME_OFFSET` | `const.py` | `15` (min) | Lookback window for fetching recent camera activity when building a video batch |
 | `VIDEO_ANALYZER_CAPTION_DEDUPE_WINDOW_SEC` | `const.py` | `1800` (s, 30 min) | Lexical deduplication window. Artifact captions within this window are suppressed even when the vector score is below threshold. |
-| `VIDEO_ANALYZER_SIMILARITY_THRESHOLD` | `const.py` | `0.89` | Cosine similarity threshold for caption deduplication. Captions above this score are considered duplicates and suppressed. |
+| `VIDEO_ANALYZER_SIMILARITY_THRESHOLD` | `const.py` | `0.85` | Cosine similarity threshold for caption deduplication. Captions above this score are considered duplicates and suppressed. |
 | `VIDEO_ANALYZER_DELETE_SNAPSHOTS` | `const.py` | `False` | Whether to delete snapshot files after analysis |
 | `VIDEO_ANALYZER_SNAPSHOTS_TO_KEEP` | `const.py` | `200` | Rolling snapshot retention count per camera |
-| `VIDEO_ANALYZER_TRIGGER_ON_MOTION` | `const.py` | `True` | Trigger analysis on HA motion sensor state changes |
+| `VIDEO_ANALYZER_TRIGGER_ON_MOTION` | `const.py` | `True` | Trigger analysis on HA motion sensor state changes (also gates the ring-mqtt `event_select` trigger) |
+| `VIDEO_ANALYZER_EVENT_SELECT_WINDOW` | `const.py` | `30` (s) | Snapshot-loop window after a ring-mqtt `event_select` eventId change; each new eventId extends it |
+| `VIDEO_ANALYZER_EVENT_SELECT_MAX_WINDOW` | `const.py` | `300` (s) | Cap on total event_select window length across extensions; hitting it flushes the batch |
 | `VIDEO_ANALYZER_FACE_CROP` | `const.py` | `False` | Crop detected faces before sending to face recognition |
 | `VIDEO_ANALYZER_SAVE_LATEST` | `const.py` | `True` | Publish a stable `_latest/latest.jpg` alongside each snapshot |
-| `_MAX_BATCH` | `core/video_analyzer.py` | `5` | Maximum frames per analysis batch |
+| `_MAX_BATCH` | `core/video_analyzer.py` | `5` | Frames pulled per batch by the live analysis worker; a motion/`event_select` window flush processes the entire held buffer as one batch |
 | `_QUEUE_MAXSIZE` | `core/video_analyzer.py` | `50` | Per-camera frame backlog capacity before drops |
 | `_FRAME_DEADLINE_SEC` | `core/video_analyzer.py` | `600` (s) | Skip frames older than this; prevents stale results from backlog buildup |
 | `_SUMMARY_TIMEOUT_SEC` | `core/video_analyzer.py` | `60` (s) | Timeout for the summarization model call during batch synthesis |
@@ -245,7 +247,11 @@ This document covers the named constants that affect integration behaviour, orga
 | `_VISION_TIMEOUT_SEC` | `core/video_analyzer.py` | `90` (s) | Timeout for a VLM frame-description call |
 | `_VIDEO_MODEL_SEMAPHORE_WAIT_SEC` | `core/video_analyzer.py` | `30` (s) | Max wait for the video semaphore before dropping the frame |
 | `_VIDEO_QUEUE_BACKLOG_THRESHOLD` | `core/video_analyzer.py` | `2` | Drop stale queued frames when the backlog exceeds this count |
-| `_METRICS_REPORT_INTERVAL_SEC` | `core/video_analyzer.py` | `3600` (s) | How often per-camera latency metrics are logged |
+| `_METRICS_REPORT_INTERVAL_SEC` | `core/video_analyzer.py` | `3600` (s) | How often the per-camera metrics line is logged (counters such as analyzed / dropped / `sentinel_dropped`, plus latency percentiles) |
+| `_SNAPSHOT_STALE_MAX_AGE_SEC` | `core/video_analyzer.py` | `1800` (s) | Skip capture and count a snapshot failure (once per staleness episode) when a ring-mqtt camera's `timestamp` attribute shows the retained frame is older than this (frozen interval snapshot, issue #490); 3x the slowest known ring-mqtt interval (600 s on battery). Only applies to cameras with an `event_select` sibling |
+| `_SNAPSHOT_TS_EPOCH_MIN` | `core/video_analyzer.py` | `1_000_000_000` | `timestamp` attribute values below this are not epoch seconds and never trigger the stale guard |
+| `_SNAPSHOT_TS_FUTURE_SLACK_SEC` | `core/video_analyzer.py` | `3600` (s) | `timestamp` values further in the future than this (e.g. millisecond epochs) are not plausible epoch seconds and never trigger the stale guard |
+| `_STALE_REREPORT_INTERVAL_SEC` | `core/video_analyzer.py` | `3600` (s) | Re-record an ongoing staleness episode this often so the failure streak can escalate and hourly metrics reflect a persistent freeze |
 
 ---
 
@@ -264,6 +270,9 @@ This document covers the named constants that affect integration behaviour, orga
 | `RECOMMENDED_SENTINEL_STALENESS_THRESHOLD_SECONDS` | `sentinel_staleness_threshold_seconds` | `1800` (s) | Snapshot entity data older than this is considered stale and may reduce finding confidence |
 | `RECOMMENDED_AUDIT_HOT_MAX_RECORDS` | `audit_hot_max_records` | `500` | Maximum records kept in the in-memory audit hot store. User-visible findings are preserved in preference to suppressed records when at capacity. |
 | `RECOMMENDED_SENTINEL_CAMERA_ENTRY_LINKS` | `sentinel_camera_entry_links` | `{}` | Maps camera `entity_id` → list of entry/lock `entity_id`s in other HA areas. Used by the `camera_entry_unsecured` rule for cameras that physically overlook entries not in the same HA area (e.g. `{"camera.driveway": ["lock.front_door"]}`). |
+| `RECOMMENDED_SENTINEL_RULE_ENTITY_EXCLUSIONS` | `sentinel_rule_entity_exclusions` | `{}` | Maps an anomaly type (or `"*"` for all types) → list of `entity_id`s or glob patterns (`*` and `?` wildcards only) to exclude from that rule. Type keys are exact; entries may use only lowercase entity-ID characters plus the wildcards, must contain a dot and at least one literal character, and be at most 256 characters (match-all entries like `"*"`, `"*.*"`, or character-class tricks like `"[!.]*.*"` are rejected). Applied to all finding sources (static rules, dynamic rules, baseline) before correlation and dispatch; exclusions under the entity's domain-mapped anomaly type or `"*"` also suppress event-driven triggering — those entities' state changes do not enqueue triggers (e.g. `{"appliance_power_duration": ["sensor.living_room_ac_power"], "camera_entry_unsecured": ["camera.map_*"]}`). |
+| `RECOMMENDED_SENTINEL_APPLIANCE_POWER_THRESHOLD_W` | `sentinel_appliance_power_threshold_w` | `100.0` (W) | Power level the `appliance_power_duration` rule treats as "appliance running" |
+| `RECOMMENDED_SENTINEL_APPLIANCE_DURATION_MIN` | `sentinel_appliance_duration_min` | `60` (min) | Continuous minutes above the power threshold before `appliance_power_duration` fires |
 
 **Code-only:**
 
@@ -354,6 +363,8 @@ This document covers the named constants that affect integration behaviour, orga
 
 | Constant | Config key | Default | Purpose |
 |---|---|---|---|
+| `CONF_SENTINEL_QUIET_HOURS_START` | `sentinel_quiet_hours_start` | unset (disabled) | Local hour (0–23) the quiet-hours window opens. Both start and end must be set for suppression to take effect. |
+| `CONF_SENTINEL_QUIET_HOURS_END` | `sentinel_quiet_hours_end` | unset (disabled) | Local hour (0–23) the window closes. Windows may wrap midnight (e.g. 22:00–07:00); start = end suppresses all day. |
 | `RECOMMENDED_SENTINEL_QUIET_HOURS_SEVERITIES` | `sentinel_quiet_hours_severities` | `["low"]` | Which finding severities are suppressed during configured quiet hours |
 | `RECOMMENDED_SENTINEL_PRESENCE_GRACE_MINUTES` | `sentinel_presence_grace_minutes` | `10` | After everyone leaves home, suppress `open_entry_while_away` and `unknown_person_camera_no_home` for this many minutes to allow time for departure actions to settle |
 | `RECOMMENDED_SENTINEL_DAILY_DIGEST_ENABLED` | `sentinel_daily_digest_enabled` | `False` | Send a daily push summary of the past 24 hours |
@@ -446,7 +457,7 @@ These constants live outside `const.py` in individual modules. They affect runti
 
 | Constant | Value | Purpose |
 |---|---|---|
-| `_MAX_BATCH` | `5` | Maximum video frames processed per analysis batch |
+| `_MAX_BATCH` | `5` | Frames pulled per batch by the live analysis worker; motion/`event_select` window flushes process the whole held buffer |
 | `_QUEUE_MAXSIZE` | `50` | Per-camera frame queue capacity. Frames are dropped when full. |
 | `_FRAME_DEADLINE_SEC` | `600` (s) | Frames older than this are skipped to avoid processing stale data |
 | `_SUMMARY_TIMEOUT_SEC` | `60` (s) | Timeout for the summarization model call in a video batch |
@@ -454,7 +465,8 @@ These constants live outside `const.py` in individual modules. They affect runti
 | `_VISION_TIMEOUT_SEC` | `90` (s) | Timeout for a VLM frame description call |
 | `_VIDEO_MODEL_SEMAPHORE_WAIT_SEC` | `30` (s) | Max time a video frame waits for the concurrency semaphore before being dropped |
 | `_VIDEO_QUEUE_BACKLOG_THRESHOLD` | `2` | Drop oldest queued frames when the backlog exceeds this depth |
-| `_METRICS_REPORT_INTERVAL_SEC` | `3600` (s) | How often per-camera latency percentile metrics are logged |
+| `_SUMMARY_MAX_FRAMES` | `8` | Maximum deduplicated frame descriptions fed to the summary model (newest kept). The notification reference image is chosen from these frames. |
+| `_METRICS_REPORT_INTERVAL_SEC` | `3600` (s) | How often the per-camera metrics line (counters plus latency percentiles) is logged |
 
 ### `core/video_helpers.py`
 
@@ -464,6 +476,7 @@ These constants live outside `const.py` in individual modules. They affect runti
 | `_MAX_CHARS` | `300` | Maximum characters in a video caption |
 | `_MAX_NAMES` | `2` | Maximum person names included in a single caption |
 | `_UNIQUENESS_HASH_SIZE` | `8` | dHash grid size (8 → 64-bit perceptual hash) for frame deduplication |
+| `_NO_CHANGE_MAX_CHARS` | `120` | Maximum reply length considered for `Scene unchanged.` sentinel detection (issue #493); longer VLM replies are always treated as real descriptions |
 
 ### `core/utils.py`
 

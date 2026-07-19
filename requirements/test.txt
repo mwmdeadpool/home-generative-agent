@@ -1,10 +1,10 @@
 # Home Assistant integration testing requirements
 
-homeassistant==2026.7.0b1
-pytest-homeassistant-custom-component==0.13.341
+homeassistant==2026.7.2
+pytest-homeassistant-custom-component==0.13.346
 
 pytest==9.*
 pytest-asyncio==1.*
 
 colorlog==6.10.1
-PyTurboJPEG>=2.4.0
+PyTurboJPEG>=2.5.0

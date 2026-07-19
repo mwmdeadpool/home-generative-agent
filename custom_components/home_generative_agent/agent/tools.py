@@ -44,6 +44,7 @@ from langchain_core.runnables import RunnableConfig  # noqa: TC002
 from langchain_core.tools import InjectedToolArg, tool
 from langgraph.prebuilt.tool_node import InjectedStore
 from langgraph.store.base import BaseStore  # noqa: TC002
+from ollama import ResponseError as OllamaResponseError
 from voluptuous import MultipleInvalid
 
 from ..const import (
@@ -349,6 +350,12 @@ async def _get_camera_image(hass: HomeAssistant, camera_name: str) -> bytes | No
     return None
 
 
+# Returned by analyze_image when the VLM call fails with HomeAssistantError.
+# Callers that chain frame context (video_analyzer._process_batch) must never
+# treat this caption as a real scene description.
+VLM_ERROR_CAPTION = "Error analyzing image with VLM model."
+
+
 def _prompt_func(data: dict[str, Any]) -> list[AnyMessage]:
     system = data["system"]
     text = data["text"]
@@ -406,12 +413,15 @@ async def analyze_image(
         }
     )
 
+    # ollama.ResponseError (e.g. a configured model that was never pulled)
+    # intentionally propagates: callers decide whether to skip the frame,
+    # return a message to the LLM, or surface a HomeAssistantError. Returning
+    # an error string here would let it masquerade as a real caption.
     try:
         resp = await vlm_model.ainvoke(messages)
     except HomeAssistantError:
-        msg = "Error analyzing image with VLM model."
-        LOGGER.exception(msg)
-        return msg
+        LOGGER.exception(VLM_ERROR_CAPTION)
+        return VLM_ERROR_CAPTION
 
     LOGGER.debug("Raw VLM model response: %s", resp)
 
@@ -444,7 +454,11 @@ async def get_and_analyze_camera_image(
     image = await _get_camera_image(hass, camera_name)
     if image is None:
         return "Error getting image from camera."
-    return await analyze_image(vlm_model, image, detection_keywords)
+    try:
+        return await analyze_image(vlm_model, image, detection_keywords)
+    except OllamaResponseError:
+        LOGGER.exception(VLM_ERROR_CAPTION)
+        return VLM_ERROR_CAPTION
 
 
 @tool(parse_docstring=True)

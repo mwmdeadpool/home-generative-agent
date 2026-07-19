@@ -96,10 +96,13 @@ CONF_OLLAMA_VLM_URL = "ollama_vlm_url"
 RECOMMENDED_OLLAMA_VLM_URL = RECOMMENDED_OLLAMA_URL
 CONF_OLLAMA_SUMMARIZATION_URL = "ollama_summarization_url"
 RECOMMENDED_OLLAMA_SUMMARIZATION_URL = RECOMMENDED_OLLAMA_URL
+CONF_OLLAMA_EMBEDDING_URL = "ollama_embedding_url"
+RECOMMENDED_OLLAMA_EMBEDDING_URL = RECOMMENDED_OLLAMA_URL
 OLLAMA_CATEGORY_URL_KEYS = {
     "chat": CONF_OLLAMA_CHAT_URL,
     "vlm": CONF_OLLAMA_VLM_URL,
     "summarization": CONF_OLLAMA_SUMMARIZATION_URL,
+    "embedding": CONF_OLLAMA_EMBEDDING_URL,
 }
 
 CONF_OLLAMA_REASONING = "ollama_reasoning"
@@ -254,6 +257,8 @@ RECOMMENDED_SENTINEL_AUTO_EXEC_CANARY_MODE: bool = False
 CONF_SENTINEL_QUIET_HOURS_START = "sentinel_quiet_hours_start"
 CONF_SENTINEL_QUIET_HOURS_END = "sentinel_quiet_hours_end"
 CONF_SENTINEL_QUIET_HOURS_SEVERITIES = "sentinel_quiet_hours_severities"
+# Must mirror the Severity literal in sentinel/models.py.
+SENTINEL_SEVERITIES: tuple[str, ...] = ("low", "medium", "high")
 RECOMMENDED_SENTINEL_QUIET_HOURS_SEVERITIES: list[str] = ["low"]
 
 CONF_SENTINEL_PRESENCE_GRACE_MINUTES = "sentinel_presence_grace_minutes"
@@ -269,6 +274,21 @@ CONF_SENTINEL_AREA_NOTIFY_MAP = "sentinel_area_notify_map"
 # e.g. {"camera.driveway": ["lock.front_door", "binary_sensor.front_door"]}
 CONF_SENTINEL_CAMERA_ENTRY_LINKS: str = "sentinel_camera_entry_links"
 RECOMMENDED_SENTINEL_CAMERA_ENTRY_LINKS: dict[str, list[str]] = {}
+
+# ---- Sentinel per-rule entity exclusions (Issue #462) ----
+# Maps anomaly type (rule_id) -> list of entity_ids to exclude from that rule.
+# The wildcard key "*" excludes the listed entities from every rule.  Applied
+# generically by the engine to all findings (static rules, dynamic rules, and
+# baseline deviations) before correlation and dispatch.
+# e.g. {"appliance_power_duration": ["sensor.living_room_ac_power"]}
+CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS: str = "sentinel_rule_entity_exclusions"
+RECOMMENDED_SENTINEL_RULE_ENTITY_EXCLUSIONS: dict[str, list[str]] = {}
+
+# ---- Sentinel appliance power duration rule thresholds (Issue #462) ----
+CONF_SENTINEL_APPLIANCE_POWER_THRESHOLD_W = "sentinel_appliance_power_threshold_w"
+CONF_SENTINEL_APPLIANCE_DURATION_MIN = "sentinel_appliance_duration_min"
+RECOMMENDED_SENTINEL_APPLIANCE_POWER_THRESHOLD_W: float = 100.0
+RECOMMENDED_SENTINEL_APPLIANCE_DURATION_MIN: int = 60
 
 # ---- Sentinel LLM triage (Issue #262) ----
 CONF_SENTINEL_TRIAGE_ENABLED = "sentinel_triage_enabled"
@@ -320,12 +340,16 @@ DEFAULT_FEATURE_TYPES: tuple[str, ...] = (
     "conversation",
     "camera_image_analysis",
     "conversation_summary",
+    "embedding",
 )
 
 FEATURE_DEFS: dict[str, dict[str, Any]] = {
     "conversation": {"name": "Conversation", "required": True},
     "camera_image_analysis": {"name": "Camera Image Analysis", "required": False},
     "conversation_summary": {"name": "Conversation Summary", "required": False},
+    # When disabled, the embedding provider is selected automatically
+    # (conversation provider if capable, else first embedding-capable provider).
+    "embedding": {"name": "Embeddings", "required": False},
 }
 
 FEATURE_NAMES: dict[str, str] = {
@@ -336,6 +360,7 @@ FEATURE_CATEGORY_MAP: dict[str, str] = {
     "conversation": "chat",
     "camera_image_analysis": "vlm",
     "conversation_summary": "summarization",
+    "embedding": "embedding",
 }
 
 # ---- Feature model config (per-feature subentry) ----
@@ -444,7 +469,7 @@ RECOMMENDED_MAX_MESSAGES_IN_CONTEXT = 60
 
 # ---------------- VLM (vision) ----------------
 VLM_TOP_P = 1.0
-VLM_OLLAMA_SUPPORTED = Literal["qwen2.5vl:7b", "qwen3-vl:8b"]
+VLM_OLLAMA_SUPPORTED = Literal["qwen2.5vl:7b", "qwen3-vl:8b", "gemma3:4b"]
 VLM_OPENAI_SUPPORTED = Literal["gpt-5-nano", "gpt-4.1", "gpt-4.1-nano"]
 VLM_GEMINI_SUPPORTED = Literal[
     "gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite"
@@ -486,6 +511,8 @@ CONF_VLM_TEMPERATURE = "vlm_temperature"
 RECOMMENDED_VLM_TEMPERATURE = 0.2
 
 # Prompts + input image size
+# The Repeated-scene rule's "Scene unchanged." sentinel below is detected by
+# core/video_helpers.is_no_change_reply — keep the two in sync when editing.
 VLM_SYSTEM_PROMPT = """
 You are a vision-language model describing a single image frame.
 
@@ -502,6 +529,16 @@ Style and policy:
 - Describe visible setting and key actions, not the photographer or camera.
 - Mention animals, major objects, or clear activities only if visible.
 - If nothing moves or no people appear, describe the environment plainly.
+
+Repeated-scene rule:
+- If a 'Previous frame (text only): ...' line is present, no people or
+  animals are visible, and the current image shows the same static setting
+  as that previous description (same objects, same layout, no new
+  activity), do not restate the environment. Reply with exactly:
+  Scene unchanged.
+- Never use that reply when there is no previous frame text, or when
+  anything visible has changed since it — give the normal full
+  description instead.
 
 Motion-description rule:
 - When a 'Previous frame (text only): ...' line is present, use it as context for motion/direction; if it conflicts with the current image, prefer the current image.”
@@ -664,6 +701,11 @@ RECOMMENDED_VIDEO_MODEL_SEMAPHORE: int = 1
 # ---------------- OpenAI-compatible endpoint (edge) ----------------
 CONF_OPENAI_COMPATIBLE_BASE_URL = "openai_compatible_base_url"
 CONF_OPENAI_COMPATIBLE_API_KEY = "openai_compatible_api_key"
+# Embedding-specific endpoint/key; set when the embedding feature is assigned
+# to an OpenAI-compatible provider so embeddings can run on a separate server
+# from chat (e.g. a dedicated llama.cpp embedding instance).
+CONF_OPENAI_COMPATIBLE_EMBEDDING_URL = "openai_compatible_embedding_url"
+CONF_OPENAI_COMPATIBLE_EMBEDDING_API_KEY = "openai_compatible_embedding_api_key"
 
 # ---------------- Camera video analyzer ----------------
 CONF_VIDEO_ANALYZER_MODE = "video_analyzer_mode"
@@ -675,6 +717,10 @@ RECOMMENDED_VIDEO_ANALYZER_MODE: VideoAnalyzerMode = VIDEO_ANALYZER_MODE_DISABLE
 
 # Interval units are seconds.
 VIDEO_ANALYZER_SCAN_INTERVAL = 1.5
+# Snapshot interval while a motion sensor is active. Longer than the recording-camera
+# poll (1.5 s) to reduce redundant model calls; short enough to capture fast walk-bys
+# (a person crossing a typical home camera FOV in ~3-5 s gets at least one frame).
+VIDEO_ANALYZER_MOTION_SCAN_INTERVAL = 3
 VIDEO_ANALYZER_SNAPSHOT_ROOT = "/media/snapshots"
 VIDEO_ANALYZER_SYSTEM_MESSAGE = """
 BEGIN_RULES
@@ -731,8 +777,21 @@ VIDEO_ANALYZER_SIMILARITY_THRESHOLD = 0.85
 VIDEO_ANALYZER_DELETE_SNAPSHOTS = False
 VIDEO_ANALYZER_SNAPSHOTS_TO_KEEP = 200
 VIDEO_ANALYZER_TRIGGER_ON_MOTION = True
+# How long (seconds) the snapshot loop runs after an event_select eventId change
+# (ring-mqtt battery cameras, issue #466). These entities publish a new eventId per
+# Ring event but no "event over" signal, so the loop ends on a fixed window that
+# each new eventId extends. 30 s at the 3 s motion interval yields ~10 frames.
+VIDEO_ANALYZER_EVENT_SELECT_WINDOW = 30
+# Cap on total window length across extensions: continuous eventId churn (busy
+# street, or a misbehaving entity) must not defer the flush and grow the frame
+# buffer forever. When the cap is hit the loop flushes; a later eventId starts
+# a fresh window.
+VIDEO_ANALYZER_EVENT_SELECT_MAX_WINDOW = 300
 VIDEO_ANALYZER_MOTION_CAMERA_MAP: dict = {}
+CONF_VIDEO_ANALYZER_MOTION_CAMERA_MAP = "video_analyzer_motion_camera_map"
 VIDEO_ANALYZER_FACE_CROP = False
+CONF_VIDEO_ANALYZER_UNIQUENESS_ENABLED = "video_analyzer_uniqueness_enabled"
+RECOMMENDED_VIDEO_ANALYZER_UNIQUENESS_ENABLED = False
 
 # Stable “latest” file publication
 VIDEO_ANALYZER_SAVE_LATEST = True

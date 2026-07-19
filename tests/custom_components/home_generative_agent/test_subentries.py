@@ -32,12 +32,18 @@ from custom_components.home_generative_agent.const import (
     CONF_NOTIFY_SERVICE,
     CONF_OLLAMA_CHAT_MODEL,
     CONF_OLLAMA_CHAT_URL,
+    CONF_OLLAMA_EMBEDDING_URL,
     CONF_OLLAMA_SUMMARIZATION_URL,
     CONF_OLLAMA_URL,
     CONF_OLLAMA_VLM_URL,
     CONF_OPENAI_COMPATIBLE_API_KEY,
     CONF_OPENAI_COMPATIBLE_BASE_URL,
+    CONF_OPENAI_COMPATIBLE_EMBEDDING_API_KEY,
     CONF_OPENAI_COMPATIBLE_EMBEDDING_DIMS,
+    CONF_OPENAI_COMPATIBLE_EMBEDDING_MODEL,
+    CONF_OPENAI_COMPATIBLE_EMBEDDING_URL,
+    CONF_SENTINEL_APPLIANCE_DURATION_MIN,
+    CONF_SENTINEL_APPLIANCE_POWER_THRESHOLD_W,
     CONF_SENTINEL_CAMERA_ENTRY_LINKS,
     CONF_SENTINEL_DAILY_DIGEST_ENABLED,
     CONF_SENTINEL_DAILY_DIGEST_TIME,
@@ -45,13 +51,21 @@ from custom_components.home_generative_agent.const import (
     CONF_SENTINEL_INTERVAL_SECONDS,
     CONF_SENTINEL_LEVEL_INCREASE_PIN_HASH,
     CONF_SENTINEL_LEVEL_INCREASE_PIN_SALT,
+    CONF_SENTINEL_QUIET_HOURS_END,
+    CONF_SENTINEL_QUIET_HOURS_SEVERITIES,
+    CONF_SENTINEL_QUIET_HOURS_START,
     CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE,
+    CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS,
     CONF_SUMMARIZATION_MODEL_PROVIDER,
     CONF_VLM_PROVIDER,
     CONFIG_ENTRY_VERSION,
+    DEFAULT_FEATURE_TYPES,
     DOMAIN,
+    FEATURE_CATEGORY_MAP,
+    FEATURE_DEFS,
     MODEL_CATEGORY_SPECS,
     RECOMMENDED_OPENAI_COMPATIBLE_EMBEDDING_DIMS,
+    RECOMMENDED_SENTINEL_QUIET_HOURS_SEVERITIES,
     SUBENTRY_TYPE_DATABASE,
     SUBENTRY_TYPE_FEATURE,
     SUBENTRY_TYPE_MODEL_PROVIDER,
@@ -79,6 +93,7 @@ from custom_components.home_generative_agent.flows.model_provider_subentry_flow 
 from custom_components.home_generative_agent.flows.sentinel_subentry_flow import (
     SentinelSubentryFlow,
     _default_payload,
+    _quiet_hour_str,
 )
 from custom_components.home_generative_agent.flows.stt_provider_subentry_flow import (
     SttProviderSubentryFlow,
@@ -546,6 +561,38 @@ def test_resolve_runtime_options_prefers_sentinel_subentry() -> None:
     assert options[CONF_SENTINEL_LEVEL_INCREASE_PIN_SALT] == "salt"
 
 
+def test_resolve_runtime_options_propagates_exclusions_and_thresholds() -> None:
+    """Exclusions and appliance thresholds flow from subentry data to options."""
+    exclusions = {"appliance_power_duration": ["sensor.ac_power"]}
+    entry = DummyEntry(options={})
+    sentinel = DummySubentry(
+        "sentinel1",
+        SUBENTRY_TYPE_SENTINEL,
+        "Sentinel",
+        {
+            CONF_SENTINEL_ENABLED: True,
+            CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS: exclusions,
+            CONF_SENTINEL_APPLIANCE_POWER_THRESHOLD_W: 500.0,
+            CONF_SENTINEL_APPLIANCE_DURATION_MIN: 180,
+        },
+    )
+    entry.subentries[sentinel.subentry_id] = sentinel
+
+    options = resolve_runtime_options(entry)  # type: ignore[arg-type]
+    assert options[CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS] == exclusions
+    assert options[CONF_SENTINEL_APPLIANCE_POWER_THRESHOLD_W] == 500.0
+    assert options[CONF_SENTINEL_APPLIANCE_DURATION_MIN] == 180
+
+    # Without the keys in subentry data, defaults apply.
+    sentinel.data.pop(CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS)
+    sentinel.data.pop(CONF_SENTINEL_APPLIANCE_POWER_THRESHOLD_W)
+    sentinel.data.pop(CONF_SENTINEL_APPLIANCE_DURATION_MIN)
+    options = resolve_runtime_options(entry)  # type: ignore[arg-type]
+    assert options[CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS] == {}
+    assert options[CONF_SENTINEL_APPLIANCE_POWER_THRESHOLD_W] == 100.0
+    assert options[CONF_SENTINEL_APPLIANCE_DURATION_MIN] == 60
+
+
 def test_resolve_runtime_options_sentinel_notify_fallback() -> None:
     """Sentinel notify service should override global only when explicitly set."""
     entry = DummyEntry(options={CONF_NOTIFY_SERVICE: "notify.mobile_app_global"})
@@ -827,6 +874,16 @@ def test_provider_capabilities_includes_openai_compatible() -> None:
         )
 
 
+def test_vlm_ollama_supported_models() -> None:
+    """Curated Ollama VLM options include the tested models (issue #469)."""
+    vlm_ollama = MODEL_CATEGORY_SPECS["vlm"]["providers"]["ollama"]
+    assert "qwen2.5vl:7b" in vlm_ollama
+    assert "qwen3-vl:8b" in vlm_ollama
+    assert "gemma3:4b" in vlm_ollama
+    recommended = MODEL_CATEGORY_SPECS["vlm"]["recommended_models"]["ollama"]
+    assert recommended in vlm_ollama
+
+
 # ---------------------------------------------------------------------------
 # Sentinel subentry — daily digest fields (Fix 4)
 # ---------------------------------------------------------------------------
@@ -1033,6 +1090,503 @@ async def test_sentinel_flow_camera_entry_links_wrong_structure(hass: Any) -> No
     assert (result.get("errors") or {}).get("base") == "invalid_camera_entry_links"
 
 
+def test_sentinel_default_payload_contains_exclusions_and_thresholds() -> None:
+    """_default_payload() includes exclusions (empty) and appliance thresholds."""
+    payload = _default_payload()
+    assert payload[CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS] == {}
+    assert payload[CONF_SENTINEL_APPLIANCE_POWER_THRESHOLD_W] == 100.0
+    assert payload[CONF_SENTINEL_APPLIANCE_DURATION_MIN] == 60
+
+
+def test_sentinel_schema_contains_exclusions_and_threshold_fields(hass: Any) -> None:
+    """_schema() includes the exclusions text selector and threshold selectors."""
+    flow = SentinelSubentryFlow()
+    flow.hass = hass
+    schema = flow._schema(_default_payload())
+    schema_keys = {str(k) for k in schema.schema}
+    assert CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS in schema_keys
+    assert CONF_SENTINEL_APPLIANCE_POWER_THRESHOLD_W in schema_keys
+    assert CONF_SENTINEL_APPLIANCE_DURATION_MIN in schema_keys
+
+
+@pytest.mark.asyncio
+async def test_sentinel_flow_rule_entity_exclusions_valid_json(hass: Any) -> None:
+    """Flow parses a valid JSON string into a dict for rule entity exclusions."""
+    flow, _entry = _quiet_hours_flow(hass)
+
+    await flow.async_step_user()
+    result = await flow.async_step_settings(
+        {
+            CONF_SENTINEL_ENABLED: True,
+            CONF_SENTINEL_INTERVAL_SECONDS: 300,
+            CONF_EXPLAIN_ENABLED: False,
+            CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE: False,
+            CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS: (
+                '{"appliance_power_duration": ["sensor.ac_power"], '
+                '"*": ["sensor.test_bench"]}'
+            ),
+        }
+    )
+    assert result.get("type") == "create_entry"
+    data = result.get("data")
+    assert data is not None
+    assert data[CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS] == {
+        "appliance_power_duration": ["sensor.ac_power"],
+        "*": ["sensor.test_bench"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_sentinel_flow_rule_entity_exclusions_invalid_json(hass: Any) -> None:
+    """Flow returns an error for malformed rule entity exclusions JSON."""
+    flow, _entry = _quiet_hours_flow(hass)
+
+    await flow.async_step_user()
+    result = await flow.async_step_settings(
+        {
+            CONF_SENTINEL_ENABLED: True,
+            CONF_SENTINEL_INTERVAL_SECONDS: 300,
+            CONF_EXPLAIN_ENABLED: False,
+            CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE: False,
+            CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS: "not valid json {{",
+        }
+    )
+    assert result is not None
+    assert result.get("type") == "form"
+    assert (result.get("errors") or {}).get("base") == "invalid_rule_entity_exclusions"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "bad_entries",
+    [
+        '{"*": ["*"]}',  # dot-less: "*" belongs in the type key
+        '{"*": ["*.*"]}',  # match-all glob with a dot but no literal char
+        '{"camera_entry_unsecured": ["?*.*"]}',  # match-all variant
+        '{"*": ["[!.]*.*"]}',  # char-class match-all bypass (PR #483 review, P1)
+        f'{{"camera_entry_unsecured": ["camera.{"x" * 300}"]}}',  # overlong
+    ],
+)
+async def test_sentinel_flow_rule_entity_exclusions_invalid_entries(
+    hass: Any, bad_entries: str
+) -> None:
+    """Flow rejects match-all, dot-less, and overlong exclusion entries."""
+    flow, _entry = _quiet_hours_flow(hass)
+
+    await flow.async_step_user()
+    result = await flow.async_step_settings(
+        {
+            CONF_SENTINEL_ENABLED: True,
+            CONF_SENTINEL_INTERVAL_SECONDS: 300,
+            CONF_EXPLAIN_ENABLED: False,
+            CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE: False,
+            CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS: bad_entries,
+        }
+    )
+    assert result is not None
+    assert result.get("type") == "form"
+    assert (result.get("errors") or {}).get("base") == "invalid_rule_entity_exclusions"
+
+
+@pytest.mark.asyncio
+async def test_sentinel_flow_camera_links_not_exclusion_validated(hass: Any) -> None:
+    """Exclusion-entry strictness must not leak into the camera-links field."""
+    flow, _entry = _quiet_hours_flow(hass)
+
+    await flow.async_step_user()
+    result = await flow.async_step_settings(
+        {
+            CONF_SENTINEL_ENABLED: True,
+            CONF_SENTINEL_INTERVAL_SECONDS: 300,
+            CONF_EXPLAIN_ENABLED: False,
+            CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE: False,
+            # A dot-less value is nonsense for camera links but must still be
+            # accepted: only the exclusions field validates entry shape.
+            CONF_SENTINEL_CAMERA_ENTRY_LINKS: '{"camera.driveway": ["nodots"]}',
+        }
+    )
+    assert result is not None
+    assert result.get("type") == "create_entry"
+
+
+@pytest.mark.asyncio
+async def test_sentinel_flow_rule_entity_exclusions_wrong_structure(hass: Any) -> None:
+    """Flow returns an error when exclusions are not dict[str, list[str]]."""
+    flow, _entry = _quiet_hours_flow(hass)
+
+    await flow.async_step_user()
+    result = await flow.async_step_settings(
+        {
+            CONF_SENTINEL_ENABLED: True,
+            CONF_SENTINEL_INTERVAL_SECONDS: 300,
+            CONF_EXPLAIN_ENABLED: False,
+            CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE: False,
+            # Value is a string, not a list — wrong structure.
+            CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS: (
+                '{"appliance_power_duration": "sensor.ac_power"}'
+            ),
+        }
+    )
+    assert result is not None
+    assert result.get("type") == "form"
+    assert (result.get("errors") or {}).get("base") == "invalid_rule_entity_exclusions"
+
+
+@pytest.mark.asyncio
+async def test_sentinel_flow_accepts_appliance_thresholds(hass: Any) -> None:
+    """Flow stores appliance threshold fields when provided in user_input."""
+    flow, _entry = _quiet_hours_flow(hass)
+
+    await flow.async_step_user()
+    result = await flow.async_step_settings(
+        {
+            CONF_SENTINEL_ENABLED: True,
+            CONF_SENTINEL_INTERVAL_SECONDS: 300,
+            CONF_EXPLAIN_ENABLED: False,
+            CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE: False,
+            CONF_SENTINEL_APPLIANCE_POWER_THRESHOLD_W: 500,
+            CONF_SENTINEL_APPLIANCE_DURATION_MIN: 180,
+        }
+    )
+    assert result.get("type") == "create_entry"
+    data = result.get("data")
+    assert data is not None
+    assert data[CONF_SENTINEL_APPLIANCE_POWER_THRESHOLD_W] == 500
+    assert data[CONF_SENTINEL_APPLIANCE_DURATION_MIN] == 180
+
+
+def _quiet_hours_flow(hass: Any) -> tuple[SentinelSubentryFlow, DummyEntry]:
+    """Return a Sentinel flow wired with stub form/entry callbacks."""
+    entry = DummyEntry()
+    flow = SentinelSubentryFlow()
+    flow.hass = hass
+    flow.async_show_form = lambda **kwargs: {  # type: ignore[assignment]
+        "type": "form",
+        "data_schema": kwargs["data_schema"],
+        "errors": kwargs.get("errors"),
+    }
+    flow.async_create_entry = lambda **kwargs: {  # type: ignore[assignment]
+        "type": "create_entry",
+        "title": kwargs.get("title"),
+        "data": kwargs.get("data"),
+    }
+    flow.async_abort = lambda **kwargs: {  # type: ignore[assignment]
+        "type": "abort",
+        "reason": kwargs.get("reason"),
+    }
+    flow._schedule_reload = lambda: None  # type: ignore[assignment]
+    _patch_entry(flow, entry)
+    return flow, entry
+
+
+def test_sentinel_default_payload_contains_quiet_hours_severities() -> None:
+    """_default_payload() includes quiet-hours severities but no start/end (off)."""
+    payload = _default_payload()
+    assert payload[CONF_SENTINEL_QUIET_HOURS_SEVERITIES] == (
+        RECOMMENDED_SENTINEL_QUIET_HOURS_SEVERITIES
+    )
+    # Start/end absent means quiet hours are disabled by default.
+    assert CONF_SENTINEL_QUIET_HOURS_START not in payload
+    assert CONF_SENTINEL_QUIET_HOURS_END not in payload
+
+
+def test_sentinel_schema_contains_quiet_hours_fields(hass: Any) -> None:
+    """_schema() includes the three quiet-hours selectors."""
+    flow = SentinelSubentryFlow()
+    flow.hass = hass
+    schema = flow._schema(_default_payload())
+    schema_keys = {str(k) for k in schema.schema}
+    assert CONF_SENTINEL_QUIET_HOURS_START in schema_keys
+    assert CONF_SENTINEL_QUIET_HOURS_END in schema_keys
+    assert CONF_SENTINEL_QUIET_HOURS_SEVERITIES in schema_keys
+
+
+@pytest.mark.asyncio
+async def test_sentinel_flow_stores_quiet_hours(hass: Any) -> None:
+    """Flow converts quiet-hours select values to ints and stores severities."""
+    flow, _entry = _quiet_hours_flow(hass)
+
+    await flow.async_step_user()
+    result = await flow.async_step_settings(
+        {
+            CONF_SENTINEL_ENABLED: True,
+            CONF_SENTINEL_INTERVAL_SECONDS: 300,
+            CONF_EXPLAIN_ENABLED: False,
+            CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE: False,
+            CONF_SENTINEL_QUIET_HOURS_START: "22",
+            CONF_SENTINEL_QUIET_HOURS_END: "7",
+            CONF_SENTINEL_QUIET_HOURS_SEVERITIES: ["low", "medium"],
+        }
+    )
+    assert result.get("type") == "create_entry"
+    data = result.get("data")
+    assert data is not None
+    assert data[CONF_SENTINEL_QUIET_HOURS_START] == 22
+    assert data[CONF_SENTINEL_QUIET_HOURS_END] == 7
+    assert data[CONF_SENTINEL_QUIET_HOURS_SEVERITIES] == ["low", "medium"]
+
+
+@pytest.mark.asyncio
+async def test_sentinel_flow_quiet_hours_disabled_by_default(hass: Any) -> None:
+    """Empty quiet-hours selects leave the keys absent (feature off)."""
+    flow, _entry = _quiet_hours_flow(hass)
+
+    await flow.async_step_user()
+    result = await flow.async_step_settings(
+        {
+            CONF_SENTINEL_ENABLED: True,
+            CONF_SENTINEL_INTERVAL_SECONDS: 300,
+            CONF_EXPLAIN_ENABLED: False,
+            CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE: False,
+            CONF_SENTINEL_QUIET_HOURS_START: "",
+            CONF_SENTINEL_QUIET_HOURS_END: "",
+        }
+    )
+    assert result.get("type") == "create_entry"
+    data = result.get("data")
+    assert data is not None
+    assert CONF_SENTINEL_QUIET_HOURS_START not in data
+    assert CONF_SENTINEL_QUIET_HOURS_END not in data
+    assert data[CONF_SENTINEL_QUIET_HOURS_SEVERITIES] == (
+        RECOMMENDED_SENTINEL_QUIET_HOURS_SEVERITIES
+    )
+
+
+@pytest.mark.asyncio
+async def test_sentinel_flow_quiet_hours_incomplete_pair_errors(hass: Any) -> None:
+    """Setting only one of start/end returns a form error."""
+    flow, _entry = _quiet_hours_flow(hass)
+
+    await flow.async_step_user()
+    result = await flow.async_step_settings(
+        {
+            CONF_SENTINEL_ENABLED: True,
+            CONF_SENTINEL_INTERVAL_SECONDS: 300,
+            CONF_EXPLAIN_ENABLED: False,
+            CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE: False,
+            CONF_SENTINEL_QUIET_HOURS_START: "22",
+            CONF_SENTINEL_QUIET_HOURS_END: "",
+        }
+    )
+    assert result is not None
+    assert result.get("type") == "form"
+    assert (result.get("errors") or {}).get("base") == "quiet_hours_incomplete"
+
+
+@pytest.mark.asyncio
+async def test_sentinel_flow_quiet_hours_invalid_hour_errors(hass: Any) -> None:
+    """Out-of-range or non-numeric quiet-hours values return a form error."""
+    flow, _entry = _quiet_hours_flow(hass)
+
+    await flow.async_step_user()
+    result = await flow.async_step_settings(
+        {
+            CONF_SENTINEL_ENABLED: True,
+            CONF_SENTINEL_INTERVAL_SECONDS: 300,
+            CONF_EXPLAIN_ENABLED: False,
+            CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE: False,
+            CONF_SENTINEL_QUIET_HOURS_START: "25",
+            CONF_SENTINEL_QUIET_HOURS_END: "7",
+        }
+    )
+    assert result is not None
+    assert result.get("type") == "form"
+    assert (result.get("errors") or {}).get("base") == "invalid_quiet_hours"
+
+
+def _suggested_value(schema: Any, key: str) -> Any:
+    """Return the suggested_value attached to a schema key, or None."""
+    for marker in schema.schema:
+        if str(marker) == key:
+            description = getattr(marker, "description", None)
+            if isinstance(description, dict):
+                return description.get("suggested_value")
+    return None
+
+
+def test_quiet_hour_str_normalizes_values() -> None:
+    """_quiet_hour_str maps stored ints to select strings and garbage to ''."""
+    key = CONF_SENTINEL_QUIET_HOURS_START
+    assert _quiet_hour_str({}, key) == ""
+    assert _quiet_hour_str({key: None}, key) == ""
+    assert _quiet_hour_str({key: ""}, key) == ""
+    assert _quiet_hour_str({key: 22}, key) == "22"
+    assert _quiet_hour_str({key: "7"}, key) == "7"
+    # Corrupted stored values degrade to disabled rather than crashing the form.
+    assert _quiet_hour_str({key: "garbage"}, key) == ""
+
+
+@pytest.mark.asyncio
+async def test_sentinel_flow_quiet_hours_non_numeric_errors(hass: Any) -> None:
+    """Non-numeric quiet-hours values return the invalid_quiet_hours error."""
+    flow, _entry = _quiet_hours_flow(hass)
+
+    await flow.async_step_user()
+    result = await flow.async_step_settings(
+        {
+            CONF_SENTINEL_ENABLED: True,
+            CONF_SENTINEL_INTERVAL_SECONDS: 300,
+            CONF_EXPLAIN_ENABLED: False,
+            CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE: False,
+            CONF_SENTINEL_QUIET_HOURS_START: "abc",
+            CONF_SENTINEL_QUIET_HOURS_END: "7",
+        }
+    )
+    assert result is not None
+    assert result.get("type") == "form"
+    assert (result.get("errors") or {}).get("base") == "invalid_quiet_hours"
+
+
+@pytest.mark.asyncio
+async def test_sentinel_flow_quiet_hours_reconfigure_prefill(hass: Any) -> None:
+    """Stored int quiet hours prefill the form as select string values."""
+    flow, entry = _quiet_hours_flow(hass)
+    sentinel = DummySubentry(
+        "sentinel1",
+        SUBENTRY_TYPE_SENTINEL,
+        "Sentinel",
+        {
+            CONF_SENTINEL_ENABLED: True,
+            CONF_SENTINEL_QUIET_HOURS_START: 22,
+            CONF_SENTINEL_QUIET_HOURS_END: 7,
+            CONF_SENTINEL_QUIET_HOURS_SEVERITIES: ["low", "medium"],
+        },
+    )
+    entry.subentries[sentinel.subentry_id] = sentinel
+
+    result = await flow.async_step_settings(None)
+    assert result.get("type") == "form"
+    schema = result.get("data_schema")
+    assert schema is not None
+    # Ints stored in the subentry must surface as select option strings.
+    assert _suggested_value(schema, CONF_SENTINEL_QUIET_HOURS_START) == "22"
+    assert _suggested_value(schema, CONF_SENTINEL_QUIET_HOURS_END) == "7"
+    assert _suggested_value(schema, CONF_SENTINEL_QUIET_HOURS_SEVERITIES) == [
+        "low",
+        "medium",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_sentinel_flow_quiet_hours_error_redisplay_preserves_input(
+    hass: Any,
+) -> None:
+    """After a quiet-hours error the redisplayed form keeps the entered values."""
+    flow, _entry = _quiet_hours_flow(hass)
+
+    await flow.async_step_user()
+    result = await flow.async_step_settings(
+        {
+            CONF_SENTINEL_ENABLED: True,
+            CONF_SENTINEL_INTERVAL_SECONDS: 300,
+            CONF_EXPLAIN_ENABLED: False,
+            CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE: False,
+            CONF_SENTINEL_QUIET_HOURS_START: "22",
+            CONF_SENTINEL_QUIET_HOURS_END: "",
+        }
+    )
+    assert result.get("type") == "form"
+    assert (result.get("errors") or {}).get("base") == "quiet_hours_incomplete"
+    schema = result.get("data_schema")
+    assert schema is not None
+    assert _suggested_value(schema, CONF_SENTINEL_QUIET_HOURS_START) == "22"
+    assert _suggested_value(schema, CONF_SENTINEL_QUIET_HOURS_END) == ""
+
+
+@pytest.mark.asyncio
+async def test_sentinel_flow_quiet_hours_midnight_boundary(hass: Any) -> None:
+    """Hour 0 (midnight) is a valid boundary value, not treated as Disabled."""
+    flow, _entry = _quiet_hours_flow(hass)
+
+    await flow.async_step_user()
+    result = await flow.async_step_settings(
+        {
+            CONF_SENTINEL_ENABLED: True,
+            CONF_SENTINEL_INTERVAL_SECONDS: 300,
+            CONF_EXPLAIN_ENABLED: False,
+            CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE: False,
+            CONF_SENTINEL_QUIET_HOURS_START: "0",
+            CONF_SENTINEL_QUIET_HOURS_END: "23",
+        }
+    )
+    assert result.get("type") == "create_entry"
+    data = result.get("data")
+    assert data is not None
+    assert data[CONF_SENTINEL_QUIET_HOURS_START] == 0
+    assert data[CONF_SENTINEL_QUIET_HOURS_END] == 23
+    # A stored int 0 must round-trip to the "0" select value, not "Disabled".
+    assert (
+        _quiet_hour_str(
+            {CONF_SENTINEL_QUIET_HOURS_START: 0}, CONF_SENTINEL_QUIET_HOURS_START
+        )
+        == "0"
+    )
+
+
+@pytest.mark.asyncio
+async def test_sentinel_flow_quiet_hours_severities_filtered(hass: Any) -> None:
+    """Unknown severity values are dropped on save; known values are kept."""
+    flow, _entry = _quiet_hours_flow(hass)
+
+    await flow.async_step_user()
+    result = await flow.async_step_settings(
+        {
+            CONF_SENTINEL_ENABLED: True,
+            CONF_SENTINEL_INTERVAL_SECONDS: 300,
+            CONF_EXPLAIN_ENABLED: False,
+            CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE: False,
+            CONF_SENTINEL_QUIET_HOURS_START: "22",
+            CONF_SENTINEL_QUIET_HOURS_END: "7",
+            CONF_SENTINEL_QUIET_HOURS_SEVERITIES: ["low", "critical", "Medium"],
+        }
+    )
+    assert result.get("type") == "create_entry"
+    data = result.get("data")
+    assert data is not None
+    assert data[CONF_SENTINEL_QUIET_HOURS_SEVERITIES] == ["low"]
+
+
+def test_resolve_runtime_options_passes_quiet_hours_through() -> None:
+    """Quiet-hours keys stored in the Sentinel subentry reach runtime options."""
+    entry = DummyEntry(options={})
+    sentinel = DummySubentry(
+        "sentinel1",
+        SUBENTRY_TYPE_SENTINEL,
+        "Sentinel",
+        {
+            CONF_SENTINEL_ENABLED: True,
+            CONF_SENTINEL_QUIET_HOURS_START: 22,
+            CONF_SENTINEL_QUIET_HOURS_END: 7,
+            CONF_SENTINEL_QUIET_HOURS_SEVERITIES: ["low", "medium"],
+        },
+    )
+    entry.subentries[sentinel.subentry_id] = sentinel
+
+    options = resolve_runtime_options(entry)  # type: ignore[arg-type]
+    assert options[CONF_SENTINEL_QUIET_HOURS_START] == 22
+    assert options[CONF_SENTINEL_QUIET_HOURS_END] == 7
+    assert options[CONF_SENTINEL_QUIET_HOURS_SEVERITIES] == ["low", "medium"]
+
+
+def test_resolve_runtime_options_quiet_hours_default_disabled() -> None:
+    """Without stored quiet-hours keys, resolved options disable the feature."""
+    entry = DummyEntry(options={})
+    sentinel = DummySubentry(
+        "sentinel1",
+        SUBENTRY_TYPE_SENTINEL,
+        "Sentinel",
+        {CONF_SENTINEL_ENABLED: True},
+    )
+    entry.subentries[sentinel.subentry_id] = sentinel
+
+    options = resolve_runtime_options(entry)  # type: ignore[arg-type]
+    assert options[CONF_SENTINEL_QUIET_HOURS_START] is None
+    assert options[CONF_SENTINEL_QUIET_HOURS_END] is None
+    assert options[CONF_SENTINEL_QUIET_HOURS_SEVERITIES] == (
+        RECOMMENDED_SENTINEL_QUIET_HOURS_SEVERITIES
+    )
+
+
 # ---------------------------------------------------------------------------
 # v5 -> v6 migration: CONF_LLM_HASS_API normalisation
 # ---------------------------------------------------------------------------
@@ -1132,6 +1686,176 @@ def test_resolve_runtime_options_openai_compatible_embedding_dims_none() -> None
 def test_recommended_openai_compatible_embedding_dims_value() -> None:
     """Default dims constant is 768 — matches nomic-embed-text native output size."""
     assert RECOMMENDED_OPENAI_COMPATIBLE_EMBEDDING_DIMS == 768
+
+
+# ---------------------------------------------------------------------------
+# Embedding feature (issue #457)
+# ---------------------------------------------------------------------------
+
+
+def test_embedding_feature_registered() -> None:
+    """The embedding feature type is defined and mapped to its model category."""
+    assert "embedding" in FEATURE_DEFS
+    assert FEATURE_DEFS["embedding"]["required"] is False
+    assert FEATURE_CATEGORY_MAP["embedding"] == "embedding"
+    assert "embedding" in DEFAULT_FEATURE_TYPES
+
+
+def _make_entry_with_features(
+    providers: list[DummySubentry], features: list[DummySubentry]
+) -> DummyEntry:
+    entry = DummyEntry()
+    entry.subentries = {s.subentry_id: s for s in [*providers, *features]}
+    return entry
+
+
+def test_embedding_feature_selects_separate_openai_compatible_server() -> None:
+    """
+    Chat and embedding features on different OpenAI-compatible servers.
+
+    The embedding provider's base URL must land in the embedding-specific
+    option key without clobbering the chat provider's base URL.
+    """
+    chat_provider = DummySubentry(
+        "chat_prov",
+        SUBENTRY_TYPE_MODEL_PROVIDER,
+        "Chat llama-server",
+        {
+            "provider_type": "openai_compatible",
+            "capabilities": ["chat", "embedding"],
+            "settings": {"base_url": "http://chat-host:8080", "api_key": "sk-chat"},
+        },
+    )
+    emb_provider = DummySubentry(
+        "emb_prov",
+        SUBENTRY_TYPE_MODEL_PROVIDER,
+        "Embedding llama-server",
+        {
+            "provider_type": "openai_compatible",
+            "capabilities": ["embedding"],
+            "settings": {
+                "base_url": "http://emb-host:8081",
+                "api_key": "sk-emb",
+                CONF_OPENAI_COMPATIBLE_EMBEDDING_DIMS: 768,
+            },
+        },
+    )
+    chat_feature = DummySubentry(
+        "chat_feat",
+        SUBENTRY_TYPE_FEATURE,
+        "Conversation",
+        {
+            "feature_type": "conversation",
+            "model_provider_id": "chat_prov",
+            CONF_FEATURE_MODEL: {CONF_FEATURE_MODEL_NAME: "qwen3.5-vl"},
+        },
+    )
+    emb_feature = DummySubentry(
+        "emb_feat",
+        SUBENTRY_TYPE_FEATURE,
+        "Embeddings",
+        {
+            "feature_type": "embedding",
+            "model_provider_id": "emb_prov",
+            CONF_FEATURE_MODEL: {CONF_FEATURE_MODEL_NAME: "nomic-embed-text-v1.5"},
+        },
+    )
+    entry = _make_entry_with_features(
+        [chat_provider, emb_provider], [chat_feature, emb_feature]
+    )
+
+    options = resolve_runtime_options(entry)  # type: ignore[arg-type]
+    assert options[CONF_CHAT_MODEL_PROVIDER] == "openai_compatible"
+    assert options[CONF_EMBEDDING_MODEL_PROVIDER] == "openai_compatible"
+    assert options[CONF_OPENAI_COMPATIBLE_BASE_URL] == "http://chat-host:8080"
+    assert options[CONF_OPENAI_COMPATIBLE_API_KEY] == "sk-chat"
+    assert options[CONF_OPENAI_COMPATIBLE_EMBEDDING_URL] == "http://emb-host:8081"
+    assert options[CONF_OPENAI_COMPATIBLE_EMBEDDING_API_KEY] == "sk-emb"
+    assert options[CONF_OPENAI_COMPATIBLE_EMBEDDING_DIMS] == 768
+    assert options[CONF_OPENAI_COMPATIBLE_EMBEDDING_MODEL] == "nomic-embed-text-v1.5"
+
+
+def test_embedding_feature_selects_ollama_on_custom_url() -> None:
+    """An Ollama embedding provider propagates its own URL for embeddings."""
+    chat_provider = DummySubentry(
+        "chat_prov",
+        SUBENTRY_TYPE_MODEL_PROVIDER,
+        "Chat llama-server",
+        {
+            "provider_type": "openai_compatible",
+            "capabilities": ["chat", "embedding"],
+            "settings": {"base_url": "http://chat-host:8080", "api_key": "none"},
+        },
+    )
+    emb_provider = DummySubentry(
+        "emb_prov",
+        SUBENTRY_TYPE_MODEL_PROVIDER,
+        "Embedding Ollama",
+        {
+            "provider_type": "ollama",
+            "capabilities": ["embedding"],
+            "settings": {"base_url": "http://ollama-host:11434"},
+        },
+    )
+    chat_feature = DummySubentry(
+        "chat_feat",
+        SUBENTRY_TYPE_FEATURE,
+        "Conversation",
+        {
+            "feature_type": "conversation",
+            "model_provider_id": "chat_prov",
+            CONF_FEATURE_MODEL: {CONF_FEATURE_MODEL_NAME: "qwen3.5-vl"},
+        },
+    )
+    emb_feature = DummySubentry(
+        "emb_feat",
+        SUBENTRY_TYPE_FEATURE,
+        "Embeddings",
+        {
+            "feature_type": "embedding",
+            "model_provider_id": "emb_prov",
+            CONF_FEATURE_MODEL: {CONF_FEATURE_MODEL_NAME: "mxbai-embed-large"},
+        },
+    )
+    entry = _make_entry_with_features(
+        [chat_provider, emb_provider], [chat_feature, emb_feature]
+    )
+
+    options = resolve_runtime_options(entry)  # type: ignore[arg-type]
+    assert options[CONF_EMBEDDING_MODEL_PROVIDER] == "ollama"
+    assert options[CONF_OLLAMA_EMBEDDING_URL] == "http://ollama-host:11434"
+    # Chat provider's URL is untouched.
+    assert options[CONF_OPENAI_COMPATIBLE_BASE_URL] == "http://chat-host:8080"
+
+
+def test_embedding_without_feature_inherits_chat_provider() -> None:
+    """Without an embedding feature, the chat provider is inherited (legacy behavior)."""
+    chat_provider = DummySubentry(
+        "chat_prov",
+        SUBENTRY_TYPE_MODEL_PROVIDER,
+        "Chat llama-server",
+        {
+            "provider_type": "openai_compatible",
+            "capabilities": ["chat", "embedding"],
+            "settings": {"base_url": "http://chat-host:8080", "api_key": "sk-x"},
+        },
+    )
+    chat_feature = DummySubentry(
+        "chat_feat",
+        SUBENTRY_TYPE_FEATURE,
+        "Conversation",
+        {
+            "feature_type": "conversation",
+            "model_provider_id": "chat_prov",
+            CONF_FEATURE_MODEL: {CONF_FEATURE_MODEL_NAME: "qwen3.5-vl"},
+        },
+    )
+    entry = _make_entry_with_features([chat_provider], [chat_feature])
+
+    options = resolve_runtime_options(entry)  # type: ignore[arg-type]
+    assert options[CONF_EMBEDDING_MODEL_PROVIDER] == "openai_compatible"
+    assert options[CONF_OPENAI_COMPATIBLE_EMBEDDING_URL] == "http://chat-host:8080"
+    assert options[CONF_OPENAI_COMPATIBLE_EMBEDDING_API_KEY] == "sk-x"
 
 
 # ---------------------------------------------------------------------------
