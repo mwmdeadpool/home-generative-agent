@@ -14,7 +14,7 @@ A [Home Assistant](https://www.home-assistant.io/) integration that brings a gen
 | --- | --- |
 | **Conversational control** | Talk to your home in natural language. Turn things on, check status, ask questions. |
 | **Automation creation** | Describe what you want in chat and the agent writes and registers the HA automation. |
-| **Camera & image analysis** | Ask the agent what it sees in any camera. Proactive motion-triggered analysis with anomaly detection. |
+| **Camera & image analysis** | Ask the agent what it sees in any camera. Proactive motion-triggered analysis with anomaly detection. Works with Axis (VMD), Ring via ring-mqtt (including battery cameras via `event_select`), Reolink, UniFi Protect, and any camera that exposes a `binary_sensor.*` motion entity or a `recording` state in HA. |
 | **Sentinel anomaly detection** | Deterministic rules watch for security and safety issues (unlocked locks, open entries, unknown people) and alert your phone. Optional LLM-powered triage and rule discovery. Approved discovery rules can be inspected, deactivated, reactivated, and surgically repaired via HA services. |
 | **Face recognition** | Identify people in camera frames and personalize alerts. |
 | **Long-term memory** | Semantic search over past conversations. The agent remembers your preferences and context. |
@@ -96,7 +96,7 @@ You can now open the HA Assist panel and start talking to your home.
 | --- | --- |
 | [Installation](docs/installation.md) | HACS install, manual install, optional apps (Ollama, face recognition) |
 | [Configuration](docs/configuration.md) | Model providers, features, Tool Retrieval (RAG), LLM API, STT, YAML mode, Critical Action PIN |
-| [Sentinel](docs/sentinel.md) | Anomaly detection pipeline, built-in rules, triage, baseline, blueprints, services API, health sensor |
+| [Sentinel](docs/sentinel.md) | Anomaly detection pipeline, built-in rules, triage, baseline, blueprints, notification quiet hours, services API, health sensor |
 | [Camera Entities](docs/camera-entities.md) | Image and sensor entities, dashboards, automations, proactive video analysis, face recognition |
 | [Architecture](docs/architecture.md) | LangGraph agent, model tiers, context management, streaming, latency, tools |
 | [Contributing](docs/contributing.md) | Dev setup, Makefile reference, dependency workflow |

@@ -96,6 +96,22 @@ def _normalized_url(value: Any) -> str | None:
     return ensure_http_url(str(value))
 
 
+def normalize_openai_compatible_base_url(url: str) -> str:
+    """
+    Return an OpenAI-compatible base URL that ends with /v1.
+
+    The OpenAI SDK appends bare paths (/chat/completions, /embeddings) to the
+    base URL, and servers such as llama.cpp only guarantee OpenAI-format
+    responses under the /v1 prefix — its bare /embeddings route returns a raw
+    JSON list that crashes the SDK parser. Accepts URLs entered with or
+    without a trailing /v1.
+    """
+    base = ensure_http_url(url.strip()).rstrip("/")
+    if base.endswith("/v1"):
+        return base
+    return f"{base}/v1"
+
+
 def ollama_url_for_category(
     options: Mapping[str, Any],
     category: str,
@@ -546,6 +562,39 @@ def verify_pin(pin: str, *, hashed: str, salt: str) -> bool:
     return hmac.compare_digest(digest, hashed)
 
 
+EXCLUSION_ENTRY_MAX_LEN = 256
+
+# Exclusion entries may only use the entity-ID alphabet (lowercase letters,
+# digits, underscore, the domain separator dot) plus the two simple glob
+# wildcards. Character classes ("[...]") are rejected outright: their syntax
+# characters defeat any "has a literal character" check — e.g. "[!.]*.*"
+# reads as having literals but matches every valid entity ID — and no
+# realistic entity-ID pattern needs them.
+_EXCLUSION_ENTRY_ALLOWED_RE = re.compile(r"[a-z0-9_.*?]+\Z")
+_EXCLUSION_ENTRY_LITERAL_RE = re.compile(r"[a-z0-9_]")
+
+
+def valid_exclusion_entry(entry: str) -> bool:
+    """
+    Return True when *entry* is a usable sentinel exclusion entry.
+
+    Entries are entity IDs or glob patterns over them (``*`` and ``?`` only).
+    Four rules keep a security engine from failing open on a typo: the entry
+    must use only the entity-ID alphabet plus ``*``/``?`` (no ``[...]``
+    character classes — see the comment above), must contain a dot (entity
+    IDs are ``domain.object``), must contain at least one literal
+    ``[a-z0-9_]`` character (rejecting match-everything spellings like ``*``
+    and ``*.*``), and must fit in ``EXCLUSION_ENTRY_MAX_LEN``. Shared by the
+    engine option parser and the config-flow field validator so both stay in
+    lockstep.
+    """
+    if "." not in entry or len(entry) > EXCLUSION_ENTRY_MAX_LEN:
+        return False
+    if _EXCLUSION_ENTRY_ALLOWED_RE.fullmatch(entry) is None:
+        return False
+    return _EXCLUSION_ENTRY_LITERAL_RE.search(entry) is not None
+
+
 # ---------------------------
 # Health checks
 # ---------------------------
@@ -688,7 +737,7 @@ async def validate_openai_compatible_url(
     """Validate an OpenAI-compatible endpoint by calling its /v1/models path."""
     if not base_url:
         raise CannotConnectError
-    url = urljoin(base_url.rstrip("/") + "/", "v1/models")
+    url = normalize_openai_compatible_base_url(base_url) + "/models"
     headers: dict[str, str] = {}
     if api_key and api_key != "none":
         headers["Authorization"] = f"Bearer {api_key}"

@@ -21,3 +21,4 @@ visualize_graph.py
 config/*
 #!config/configuration.yaml
 upstream-pending.diff
+.gstack/

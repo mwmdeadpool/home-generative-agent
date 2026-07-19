@@ -29,7 +29,7 @@ Sentinel is a singleton service per Home Generative Agent config entry. Configur
 2. Click **+ Sentinel**.
 3. Choose a setup mode:
    - **Basic** — enables anomaly alerting with recommended defaults. Configure only the essentials: notify service, daily digest toggle and time, and an optional level-increase PIN.
-   - **Advanced** — exposes all options: detection interval, cooldowns, triage, baseline, discovery, and camera entry links. All fields pre-populate with current values when reconfiguring.
+   - **Advanced** — exposes all options: detection interval, cooldowns, quiet hours, triage, baseline, discovery, and camera entry links. All fields pre-populate with current values when reconfiguring.
 4. Optionally enable Discovery, Triage, and Baseline via **Advanced** setup or by reconfiguring later (see sections below).
 5. Save. Sentinel starts automatically — no HA restart required.
 
@@ -88,7 +88,7 @@ These rules run on every detection cycle without any configuration or approval.
 
 | Rule | Description |
 |---|---|
-| `appliance_power_duration` | Appliance drawing power beyond a configurable duration threshold (e.g. *"Washer drew about 296 W for 633 min, above the 60 min threshold. Check it."*) |
+| `appliance_power_duration` | Appliance observed drawing more than `sentinel_appliance_power_threshold_w` (default 100 W) continuously for longer than `sentinel_appliance_duration_min` (default 60 min), measured from when the sensor was first seen above the threshold (e.g. *"Washer drew about 296 W for 633 min, above the 60 min threshold. Check it."*). Both thresholds are configurable in the Sentinel subentry (Advanced setup). |
 
 **Cameras**
 
@@ -105,6 +105,28 @@ These rules run on every detection cycle without any configuration or approval.
 | `phone_battery_low_at_night_home` | Any phone battery sensor below 20% at night while someone is home |
 
 Static rules are registered automatically at startup. They cannot be deactivated through the proposal flow.
+
+### Per-entity rule exclusions
+
+`sentinel_rule_entity_exclusions` (Sentinel subentry, Advanced setup) excludes specific entities from specific rules without silencing the rule for everything else. It is a JSON object mapping an anomaly type to a list of entity IDs or glob patterns (`*` and `?` wildcards only); the key `"*"` excludes the listed entities from every rule:
+
+```json
+{
+  "appliance_power_duration": ["sensor.living_room_ac_power", "sensor.bedroom_ac_power"],
+  "camera_entry_unsecured": ["camera.map_*"],
+  "*": ["sensor.test_bench_power"]
+}
+```
+
+Exclusions are applied generically by the engine to every finding source — built-in static rules, approved dynamic rules, and baseline deviations — before correlation and dispatch. A finding is dropped when any of its triggering entities matches an entry (exact ID or glob) for its type. This is the supported way to stop, for example, HVAC power sensors from tripping `appliance_power_duration` during long compressor runs while keeping the rule active for ovens, irons, and other appliances.
+
+Exclusions also suppress **event-driven triggering** when the entity is excluded for its domain-mapped anomaly type or under `"*"` (an exclusion under any other type still filters findings but does not suppress triggers): a state change from a trigger-excluded entity no longer wakes the engine or occupies a slot in the bounded trigger queue. This matters for non-security uses of the `camera` and `person` domains — for example, the `person_location` platform exposes map snapshots as `camera.*` entities whose state flips on every GPS update; without an exclusion these flood the trigger queue with security-critical `camera_entry_unsecured` triggers and crowd out real events. Excluding them with a glob like `{"camera_entry_unsecured": ["camera.map_*"]}` (or under `"*"`) stops both the findings and the trigger noise.
+
+Three things to know before excluding entities:
+
+- **Type keys are exact; only the entries are globs.** `{"camera_entry*": [...]}` matches no anomaly type and is inert (the engine logs a startup warning) — write the full type name, or use the `"*"` key.
+- **Every entry must contain a dot, at least one literal character, and be at most 256 characters** (entity IDs are `domain.object`). Match-everything spellings such as `"*"` or `"*.*"` are rejected by the settings form and ignored (with a log warning) if hand-edited into storage — for a security engine, one typo'd pattern must not silently disable all monitoring. To exclude an entity from every rule, put it under the `"*"` *type key* instead.
+- **Trigger suppression is entity-level, not per-rule.** A Sentinel wake-up evaluates every rule, so excluding an entity for its domain-mapped type (camera → `camera_entry_unsecured`; person → `open_entry_while_away`; lock → `unlocked_lock_at_night`; alarm_control_panel → `alarm_disarmed_during_external_threat`; door/window/gate/motion/occupancy binary sensors → their mapped types) stops that entity's state changes from waking Sentinel at all. Findings of *other* anomaly types involving that entity are still produced — but on the polling cadence (`sentinel_interval_seconds`, default 300 s) or when some other entity triggers a wake-up, not instantly from the excluded entity itself. Don't per-type-exclude a real security camera you still want low-latency alerts from; exclusions are for entities that should not drive Sentinel wake-ups at all (map snapshots, template cameras, chatty presence entities). Suppressed triggers are counted in the `triggers_excluded` attribute of the Sentinel health sensor (updated at the end of each run) and logged at debug level.
 
 ---
 
@@ -133,6 +155,16 @@ When Sentinel notifications are enabled:
 | `Snooze Always` | Suppresses this finding type permanently. A confirmation notification is sent first; the snooze is written only after the user taps **Confirm**. |
 
 **Per-area routing:** When `sentinel_area_notify_map` maps an area name to a notify service, findings whose triggering entities belong to that area are routed to that service instead of the global `notify_service`.
+
+**Quiet hours:** Configure in the Sentinel subentry (Advanced setup) to suppress notifications for selected severities during a nightly window:
+
+| Option | Description |
+|---|---|
+| `sentinel_quiet_hours_start` | Local hour (0–23) the window opens; `Disabled` turns quiet hours off |
+| `sentinel_quiet_hours_end` | Local hour (0–23) the window closes; windows may wrap midnight (e.g. 22:00–07:00), and start = end means all day |
+| `sentinel_quiet_hours_severities` | Severities suppressed during the window (default: `low` only) |
+
+Both start and end must be set for quiet hours to take effect. Findings with severities outside the list are still delivered, and suppressed findings remain in the audit trail (individual findings carry the reason code `quiet_hours`).
 
 ---
 
@@ -452,6 +484,9 @@ In the Sentinel subentry:
 | `sentinel_require_pin_for_level_increase` | Require PIN to increase autonomy level |
 | `sentinel_area_notify_map` | Area name → notify service (e.g. `{"Garage": "notify.mobile_app_garage_tablet"}`) |
 | `sentinel_camera_entry_links` | Camera entity ID → list of entry/lock entity IDs in other areas (e.g. `{"camera.driveway": ["lock.front_door"]}`) |
+| `sentinel_rule_entity_exclusions` | Anomaly type (or `"*"` for all) → list of entity IDs or glob patterns excluded from that rule; exclusions under the entity's domain-mapped type or `"*"` also suppress event-driven triggering (e.g. `{"appliance_power_duration": ["sensor.ac_power"], "camera_entry_unsecured": ["camera.map_*"]}`) |
+| `sentinel_appliance_power_threshold_w` | `appliance_power_duration`: power level treated as "running" (default 100 W) |
+| `sentinel_appliance_duration_min` | `appliance_power_duration`: continuous minutes above the threshold before alerting (default 60) |
 | `audit_hot_max_records` | Max records in local hot store (default 500) |
 
 Discovery and baseline both require `sentinel_enabled` to be `true`. Discovery and triage also require a configured chat model.
@@ -515,6 +550,7 @@ Sentinel registers `sensor.sentinel_health`, updated after every detection run.
 | `triggers_dropped_incoming` | Cumulative triggers dropped on arrival |
 | `triggers_dropped_queued` | Cumulative lower-priority queued triggers evicted |
 | `triggers_ttl_expired` | Cumulative queued triggers discarded past TTL |
+| `triggers_excluded` | Cumulative event triggers suppressed by user entity exclusions (see [Per-entity rule exclusions](#per-entity-rule-exclusions)) |
 | `findings_count_by_severity` | Count by severity: `{low: N, medium: N, high: N}` |
 | `triage_suppress_rate` | Percentage of triaged findings suppressed (null if none triaged) |
 | `auto_exec_count` | Number of autonomous execution attempts |
@@ -598,4 +634,4 @@ title: Sentinel Proposals
 - **Similar candidates keep reappearing** — inspect `dedupe_reason` and `filtered_candidates` in discovery records.
 - **Proposal appears duplicate** — check logs for `Rule registry ignored duplicate rule ...` or `... covered_by_existing_rule ...`.
 - **Existing stored proposal drafts** — statuses update when proposals are re-processed; they are not auto-migrated.
-- **llama-server embedding incompatibility** — If you use llama-server as an OpenAI-compatible provider and see `Memory semantic search failed — embedding endpoint returned an incompatible response` in the logs, the agent has fallen back to recency-based memory retrieval. llama-server's `/v1/embeddings` response format does not match the OpenAI SDK's expected structure. For reliable semantic embeddings, use a dedicated embedding model via Ollama (`mxbai-embed-large` is recommended) and set its provider as the **Embedding** provider. Chat and embedding providers can be different — e.g. llama-server for chat, Ollama for embeddings.
+- **llama-server embeddings** — OpenAI-compatible base URLs are normalized to include `/v1`, so embedding requests reach llama-server's OpenAI-format `/v1/embeddings` endpoint (start that instance with `--embeddings`). Assign the embedding provider explicitly via the **Embeddings** feature in **+ Setup** — chat and embedding providers can be different, e.g. llama-server for chat and a dedicated llama-server or Ollama (`mxbai-embed-large`) for embeddings. If you see `Memory semantic search failed — embedding endpoint returned an incompatible response` in the logs, the agent has fallen back to recency-based memory retrieval; check the embedding server's response format.

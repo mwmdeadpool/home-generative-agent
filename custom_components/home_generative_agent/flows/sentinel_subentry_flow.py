@@ -31,6 +31,8 @@ from ..const import (
     CONF_CRITICAL_ACTION_PIN,
     CONF_EXPLAIN_ENABLED,
     CONF_NOTIFY_SERVICE,
+    CONF_SENTINEL_APPLIANCE_DURATION_MIN,
+    CONF_SENTINEL_APPLIANCE_POWER_THRESHOLD_W,
     CONF_SENTINEL_BASELINE_DOW_MIN_SAMPLES,
     CONF_SENTINEL_BASELINE_ENABLED,
     CONF_SENTINEL_BASELINE_FRESHNESS_THRESHOLD_SECONDS,
@@ -51,10 +53,16 @@ from ..const import (
     CONF_SENTINEL_LEVEL_INCREASE_PIN_HASH,
     CONF_SENTINEL_LEVEL_INCREASE_PIN_SALT,
     CONF_SENTINEL_PENDING_PROMPT_TTL_MINUTES,
+    CONF_SENTINEL_QUIET_HOURS_END,
+    CONF_SENTINEL_QUIET_HOURS_SEVERITIES,
+    CONF_SENTINEL_QUIET_HOURS_START,
     CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE,
+    CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS,
     CRITICAL_PIN_MAX_LEN,
     CRITICAL_PIN_MIN_LEN,
     RECOMMENDED_EXPLAIN_ENABLED,
+    RECOMMENDED_SENTINEL_APPLIANCE_DURATION_MIN,
+    RECOMMENDED_SENTINEL_APPLIANCE_POWER_THRESHOLD_W,
     RECOMMENDED_SENTINEL_BASELINE_DOW_MIN_SAMPLES,
     RECOMMENDED_SENTINEL_BASELINE_ENABLED,
     RECOMMENDED_SENTINEL_BASELINE_FRESHNESS_THRESHOLD_SECONDS,
@@ -73,10 +81,17 @@ from ..const import (
     RECOMMENDED_SENTINEL_ENTITY_COOLDOWN_MINUTES,
     RECOMMENDED_SENTINEL_INTERVAL_SECONDS,
     RECOMMENDED_SENTINEL_PENDING_PROMPT_TTL_MINUTES,
+    RECOMMENDED_SENTINEL_QUIET_HOURS_SEVERITIES,
     RECOMMENDED_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE,
+    RECOMMENDED_SENTINEL_RULE_ENTITY_EXCLUSIONS,
+    SENTINEL_SEVERITIES,
     SUBENTRY_TYPE_SENTINEL,
 )
-from ..core.utils import hash_pin, list_mobile_notify_services
+from ..core.utils import (  # noqa: TID252
+    hash_pin,
+    list_mobile_notify_services,
+    valid_exclusion_entry,
+)
 
 
 def _camera_entry_links_json(payload: dict[str, Any]) -> str:
@@ -87,6 +102,117 @@ def _camera_entry_links_json(payload: dict[str, Any]) -> str:
     if not isinstance(value, dict):
         value = {}
     return json.dumps(value)
+
+
+def _parse_json_entity_map(
+    data: dict[str, Any],
+    key: str,
+    errors: dict[str, str],
+    error_key: str,
+    *,
+    validate_exclusion_entries: bool = False,
+) -> None:
+    """
+    Parse a JSON ``dict[str, list[str]]`` text field into ``data[key]`` in place.
+
+    Records ``error_key`` in ``errors`` (leaving the raw string in ``data``)
+    when the value is not valid JSON of that shape.  Empty input stores ``{}``.
+    With ``validate_exclusion_entries`` every list item must pass
+    ``valid_exclusion_entry`` (a dot, at least one literal character, length
+    cap) — mirroring the engine parser so the form rejects entries the engine
+    would silently drop, in particular match-everything globs like ``"*"`` or
+    ``"*.*"`` (the ``"*"`` wildcard belongs in the map *key*, not the values).
+    """
+    raw = str(data.get(key, "") or "").strip()
+    if not raw or raw == "{}":
+        data[key] = {}
+        return
+    try:
+        parsed = json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        errors.setdefault("base", error_key)
+        return
+    if not isinstance(parsed, dict) or not all(
+        isinstance(k, str)
+        and isinstance(v, list)
+        and all(
+            isinstance(i, str)
+            and (not validate_exclusion_entries or valid_exclusion_entry(i))
+            for i in v
+        )
+        for k, v in parsed.items()
+    ):
+        errors.setdefault("base", error_key)
+        return
+    data[key] = parsed
+
+
+def _rule_entity_exclusions_json(payload: dict[str, Any]) -> str:
+    """Serialize sentinel_rule_entity_exclusions from payload to a JSON string."""
+    value = payload.get(
+        CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS,
+        RECOMMENDED_SENTINEL_RULE_ENTITY_EXCLUSIONS,
+    )
+    if not isinstance(value, dict):
+        value = {}
+    return json.dumps(value)
+
+
+_QUIET_HOUR_MAX = 23
+
+_QUIET_HOUR_OPTIONS = [
+    SelectOptionDict(label="Disabled", value=""),
+    *(
+        SelectOptionDict(label=f"{hour:02d}:00", value=str(hour))
+        for hour in range(_QUIET_HOUR_MAX + 1)
+    ),
+]
+
+_QUIET_SEVERITY_OPTIONS = [
+    SelectOptionDict(label=severity.capitalize(), value=severity)
+    for severity in SENTINEL_SEVERITIES
+]
+
+
+def _quiet_hour_selector() -> SelectSelector:
+    """Return a fresh hour-of-day dropdown selector for quiet hours."""
+    return SelectSelector(
+        SelectSelectorConfig(
+            options=_QUIET_HOUR_OPTIONS,
+            mode=SelectSelectorMode.DROPDOWN,
+            sort=False,
+            custom_value=False,
+        )
+    )
+
+
+def _parse_quiet_hour(raw: str) -> int | None:
+    """Parse a quiet-hours select value into a local hour, or None if invalid."""
+    try:
+        value = int(raw)
+    except ValueError:
+        return None
+    if not 0 <= value <= _QUIET_HOUR_MAX:
+        return None
+    return value
+
+
+def _quiet_hour_str(payload: dict[str, Any], key: str) -> str:
+    """Return the quiet-hours value from payload as a select value ("" = disabled)."""
+    value = payload.get(key)
+    if value is None or value == "":
+        return ""
+    parsed = _parse_quiet_hour(str(value).strip())
+    return "" if parsed is None else str(parsed)
+
+
+def _raw_quiet_hour(data: dict[str, Any], key: str) -> str:
+    """Return the submitted quiet-hours value as a stripped string ("" = unset)."""
+    value = data.get(key)
+    if value is None:
+        return ""
+    # str() (not truthiness) so hour 0 is treated as set, not as "Disabled".
+    return str(value).strip()
 
 
 def _current_subentry(flow: ConfigSubentryFlow) -> ConfigSubentry | None:
@@ -140,13 +266,26 @@ def _default_payload() -> dict[str, Any]:
         CONF_SENTINEL_BASELINE_SUSTAINED_MINUTES: (
             RECOMMENDED_SENTINEL_BASELINE_SUSTAINED_MINUTES
         ),
+        CONF_SENTINEL_APPLIANCE_POWER_THRESHOLD_W: (
+            RECOMMENDED_SENTINEL_APPLIANCE_POWER_THRESHOLD_W
+        ),
+        CONF_SENTINEL_APPLIANCE_DURATION_MIN: (
+            RECOMMENDED_SENTINEL_APPLIANCE_DURATION_MIN
+        ),
         CONF_EXPLAIN_ENABLED: RECOMMENDED_EXPLAIN_ENABLED,
         CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE: (
             RECOMMENDED_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE
         ),
         CONF_SENTINEL_DAILY_DIGEST_ENABLED: RECOMMENDED_SENTINEL_DAILY_DIGEST_ENABLED,
         CONF_SENTINEL_DAILY_DIGEST_TIME: RECOMMENDED_SENTINEL_DAILY_DIGEST_TIME,
+        # Quiet-hours start/end default to absent (feature disabled).
+        CONF_SENTINEL_QUIET_HOURS_SEVERITIES: list(
+            RECOMMENDED_SENTINEL_QUIET_HOURS_SEVERITIES
+        ),
         CONF_SENTINEL_CAMERA_ENTRY_LINKS: RECOMMENDED_SENTINEL_CAMERA_ENTRY_LINKS,
+        CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS: (
+            RECOMMENDED_SENTINEL_RULE_ENTITY_EXCLUSIONS
+        ),
     }
 
 
@@ -295,6 +434,24 @@ class SentinelSubentryFlow(ConfigSubentryFlow):
                 ),
             ): NumberSelector(NumberSelectorConfig(min=0, max=120, step=5)),
             vol.Required(
+                CONF_SENTINEL_APPLIANCE_POWER_THRESHOLD_W,
+                default=float(
+                    payload.get(
+                        CONF_SENTINEL_APPLIANCE_POWER_THRESHOLD_W,
+                        RECOMMENDED_SENTINEL_APPLIANCE_POWER_THRESHOLD_W,
+                    )
+                ),
+            ): NumberSelector(NumberSelectorConfig(min=10, max=10000, step=10)),
+            vol.Required(
+                CONF_SENTINEL_APPLIANCE_DURATION_MIN,
+                default=int(
+                    payload.get(
+                        CONF_SENTINEL_APPLIANCE_DURATION_MIN,
+                        RECOMMENDED_SENTINEL_APPLIANCE_DURATION_MIN,
+                    )
+                ),
+            ): NumberSelector(NumberSelectorConfig(min=5, max=1440, step=5)),
+            vol.Required(
                 CONF_EXPLAIN_ENABLED,
                 default=bool(
                     payload.get(CONF_EXPLAIN_ENABLED, RECOMMENDED_EXPLAIN_ENABLED)
@@ -328,11 +485,43 @@ class SentinelSubentryFlow(ConfigSubentryFlow):
                 ),
             ): TimeSelector(),
             vol.Optional(
+                CONF_SENTINEL_QUIET_HOURS_START,
+                default=_quiet_hour_str(payload, CONF_SENTINEL_QUIET_HOURS_START),
+            ): _quiet_hour_selector(),
+            vol.Optional(
+                CONF_SENTINEL_QUIET_HOURS_END,
+                default=_quiet_hour_str(payload, CONF_SENTINEL_QUIET_HOURS_END),
+            ): _quiet_hour_selector(),
+            vol.Required(
+                CONF_SENTINEL_QUIET_HOURS_SEVERITIES,
+                default=list(
+                    payload.get(
+                        CONF_SENTINEL_QUIET_HOURS_SEVERITIES,
+                        RECOMMENDED_SENTINEL_QUIET_HOURS_SEVERITIES,
+                    )
+                ),
+            ): SelectSelector(
+                SelectSelectorConfig(
+                    options=_QUIET_SEVERITY_OPTIONS,
+                    multiple=True,
+                    mode=SelectSelectorMode.DROPDOWN,
+                    sort=False,
+                    custom_value=False,
+                )
+            ),
+            vol.Optional(
                 CONF_SENTINEL_CAMERA_ENTRY_LINKS,
                 description={
                     "suggested_value": _camera_entry_links_json(payload),
                 },
                 default=_camera_entry_links_json(payload),
+            ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
+            vol.Optional(
+                CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS,
+                description={
+                    "suggested_value": _rule_entity_exclusions_json(payload),
+                },
+                default=_rule_entity_exclusions_json(payload),
             ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
             vol.Optional(
                 CONF_CRITICAL_ACTION_PIN,
@@ -599,6 +788,11 @@ class SentinelSubentryFlow(ConfigSubentryFlow):
             suggested[CONF_SENTINEL_CAMERA_ENTRY_LINKS] = _camera_entry_links_json(
                 payload
             )
+            suggested[CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS] = (
+                _rule_entity_exclusions_json(payload)
+            )
+            for key in (CONF_SENTINEL_QUIET_HOURS_START, CONF_SENTINEL_QUIET_HOURS_END):
+                suggested[key] = _quiet_hour_str(payload, key)
             return self.async_show_form(
                 step_id="settings",
                 data_schema=self.add_suggested_values_to_schema(
@@ -640,23 +834,42 @@ class SentinelSubentryFlow(ConfigSubentryFlow):
                     CONF_SENTINEL_LEVEL_INCREASE_PIN_SALT
                 ]
 
-        raw_links = str(data.get(CONF_SENTINEL_CAMERA_ENTRY_LINKS, "") or "").strip()
-        if raw_links and raw_links != "{}":
-            try:
-                parsed_links = json.loads(raw_links)
-                if not isinstance(parsed_links, dict) or not all(
-                    isinstance(k, str)
-                    and isinstance(v, list)
-                    and all(isinstance(i, str) for i in v)
-                    for k, v in parsed_links.items()
-                ):
-                    errors["base"] = "invalid_camera_entry_links"
-                else:
-                    data[CONF_SENTINEL_CAMERA_ENTRY_LINKS] = parsed_links
-            except (json.JSONDecodeError, ValueError):
-                errors["base"] = "invalid_camera_entry_links"
+        raw_quiet_start = _raw_quiet_hour(data, CONF_SENTINEL_QUIET_HOURS_START)
+        raw_quiet_end = _raw_quiet_hour(data, CONF_SENTINEL_QUIET_HOURS_END)
+        if (raw_quiet_start == "") != (raw_quiet_end == ""):
+            errors.setdefault("base", "quiet_hours_incomplete")
+        elif raw_quiet_start and raw_quiet_end:
+            quiet_start = _parse_quiet_hour(raw_quiet_start)
+            quiet_end = _parse_quiet_hour(raw_quiet_end)
+            if quiet_start is None or quiet_end is None:
+                errors.setdefault("base", "invalid_quiet_hours")
+            else:
+                data[CONF_SENTINEL_QUIET_HOURS_START] = quiet_start
+                data[CONF_SENTINEL_QUIET_HOURS_END] = quiet_end
         else:
-            data[CONF_SENTINEL_CAMERA_ENTRY_LINKS] = {}
+            data.pop(CONF_SENTINEL_QUIET_HOURS_START, None)
+            data.pop(CONF_SENTINEL_QUIET_HOURS_END, None)
+
+        quiet_severities = data.get(CONF_SENTINEL_QUIET_HOURS_SEVERITIES)
+        data[CONF_SENTINEL_QUIET_HOURS_SEVERITIES] = (
+            [str(s) for s in quiet_severities if str(s) in SENTINEL_SEVERITIES]
+            if isinstance(quiet_severities, list)
+            else list(RECOMMENDED_SENTINEL_QUIET_HOURS_SEVERITIES)
+        )
+
+        _parse_json_entity_map(
+            data,
+            CONF_SENTINEL_CAMERA_ENTRY_LINKS,
+            errors,
+            "invalid_camera_entry_links",
+        )
+        _parse_json_entity_map(
+            data,
+            CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS,
+            errors,
+            "invalid_rule_entity_exclusions",
+            validate_exclusion_entries=True,
+        )
 
         if errors:
             # Strip any raw (non-dict) value for camera_entry_links so the schema
@@ -667,12 +880,21 @@ class SentinelSubentryFlow(ConfigSubentryFlow):
                 error_payload.get(CONF_SENTINEL_CAMERA_ENTRY_LINKS), dict
             ):
                 error_payload.pop(CONF_SENTINEL_CAMERA_ENTRY_LINKS, None)
+            if not isinstance(
+                error_payload.get(CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS), dict
+            ):
+                error_payload.pop(CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS, None)
             error_suggested: dict[str, Any] = {
                 k: v for k, v in error_payload.items() if k != CONF_CRITICAL_ACTION_PIN
             }
             error_suggested[CONF_SENTINEL_CAMERA_ENTRY_LINKS] = (
                 _camera_entry_links_json(error_payload)
             )
+            error_suggested[CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS] = (
+                _rule_entity_exclusions_json(error_payload)
+            )
+            for key in (CONF_SENTINEL_QUIET_HOURS_START, CONF_SENTINEL_QUIET_HOURS_END):
+                error_suggested[key] = _quiet_hour_str(error_payload, key)
             return self.async_show_form(
                 step_id="settings",
                 data_schema=self.add_suggested_values_to_schema(

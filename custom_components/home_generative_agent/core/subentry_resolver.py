@@ -40,6 +40,7 @@ from ..const import (
     CONF_OLLAMA_CHAT_MODEL,
     CONF_OLLAMA_CHAT_URL,
     CONF_OLLAMA_EMBEDDING_MODEL,
+    CONF_OLLAMA_EMBEDDING_URL,
     CONF_OLLAMA_REASONING,
     CONF_OLLAMA_SUMMARIZATION_CONTEXT_SIZE,
     CONF_OLLAMA_SUMMARIZATION_KEEPALIVE,
@@ -53,10 +54,14 @@ from ..const import (
     CONF_OPENAI_CHAT_MODEL,
     CONF_OPENAI_COMPATIBLE_API_KEY,
     CONF_OPENAI_COMPATIBLE_BASE_URL,
+    CONF_OPENAI_COMPATIBLE_EMBEDDING_API_KEY,
     CONF_OPENAI_COMPATIBLE_EMBEDDING_DIMS,
+    CONF_OPENAI_COMPATIBLE_EMBEDDING_URL,
     CONF_OPENAI_EMBEDDING_MODEL,
     CONF_OPENAI_SUMMARIZATION_MODEL,
     CONF_OPENAI_VLM,
+    CONF_SENTINEL_APPLIANCE_DURATION_MIN,
+    CONF_SENTINEL_APPLIANCE_POWER_THRESHOLD_W,
     CONF_SENTINEL_BASELINE_DOW_MIN_SAMPLES,
     CONF_SENTINEL_BASELINE_DRIFT_THRESHOLD_PCT,
     CONF_SENTINEL_BASELINE_ENABLED,
@@ -79,7 +84,11 @@ from ..const import (
     CONF_SENTINEL_LEVEL_INCREASE_PIN_HASH,
     CONF_SENTINEL_LEVEL_INCREASE_PIN_SALT,
     CONF_SENTINEL_PENDING_PROMPT_TTL_MINUTES,
+    CONF_SENTINEL_QUIET_HOURS_END,
+    CONF_SENTINEL_QUIET_HOURS_SEVERITIES,
+    CONF_SENTINEL_QUIET_HOURS_START,
     CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE,
+    CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS,
     CONF_SUMMARIZATION_MODEL_PROVIDER,
     CONF_VLM_PROVIDER,
     FEATURE_CATEGORY_MAP,
@@ -109,6 +118,8 @@ from ..const import (
     RECOMMENDED_OPENAI_EMBEDDING_MODEL,
     RECOMMENDED_OPENAI_SUMMARIZATION_MODEL,
     RECOMMENDED_OPENAI_VLM,
+    RECOMMENDED_SENTINEL_APPLIANCE_DURATION_MIN,
+    RECOMMENDED_SENTINEL_APPLIANCE_POWER_THRESHOLD_W,
     RECOMMENDED_SENTINEL_BASELINE_DOW_MIN_SAMPLES,
     RECOMMENDED_SENTINEL_BASELINE_DRIFT_THRESHOLD_PCT,
     RECOMMENDED_SENTINEL_BASELINE_ENABLED,
@@ -129,7 +140,9 @@ from ..const import (
     RECOMMENDED_SENTINEL_ENTITY_COOLDOWN_MINUTES,
     RECOMMENDED_SENTINEL_INTERVAL_SECONDS,
     RECOMMENDED_SENTINEL_PENDING_PROMPT_TTL_MINUTES,
+    RECOMMENDED_SENTINEL_QUIET_HOURS_SEVERITIES,
     RECOMMENDED_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE,
+    RECOMMENDED_SENTINEL_RULE_ENTITY_EXCLUSIONS,
     SUBENTRY_TYPE_DATABASE,
     SUBENTRY_TYPE_FEATURE,
     SUBENTRY_TYPE_MODEL_PROVIDER,
@@ -285,8 +298,23 @@ def _apply_sentinel_options(
             RECOMMENDED_SENTINEL_BASELINE_DOW_MIN_SAMPLES
         ),
         CONF_SENTINEL_CAMERA_ENTRY_LINKS: RECOMMENDED_SENTINEL_CAMERA_ENTRY_LINKS,
+        CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS: (
+            RECOMMENDED_SENTINEL_RULE_ENTITY_EXCLUSIONS
+        ),
+        CONF_SENTINEL_APPLIANCE_POWER_THRESHOLD_W: (
+            RECOMMENDED_SENTINEL_APPLIANCE_POWER_THRESHOLD_W
+        ),
+        CONF_SENTINEL_APPLIANCE_DURATION_MIN: (
+            RECOMMENDED_SENTINEL_APPLIANCE_DURATION_MIN
+        ),
         CONF_SENTINEL_DAILY_DIGEST_ENABLED: RECOMMENDED_SENTINEL_DAILY_DIGEST_ENABLED,
         CONF_SENTINEL_DAILY_DIGEST_TIME: RECOMMENDED_SENTINEL_DAILY_DIGEST_TIME,
+        # None = quiet hours disabled (the engine treats absent start/end as off).
+        CONF_SENTINEL_QUIET_HOURS_START: None,
+        CONF_SENTINEL_QUIET_HOURS_END: None,
+        CONF_SENTINEL_QUIET_HOURS_SEVERITIES: list(
+            RECOMMENDED_SENTINEL_QUIET_HOURS_SEVERITIES
+        ),
     }
 
     if sentinel_subentry is None:
@@ -718,6 +746,26 @@ def resolve_feature_configs(
     return legacy_feature_configs(entry, providers, options)
 
 
+def _apply_openai_compatible_to_category(
+    options: dict[str, Any], category: str, settings: Mapping[str, Any]
+) -> None:
+    """Overlay OpenAI-compatible provider settings for a model category."""
+    if category == "embedding":
+        # Embedding-specific keys so a dedicated embedding server does not
+        # clobber the chat provider's base URL (and vice versa).
+        if base_url := settings.get("base_url"):
+            options[CONF_OPENAI_COMPATIBLE_EMBEDDING_URL] = base_url
+        options[CONF_OPENAI_COMPATIBLE_EMBEDDING_API_KEY] = settings.get(
+            "api_key", "none"
+        )
+        if (dims := settings.get(CONF_OPENAI_COMPATIBLE_EMBEDDING_DIMS)) is not None:
+            options[CONF_OPENAI_COMPATIBLE_EMBEDDING_DIMS] = dims
+    else:
+        if base_url := settings.get("base_url"):
+            options[CONF_OPENAI_COMPATIBLE_BASE_URL] = base_url
+        options[CONF_OPENAI_COMPATIBLE_API_KEY] = settings.get("api_key", "none")
+
+
 def _apply_provider_to_category(
     options: dict[str, Any], category: str, provider: ModelProviderConfig
 ) -> None:
@@ -737,20 +785,14 @@ def _apply_provider_to_category(
             options[CONF_OLLAMA_VLM_URL] = base_url
         if category == "summarization":
             options[CONF_OLLAMA_SUMMARIZATION_URL] = base_url
+        if category == "embedding":
+            options[CONF_OLLAMA_EMBEDDING_URL] = base_url
 
     if provider.provider_type == "openai" and (api_key := settings.get("api_key")):
         options[CONF_API_KEY] = api_key
 
     if provider.provider_type == "openai_compatible":
-        if base_url := settings.get("base_url"):
-            options[CONF_OPENAI_COMPATIBLE_BASE_URL] = base_url
-        options[CONF_OPENAI_COMPATIBLE_API_KEY] = settings.get("api_key", "none")
-        if (
-            category == "embedding"
-            and (dims := settings.get(CONF_OPENAI_COMPATIBLE_EMBEDDING_DIMS))
-            is not None
-        ):
-            options[CONF_OPENAI_COMPATIBLE_EMBEDDING_DIMS] = dims
+        _apply_openai_compatible_to_category(options, category, settings)
 
     if provider.provider_type == "gemini" and (api_key := settings.get("api_key")):
         options[CONF_GEMINI_API_KEY] = api_key

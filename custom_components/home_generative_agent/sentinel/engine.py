@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import fnmatch
 import logging
 import re
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Any, cast
 
@@ -19,6 +21,8 @@ from custom_components.home_generative_agent.const import (
     ACTION_POLICY_AUTO_EXECUTE,
     ACTION_POLICY_BLOCKED,
     CONF_EXPLAIN_ENABLED,
+    CONF_SENTINEL_APPLIANCE_DURATION_MIN,
+    CONF_SENTINEL_APPLIANCE_POWER_THRESHOLD_W,
     CONF_SENTINEL_AUTO_EXEC_CANARY_MODE,
     CONF_SENTINEL_AUTONOMY_LEVEL,
     CONF_SENTINEL_BASELINE_DOW_MIN_SAMPLES,
@@ -37,7 +41,10 @@ from custom_components.home_generative_agent.const import (
     CONF_SENTINEL_QUIET_HOURS_SEVERITIES,
     CONF_SENTINEL_QUIET_HOURS_START,
     CONF_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE,
+    CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS,
     CONF_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES,
+    RECOMMENDED_SENTINEL_APPLIANCE_DURATION_MIN,
+    RECOMMENDED_SENTINEL_APPLIANCE_POWER_THRESHOLD_W,
     RECOMMENDED_SENTINEL_AUTO_EXEC_CANARY_MODE,
     RECOMMENDED_SENTINEL_AUTONOMY_LEVEL,
     RECOMMENDED_SENTINEL_BASELINE_DOW_MIN_SAMPLES,
@@ -49,9 +56,14 @@ from custom_components.home_generative_agent.const import (
     RECOMMENDED_SENTINEL_QUIET_HOURS_SEVERITIES,
     RECOMMENDED_SENTINEL_REQUIRE_PIN_FOR_LEVEL_INCREASE,
     RECOMMENDED_SENTINEL_RUNTIME_OVERRIDE_TTL_MINUTES,
+    SENTINEL_SEVERITIES,
     SIGNAL_SENTINEL_RUN_COMPLETE,
 )
-from custom_components.home_generative_agent.core.utils import verify_pin
+from custom_components.home_generative_agent.core.utils import (
+    EXCLUSION_ENTRY_MAX_LEN,
+    valid_exclusion_entry,
+    verify_pin,
+)
 from custom_components.home_generative_agent.snapshot.builder import (
     async_build_full_state_snapshot,
 )
@@ -204,10 +216,33 @@ class SentinelEngine:
         self._trigger_scheduler = SentinelTriggerScheduler()
         self._execution_service = SentinelExecutionService(dict(options))
         self._log_limiter = RepeatingLogLimiter(LOGGER)
+        self._rule_entity_exclusions = _parse_rule_entity_exclusions(
+            options.get(CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS)
+        )
+        self._excluded_trigger_count = 0
+        if self._rule_entity_exclusions:
+            # One-time visibility that exclusions now also gate event-driven
+            # triggering (#481) — upgrading users configured them when they
+            # only filtered findings.
+            LOGGER.info(
+                "Sentinel entity exclusions active for %d anomaly type key(s); "
+                "matching entities are excluded from findings and from "
+                "event-driven triggering (evaluation falls back to polling).",
+                len(self._rule_entity_exclusions),
+            )
         self._rules = [
             UnlockedLockAtNightRule(),
             OpenEntryWhileAwayRule(),
-            AppliancePowerDurationRule(),
+            AppliancePowerDurationRule(
+                power_threshold_w=_coerce_float(
+                    options.get(CONF_SENTINEL_APPLIANCE_POWER_THRESHOLD_W),
+                    RECOMMENDED_SENTINEL_APPLIANCE_POWER_THRESHOLD_W,
+                ),
+                duration_min=_coerce_int(
+                    options.get(CONF_SENTINEL_APPLIANCE_DURATION_MIN),
+                    default=RECOMMENDED_SENTINEL_APPLIANCE_DURATION_MIN,
+                ),
+            ),
             CameraEntryUnsecuredRule(
                 camera_entry_links=cast(
                     "dict[str, list[str]]",
@@ -380,6 +415,15 @@ class SentinelEngine:
 
         Maps the changed entity to a sentinel anomaly type and enqueues a
         trigger in the scheduler.  Irrelevant entities are silently ignored.
+        Entities the user excluded for the mapped anomaly type (or under the
+        "*" wildcard key) via ``sentinel_rule_entity_exclusions`` do not wake
+        the engine at all — the deliberate #481 trade-off that keeps chatty
+        non-security camera/person entities from flooding the bounded trigger
+        queue.  Because a wake-up evaluates every rule, suppressing it defers
+        event-driven evaluation of ALL anomaly types involving that entity to
+        the polling cadence (and to wake-ups from other entities), not just
+        the excluded type.  Suppressions are counted in
+        ``run_stats["triggers_excluded"]`` and logged at debug level.
         """
         entity_id: str = event.data.get("entity_id", "")
         new_state: State | None = event.data.get("new_state")
@@ -391,7 +435,28 @@ class SentinelEngine:
         if anomaly_type is None:
             return
 
+        if self._entity_excluded_for_type(entity_id, anomaly_type):
+            self._excluded_trigger_count += 1
+            LOGGER.debug(
+                "Sentinel suppressed event trigger for %s (type=%s, user "
+                "entity exclusion).",
+                entity_id,
+                anomaly_type,
+            )
+            return
+
         self._trigger_scheduler.enqueue(TriggerRecord(anomaly_type=anomaly_type))
+
+    def _entity_excluded_for_type(self, entity_id: str, anomaly_type: str) -> bool:
+        """Return True when the entity is excluded for this anomaly type."""
+        exclusions = self._rule_entity_exclusions
+        if not exclusions:
+            return False
+        wildcard = exclusions.get("*")
+        if wildcard is not None and wildcard.matches(entity_id):
+            return True
+        typed = exclusions.get(anomaly_type)
+        return typed is not None and typed.matches(entity_id)
 
     # ---------------------------------------------------------------------- #
     # Run loop
@@ -450,6 +515,7 @@ class SentinelEngine:
                 else 0
             )
             self.run_stats["scheduler"] = self._trigger_scheduler.stats
+            self.run_stats["triggers_excluded"] = self._excluded_trigger_count
             async_dispatcher_send(self._hass, SIGNAL_SENTINEL_RUN_COMPLETE)
 
     async def _run_once(self, trigger_source: str = "poll") -> None:  # noqa: PLR0912, PLR0915
@@ -586,6 +652,9 @@ class SentinelEngine:
                     )
                 all_findings.extend(dynamic_findings)
 
+        if self._rule_entity_exclusions:
+            all_findings = self._filter_excluded_findings(all_findings)
+
         if not all_findings:
             return
 
@@ -603,6 +672,40 @@ class SentinelEngine:
                 explain_enabled,
                 trigger_source=trigger_source,
             )
+
+    # ---------------------------------------------------------------------- #
+    # Per-rule entity exclusions (Issue #462)
+    # ---------------------------------------------------------------------- #
+
+    def _filter_excluded_findings(
+        self, findings: list[AnomalyFinding]
+    ) -> list[AnomalyFinding]:
+        """
+        Drop findings whose triggering entities are user-excluded for their type.
+
+        A finding is dropped when *any* of its triggering entities matches an
+        entry (exact ID or glob pattern) in the exclusion set for the finding's
+        type or in the wildcard ("*") set — excluding one entity of a
+        multi-entity finding expresses "stop alerting about this entity".
+        Applied to every finding source (static rules, dynamic rules, baseline
+        deviations) before correlation, so exclusions are generic across rules
+        rather than per-rule logic.  Shares ``_entity_excluded_for_type`` with
+        the event-trigger suppression path so both stay in lockstep.
+        """
+        kept: list[AnomalyFinding] = []
+        for finding in findings:
+            if any(
+                self._entity_excluded_for_type(entity_id, finding.type)
+                for entity_id in finding.triggering_entities
+            ):
+                LOGGER.debug(
+                    "Sentinel dropped %s finding for %s (user entity exclusion).",
+                    finding.type,
+                    finding.triggering_entities,
+                )
+                continue
+            kept.append(finding)
+        return kept
 
     # ---------------------------------------------------------------------- #
     # Cyclical load sustained deviation gate
@@ -1156,6 +1259,100 @@ async def _auto_execute_finding(
     }
 
 
+_GLOB_CHARS = ("*", "?", "[")
+
+
+@dataclass(frozen=True)
+class _ExclusionSet:
+    """Compiled per-type exclusion entries: exact entity IDs plus globs."""
+
+    exact: frozenset[str]
+    patterns: tuple[re.Pattern[str], ...]
+
+    def matches(self, entity_id: str) -> bool:
+        """Return True when *entity_id* matches an exact entry or a glob."""
+        return entity_id in self.exact or any(
+            pattern.match(entity_id) for pattern in self.patterns
+        )
+
+
+def _compile_exclusion_entries(entries: frozenset[str]) -> _ExclusionSet | None:
+    """
+    Compile raw exclusion entries into an ``_ExclusionSet``.
+
+    Entries are exact entity IDs or fnmatch-style glob patterns (e.g.
+    ``camera.map_*``); matching is case-sensitive. Entries that fail
+    ``valid_exclusion_entry`` are dropped with a warning: a match-everything
+    entry (``"*"``, ``"*.*"``) would silently exclude every entity — a
+    fail-open path for a security engine — so every entry must contain a dot
+    and at least one literal character, and fit the length cap (the ``"*"``
+    *type key* is the supported way to exclude an entity from all rules).
+    Globs are precompiled here because matching runs in the per-event trigger
+    path; Python's atomic-group ``fnmatch.translate`` output and short entity
+    IDs keep per-match cost trivial.
+
+    Returns None when no valid entry remains.
+    """
+    exact: set[str] = set()
+    patterns: list[re.Pattern[str]] = []
+    for entry in entries:
+        if not valid_exclusion_entry(entry):
+            LOGGER.warning(
+                "Ignoring sentinel exclusion entry %r: entries may use only "
+                "lowercase entity-ID characters plus the * and ? wildcards, "
+                "must contain a dot (entity IDs are domain.object) and at "
+                "least one literal character, and be at most %d characters. "
+                'Use the "*" type key to exclude an entity from all rules.',
+                entry[:64],
+                EXCLUSION_ENTRY_MAX_LEN,
+            )
+            continue
+        if any(char in entry for char in _GLOB_CHARS):
+            patterns.append(re.compile(fnmatch.translate(entry)))
+        else:
+            exact.add(entry)
+    if not exact and not patterns:
+        return None
+    return _ExclusionSet(exact=frozenset(exact), patterns=tuple(patterns))
+
+
+def _parse_rule_entity_exclusions(value: object | None) -> dict[str, _ExclusionSet]:
+    """
+    Normalize the configured rule→entity exclusion map.
+
+    Accepts the stored option shape (dict of anomaly type -> list of entity
+    IDs or fnmatch-style glob patterns, with "*" as a wildcard type key) and
+    drops anything malformed rather than raising — a bad exclusion entry must
+    never disable the engine. Type keys are matched exactly (globs are only
+    supported in the entry values); entries are compiled once here because
+    matching runs on the per-event trigger path.
+    """
+    if not isinstance(value, dict):
+        return {}
+    exclusions: dict[str, _ExclusionSet] = {}
+    for rule_type, entity_ids in cast("dict[object, object]", value).items():
+        if not isinstance(rule_type, str) or not rule_type:
+            continue
+        if rule_type != "*" and any(char in rule_type for char in _GLOB_CHARS):
+            LOGGER.warning(
+                "Sentinel exclusion type key %r contains glob characters; "
+                "type keys are matched exactly, so this key will never apply. "
+                'Use the full anomaly type name or the "*" key.',
+                rule_type[:64],
+            )
+        if not isinstance(entity_ids, (list, tuple, set, frozenset)):
+            continue
+        cleaned = frozenset(
+            item.strip()
+            for item in cast("list[object]", list(entity_ids))
+            if isinstance(item, str) and item.strip()
+        )
+        compiled = _compile_exclusion_entries(cleaned) if cleaned else None
+        if compiled is not None:
+            exclusions[rule_type] = compiled
+    return exclusions
+
+
 def _coerce_int(value: object | None, default: int) -> int:
     """Coerce option values to int with a deterministic fallback."""
     if isinstance(value, bool):
@@ -1184,6 +1381,37 @@ def _coerce_float(value: object | None, default: float) -> float:
     return default
 
 
+_QUIET_HOUR_MAX = 23
+
+
+def _coerce_quiet_hour(value: object | None) -> int | None:
+    """Coerce a stored quiet-hours value to a local hour, or None (disabled)."""
+    hour: int
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int):
+        hour = value
+    elif isinstance(value, float):
+        hour = int(value)
+    elif isinstance(value, str):
+        try:
+            hour = int(value)
+        except ValueError:
+            return None
+    else:
+        return None
+    if not 0 <= hour <= _QUIET_HOUR_MAX:
+        return None
+    return hour
+
+
+def _coerce_quiet_severities(value: object | None) -> list[str]:
+    """Coerce stored quiet-hours severities to known values, with a safe default."""
+    if not isinstance(value, (list, tuple, set)):
+        return list(RECOMMENDED_SENTINEL_QUIET_HOURS_SEVERITIES)
+    return [s for s in value if isinstance(s, str) and s in SENTINEL_SEVERITIES]
+
+
 def _build_suppress_kwargs(
     options: dict[str, Any],
     snapshot: FullStateSnapshot,
@@ -1191,13 +1419,11 @@ def _build_suppress_kwargs(
     """Build keyword args for ``should_suppress()`` from options + snapshot."""
     timezone: str | None = snapshot.get("derived", {}).get("timezone")
 
-    quiet_start_raw = options.get(CONF_SENTINEL_QUIET_HOURS_START)
-    quiet_end_raw = options.get(CONF_SENTINEL_QUIET_HOURS_END)
-    quiet_start: int | None = (
-        int(quiet_start_raw) if quiet_start_raw is not None else None
-    )
-    quiet_end: int | None = int(quiet_end_raw) if quiet_end_raw is not None else None
-    quiet_severities: list[str] = list(
+    # Stored config is user-editable JSON; a malformed value must degrade to
+    # "quiet hours off" rather than raise inside the Sentinel run loop.
+    quiet_start = _coerce_quiet_hour(options.get(CONF_SENTINEL_QUIET_HOURS_START))
+    quiet_end = _coerce_quiet_hour(options.get(CONF_SENTINEL_QUIET_HOURS_END))
+    quiet_severities = _coerce_quiet_severities(
         options.get(
             CONF_SENTINEL_QUIET_HOURS_SEVERITIES,
             RECOMMENDED_SENTINEL_QUIET_HOURS_SEVERITIES,
