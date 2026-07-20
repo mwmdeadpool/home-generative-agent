@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.translation import async_get_translations
 
-from ..const import DOMAIN  # noqa: TID252
+from ..const import DOMAIN
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
