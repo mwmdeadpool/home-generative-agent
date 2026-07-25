@@ -31,7 +31,11 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from ollama import ResponseError as OllamaResponseError
 from PIL import Image
 
-from ..agent.tools import VLM_ERROR_CAPTION, analyze_image
+from ..agent.tools import (
+    VLM_ERROR_CAPTION,
+    VLMPromptOverrides,
+    analyze_image,
+)
 from ..const import (
     CONF_MODEL_PROVIDER_UNCONTENDED,
     CONF_NOTIFY_SERVICE,
@@ -39,7 +43,11 @@ from ..const import (
     CONF_VIDEO_ANALYZER_MOTION_CAMERA_MAP,
     CONF_VIDEO_ANALYZER_UNIQUENESS_ENABLED,
     CONF_VIDEO_MODEL_SEMAPHORE,
+    CONF_VLM_PROMPT_EXTRA,
+    CONF_VLM_RESPONSE_LANGUAGE,
     RECOMMENDED_VIDEO_MODEL_SEMAPHORE,
+    RECOMMENDED_VLM_PROMPT_EXTRA,
+    RECOMMENDED_VLM_RESPONSE_LANGUAGE,
     SIGNAL_HGA_NEW_LATEST,
     SIGNAL_HGA_RECOGNIZED,
     VIDEO_ANALYZER_CAPTION_DEDUPE_WINDOW_SEC,
@@ -61,6 +69,7 @@ from ..const import (
     VIDEO_SUMMARY_NUM_PREDICT,
     VIDEO_VLM_NUM_PREDICT,
 )
+from .fallback import ainvoke_dropping_unsupported_params
 from .utils import (
     discover_mobile_notify_service,
     dispatch_on_loop,
@@ -140,10 +149,12 @@ _SNAPSHOT_APPEAR_ATTEMPTS: Final[int] = 10  # post-service file visibility polls
 _SNAPSHOT_FAILURE_ESCALATION: Final[int] = 3  # consecutive failures before ERROR log
 # --- Stale retained snapshot guard (issue #490) ---
 # ring-mqtt snapshot cameras expose a `timestamp` attribute (epoch seconds of
-# the last published frame). The interval snapshot can silently freeze on
-# battery cameras, leaving MQTT serving a days-old retained frame; capturing it
-# would send stale imagery to the VLM with no visible failure. The threshold is
-# 3x the slowest known ring-mqtt interval (600 s on battery power).
+# the last published frame). On battery cameras the frame can stop refreshing —
+# the interval snapshot can silently freeze, or the Auto/Motion snapshot modes
+# never request battery snapshots at all (ring-mqtt#1103) — leaving MQTT
+# serving a days-old retained frame; capturing it would send stale imagery to
+# the VLM with no visible failure. The threshold is 3x the slowest known
+# ring-mqtt Interval-mode refresh (600 s on battery power).
 _SNAPSHOT_STALE_MAX_AGE_SEC: Final[int] = 1800
 _SNAPSHOT_TS_EPOCH_MIN: Final[int] = 1_000_000_000  # ignore non-epoch timestamps
 # Timestamps further in the future than this are not epoch seconds (e.g. a
@@ -986,7 +997,7 @@ class VideoAnalyzer:
         if is_edge_deployment(sum_deployment) and "reasoning" in sum_cfg:
             sum_cfg["reasoning"] = False
         model = base_sum.with_config(config={"configurable": sum_cfg})
-        summary = await model.ainvoke(messages)
+        summary = await ainvoke_dropping_unsupported_params(model, messages)
         LOGGER.debug("Raw video analyzer summary: %s", summary)
 
         text = extract_final(getattr(summary, "content", "") or "", max_chars=150)
@@ -1436,6 +1447,14 @@ class VideoAnalyzer:
                 if is_edge_deployment(vlm_deployment) and "reasoning" in vlm_cfg:
                     vlm_cfg["reasoning"] = False
                 vision_model = base_vlm.with_config(config={"configurable": vlm_cfg})
+                vlm_overrides = VLMPromptOverrides(
+                    response_language=self.entry.runtime_data.options.get(
+                        CONF_VLM_RESPONSE_LANGUAGE, RECOMMENDED_VLM_RESPONSE_LANGUAGE
+                    ),
+                    prompt_extra=self.entry.runtime_data.options.get(
+                        CONF_VLM_PROMPT_EXTRA, RECOMMENDED_VLM_PROMPT_EXTRA
+                    ),
+                )
                 if use_gate:
                     sem = self._video_model_sem
                     if sem is None:
@@ -1470,7 +1489,11 @@ class VideoAnalyzer:
                         try:
                             async with asyncio.timeout(_VISION_TIMEOUT_SEC):
                                 frame_description = await analyze_image(
-                                    vision_model, data, None, prev_text=prev_text
+                                    vision_model,
+                                    data,
+                                    None,
+                                    prev_text=prev_text,
+                                    overrides=vlm_overrides,
                                 )
                         finally:
                             sem.release()
@@ -1482,7 +1505,11 @@ class VideoAnalyzer:
                 else:
                     async with asyncio.timeout(_VISION_TIMEOUT_SEC):
                         frame_description = await analyze_image(
-                            vision_model, data, None, prev_text=prev_text
+                            vision_model,
+                            data,
+                            None,
+                            prev_text=prev_text,
+                            overrides=vlm_overrides,
                         )
             except TimeoutError as exc:
                 self._m_inc(camera_id, "timeouts")
@@ -1828,10 +1855,13 @@ class VideoAnalyzer:
         Detect a frozen ring-mqtt interval snapshot before capturing it.
 
         ring-mqtt publishes the last frame's epoch seconds as a `timestamp`
-        attribute on the snapshot camera. The interval snapshot can silently
-        stop on battery cameras (issue #490), after which MQTT serves the
-        retained frame indefinitely; capturing it would analyze days-old
-        imagery as if it were current.
+        attribute on the snapshot camera. On battery cameras the frame can
+        stop refreshing (issue #490) — either because the interval snapshot
+        silently stalls, or because ring-mqtt's Auto/Motion snapshot modes
+        never request snapshots from battery devices at all (upstream
+        tsightler/ring-mqtt#1103) — after which MQTT serves the retained
+        frame indefinitely; capturing it would analyze days-old imagery as
+        if it were current.
 
         The guard only applies to cameras with a ring-mqtt event_select
         sibling — other integrations may publish an epoch `timestamp` with
@@ -1871,9 +1901,14 @@ class VideoAnalyzer:
             self._record_snapshot_failure(
                 camera_id,
                 f"retained snapshot frame is {age_sec / 3600.0:.1f} h old "
-                f"(limit {_SNAPSHOT_STALE_MAX_AGE_SEC} s); the ring-mqtt "
-                f"interval snapshot appears frozen — restarting the ring-mqtt "
-                f"add-on usually clears it (issue #490)",
+                f"(limit {_SNAPSHOT_STALE_MAX_AGE_SEC} s); ring-mqtt has not "
+                f"published a fresh frame (issue #490). On battery cameras "
+                f"the Auto and Motion snapshot modes never refresh the frame "
+                f"(ring-mqtt#1103) — use snapshot mode 'Interval' or a "
+                f"take_snapshot-on-event automation (see docs/camera-entities"
+                f".md in the home-generative-agent repo); if Interval mode "
+                f"was working and stopped, restarting the ring-mqtt add-on "
+                f"usually clears it",
             )
         return True
 

@@ -124,7 +124,7 @@ The agent has access to HA LLM API tools and the following custom LangChain tool
 
 | Tool | Purpose |
 |---|---|
-| `get_and_analyze_camera_image` | Run scene analysis on the image from a camera |
+| `get_and_analyze_camera_image` | Run scene analysis on the image from a camera. Free-form camera names are resolved to real `camera.*` entities — spaces, capitalization, and diacritics are normalized (e.g. "kamera obývák 2" → `camera.kamera_obyvak_2`), and an unknown name returns the list of available cameras so the agent can self-correct |
 | `upsert_memory` | Add or update a memory |
 | `add_automation` | Create and register a HA automation (available when Schema-first YAML mode is disabled) |
 | `write_yaml_file` | Write YAML to `/config/www/` and return a `/local/...` URL |
@@ -134,7 +134,7 @@ The agent has access to HA LLM API tools and the following custom LangChain tool
 | `resolve_entity_ids` | Resolve entity IDs from friendly names, areas, labels, and domains |
 | ~~`get_current_device_state`~~ | ~~Get the current state of one or more HA devices~~ (deprecated; replaced by native HA GetLiveContext tool) |
 
-On each turn, the most relevant tools are loaded into the agent's prompt via vector similarity search (see [Tool Retrieval](configuration.md#tool-retrieval-rag)). `GetLiveContext` is always injected unconditionally — even when RAG does not rank it highly — so the model can evaluate any conditional clause or verify entity state before acting. A simple error recovery mechanism asks the agent to retry a tool call with corrected parameters when it makes a mistake.
+On each turn, the most relevant tools are loaded into the agent's prompt via vector similarity search (see [Tool Retrieval](configuration.md#tool-retrieval-rag)). `GetLiveContext` is always injected unconditionally — even when RAG does not rank it highly — so the model can evaluate any conditional clause or verify entity state before acting. Similarly, `add_automation` is force-injected whenever the message signals automation-creation intent (explicit vocabulary like "automate"/"remind me"/recurring schedules, or an action verb combined with a when/if trigger clause; read-only open-state questions like "check if the garage door is open" suppress the weaker conditional signal, though explicit markers still win) — natural phrasings such as "always turn on X when Y" otherwise rank entity-control tools above it and the agent could not register the automation. The tool also stays bound across short follow-ups ("yes" to an offered modification) while the last few user turns — or the conversation summary, which survives message trimming — contain automation intent or a prior `add_automation` call, since a bare continuation carries no retrieval signal of its own. This injection is skipped in schema-first YAML mode, which handles automations without the tool. A simple error recovery mechanism asks the agent to retry a tool call with corrected parameters when it makes a mistake.
 
 ---
 

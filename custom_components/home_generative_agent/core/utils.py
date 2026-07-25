@@ -31,6 +31,10 @@ from ..const import (
     OLLAMA_GPT_EFFORT,
     OLLAMA_OSS_TAG,
 )
+from .fallback import (
+    ainvoke_dropping_unsupported_params,
+    invoke_dropping_unsupported_params,
+)
 
 if TYPE_CHECKING:
     from collections.abc import (
@@ -482,7 +486,7 @@ async def run_sentinel_model_call(  # noqa: PLR0913
     invoke = getattr(model, "invoke", None)
     if callable(invoke):
         return await run_sentinel_llm_call_in_executor(
-            lambda: invoke(messages),
+            lambda: invoke_dropping_unsupported_params(model, messages),
             deployment=deployment,
             category=category,
             admission_timeout_s=admission_timeout_s,
@@ -490,7 +494,7 @@ async def run_sentinel_model_call(  # noqa: PLR0913
             health_stats=health_stats,
         )
     return await run_sentinel_llm_call(
-        lambda: model.ainvoke(messages),
+        lambda: ainvoke_dropping_unsupported_params(model, messages),
         deployment=deployment,
         category=category,
         admission_timeout_s=admission_timeout_s,

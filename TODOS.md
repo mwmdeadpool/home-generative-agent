@@ -2,6 +2,104 @@
 
 ## Agent
 
+### PIN-gate add_automation for critical service calls
+
+**What:** `add_automation` writes arbitrary automation YAML and reloads HA without ever passing the critical-action PIN gate: `_is_critical_action` inspects `domain`/`service` tool args, and `add_automation`'s payload is opaque `automation_yaml`. "Unlock the front door whenever I get home" installs a `lock.unlock` automation with no PIN, while the direct command "unlock the front door" is gated.
+
+**Why:** Pre-existing hole, but v3.20.2's automation-intent force-binding makes the tool deterministically available on everyday phrasings, so the bypass path is now reliable. Converged on independently by both adversarial review agents (Claude adversarial + red team) during the v3.20.2 ship as the top finding. Deferred out of that branch by user decision (2026-07-24) so the PIN-flow change gets its own focused review and live validation.
+
+**How to apply:** After `_async_validate_config_item` in `add_automation` (tools.py) — or in a langchain-branch guard in `_call_tools` (graph.py) — walk the parsed automation config's `action` list (including `choose`/`repeat`/`wait_for_trigger` nesting), extract each `service`/`action` call, and run it through `_is_critical_action` with the configured critical actions. If any matches and PIN is enabled, return the existing `requires_pin` ToolMessage flow (register in `pending_actions`) instead of writing the automation. Mind the prior pitfall: `confirm_sensitive_action` ToolMessages with `status=error` must not count as resolved.
+
+**Effort:** M
+**Priority:** P1
+**Depends on:** v3.20.2 (fix/tool-rag-automation-intent)
+
+---
+
+### Purge stale add_automation row from tool index when schema-first YAML is enabled
+
+**What:** The tool indexer only `aput()`s changed tools and never deletes; a user who ran normal mode once has `hga_local::add_automation` in the vector store forever. After toggling schema-first YAML on, RAG ranking can still retrieve it even though dispatch excludes it, producing a confusing routing failure. Step 3d's guard is correct but the invariant it mirrors is unenforced for pre-existing rows.
+
+**How to apply:** On entry setup with `CONF_SCHEMA_FIRST_YAML` true, `adelete` the `hga_local::add_automation` store key and drop its content hash; or filter `add_automation` out of RAG results when schema-first is active.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** v3.20.2
+
+---
+
+### Tool-name collision hardening for force-injection guard
+
+**What:** The step-3d injection guard and `_format_and_dedupe_tools` key on bare tool name. A remote (e.g. MCP) API exposing a tool named `add_automation` would suppress injection of the local tool and route automation YAML to the foreign tool (first-seen-wins dedupe predates v3.20.2). Consider `(api_id, name)` matching for the guard and explicit precedence in dedupe.
+
+**Effort:** S
+**Priority:** P4
+**Depends on:** v3.20.2
+
+---
+
+### Expose-aware camera resolution and enumeration
+
+**What:** `_resolve_camera_entity_id` and `_available_camera_names` (agent/tools.py) scan every `camera.*` state with no Assist expose filtering. The not-found hint lists every camera name — including entities deliberately hidden from the conversation LLM API — and resolution captures any camera by name.
+
+**Why:** Cross-model adversarial finding on the #502 camera resolver (Codex rated P1). Deferred at ship time (2026-07-23, user decision): strict `async_should_expose` filtering would break camera analysis on default installs, because HA does not expose cameras to Assist by default. Capture-by-name reach is pre-existing behavior; the new surface is the name enumeration. Needs a deliberate design — likely an opt-in option (`respect Assist expose settings`) or filtering the hint list only, with migration notes.
+
+**How to apply:** Evaluate `homeassistant.components.homeassistant.exposed_entities.async_should_expose(hass, "conversation", entity_id)` for both the resolver candidate set and the hint list, behind a config option; decide the default with reporter input.
+
+**Effort:** M
+**Priority:** P2
+
+---
+
+### Sentinel sync sampling-retry can outlive the triage timeout
+
+**What:** `run_sentinel_model_call`'s executor leg now runs `invoke_dropping_unsupported_params` in the worker thread. The thread already outlives `asyncio.timeout` cancellation (threads can't be cancelled); the drop-retry can add up to two more provider HTTP calls after the sentinel caller has timed out and moved on.
+
+**Why:** Codex adversarial note on #502. Bounded (max 2 extra calls, only when a provider rejects sampling params — a misconfiguration state that also logs warnings), and the underlying thread-outlives-timeout shape is pre-existing. Worth a deadline check between retry attempts if field reports show thread/request pile-ups.
+
+**How to apply:** Pass a deadline (monotonic timestamp) into the sync helper and skip the retry when it has passed.
+
+**Effort:** S
+**Priority:** P3
+
+---
+
+### Scale stale-snapshot budget from the camera's own refresh interval
+
+**What:** The stale-snapshot guard (issue #490) uses a fixed 30-minute budget
+(`_SNAPSHOT_STALE_MAX_AGE_SEC = 1800`), sized as 3× the battery-camera
+interval. ring-mqtt publishes each camera's actual interval as
+`number.<camera>_snapshot_interval` (field-observed: 600 s battery, 30 s
+wired), so the budget is ~60× too lenient for wired cameras — a frozen wired
+cam goes undetected for half an hour. Better still for `event_select`-owned
+windows: compare the snapshot `timestamp` against the event that opened the
+window, which is exact rather than a heuristic.
+
+**Why:** Raised by @andymcmanus in #466 field testing (2026-07-18 comment,
+n=12 events: frame staleness at event open ranged 3–54 min, mean 21 min).
+The guard already only applies to ring-mqtt `event_select` cameras, so
+reading ring-mqtt's own interval entity adds no new integration coupling.
+
+**How to apply:** In `_retained_frame_is_stale`, resolve
+`number.<base>_snapshot_interval` via the same sibling/device-registry
+lookup as `_has_event_select_sibling`; budget = 3× that value, falling back
+to 1800 s when absent. For loops the `event_select` path owns, prefer
+comparing against the window-opening event's timestamp. The two halves are
+NOT interchangeable: interval scaling only tightens the wired case — in
+Auto/Motion mode on battery the real cadence is *never* (ring-mqtt#1103),
+which no scaled budget can detect; only the event-timestamp comparison
+covers it. The event-timestamp comparison also governs the common case
+today: with mean staleness of 21 min at event open (n=12), the previous
+event's frame usually passes the 30-min budget and is analyzed as if
+current (misattributed imagery), and with the take_snapshot automation
+installed, quiet cameras (>30 min gaps) log one expected snapshot-failure
+WARNING per event that a window-scoped check could suppress.
+
+**Effort:** M
+**Priority:** P2
+
+---
+
 ### asyncio.gather concurrency policy for state-mutating tools
 
 **What:** Add per-tool annotation or global policy for whether a tool is safe to run concurrently. State-mutating HA tools (`turn_on`, `turn_off`, lock, unlock, `alarm_control`) called in the same model batch could interleave under `asyncio.gather`.

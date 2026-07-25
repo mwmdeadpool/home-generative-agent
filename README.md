@@ -1,6 +1,10 @@
-# home-generative-agent
+# Home Generative Agent
+
+**Talk to your home.**
 
 [![GitHub Release][releases-shield]][releases]
+[![HACS][hacs-shield]][hacs]
+[![GitHub Stars][stars-shield]][stars]
 [![GitHub Activity][commits-shield]][commits]
 [![License][license-shield]](LICENSE)
 
@@ -8,13 +12,21 @@
 
 A [Home Assistant](https://www.home-assistant.io/) integration that brings a generative AI agent into your smart home. Talk to your home, create automations in plain English, analyze camera footage, and get proactive alerts — all powered by your choice of cloud or local LLMs. HGA is a single integration that gives you conversational control over every HA entity, camera understanding with face recognition, long-term semantic memory, and the Sentinel anomaly engine.
 
+![Create an automation](./assets/create_automation.gif)
+
+*Creating an automation in plain English — the agent writes the YAML, registers it, and it shows up in the HA automation editor.*
+
+## Why HGA?
+
+Most AI conversation integrations are prompt passthroughs: they forward your words to an LLM and read back the answer. HGA is a full agent built on LangGraph — it uses tools to control entities, query history, watch cameras, and write real HA automations; it keeps long-term semantic memory in pgvector so it remembers your preferences across conversations; and its Sentinel anomaly engine keeps safety decisions deterministic, with the LLM advising but never actuating. Everything runs against the model provider you choose — including fully local, so no data has to leave your home.
+
 ## Features
 
 | Feature | What it does |
 | --- | --- |
 | **Conversational control** | Talk to your home in natural language. Turn things on, check status, ask questions. |
 | **Automation creation** | Describe what you want in chat and the agent writes and registers the HA automation. |
-| **Camera & image analysis** | Ask the agent what it sees in any camera. Proactive motion-triggered analysis with anomaly detection. Works with Axis (VMD), Ring via ring-mqtt (including battery cameras via `event_select`), Reolink, UniFi Protect, and any camera that exposes a `binary_sensor.*` motion entity or a `recording` state in HA. |
+| **Camera & image analysis** | Ask the agent what it sees in any camera. Proactive motion-triggered analysis with anomaly detection. Works with Axis, Ring via ring-mqtt, Reolink, UniFi Protect, and any camera that exposes a motion entity or `recording` state in HA — see [Camera Entities](docs/camera-entities.md) for setup notes (battery Ring cameras need a [snapshot-mode tweak](docs/camera-entities.md#ring-cameras-via-ring-mqtt)). |
 | **Sentinel anomaly detection** | Deterministic rules watch for security and safety issues (unlocked locks, open entries, unknown people) and alert your phone. Optional LLM-powered triage and rule discovery. Approved discovery rules can be inspected, deactivated, reactivated, and surgically repaired via HA services. |
 | **Face recognition** | Identify people in camera frames and personalize alerts. |
 | **Long-term memory** | Semantic search over past conversations. The agent remembers your preferences and context. |
@@ -23,13 +35,9 @@ A [Home Assistant](https://www.home-assistant.io/) integration that brings a gen
 
 ## Screenshots
 
-### Conversational control and automation creation
-
-![Create an automation](./assets/automation1.png)
-
 ### Camera analysis
 
-![Check a single camera](./assets/one_camera.png)
+![Camera analysis demo](./assets/camera_analysis.gif)
 
 ### Long-term memory with semantic search
 
@@ -95,7 +103,7 @@ You can now open the HA Assist panel and start talking to your home.
 | Guide | Contents |
 | --- | --- |
 | [Installation](docs/installation.md) | HACS install, manual install, optional apps (Ollama, face recognition) |
-| [Configuration](docs/configuration.md) | Model providers, features, Tool Retrieval (RAG), LLM API, STT, YAML mode, Critical Action PIN, UI languages (en/cs/ru/tr) |
+| [Configuration](docs/configuration.md) | Model providers, features, Tool Retrieval (RAG), LLM API, STT, YAML mode, Critical Action PIN, camera description language & extra VLM instructions, UI languages (en/cs/ru/tr) |
 | [Sentinel](docs/sentinel.md) | Anomaly detection pipeline, built-in rules, triage, baseline, blueprints, notification quiet hours, services API, health sensor |
 | [Camera Entities](docs/camera-entities.md) | Image and sensor entities, dashboards, automations, proactive video analysis, face recognition |
 | [Architecture](docs/architecture.md) | LangGraph agent, model tiers, context management, streaming, latency, tools |
@@ -152,6 +160,10 @@ If you want to contribute to this, please read the [Contribution guidelines](CON
 ***
 
 [commits-shield]: https://img.shields.io/github/commit-activity/y/goruck/home-generative-agent.svg?style=for-the-badge
+[hacs-shield]: https://img.shields.io/badge/HACS-Default-41BDF5.svg?style=for-the-badge
+[hacs]: https://github.com/hacs/integration
+[stars-shield]: https://img.shields.io/github/stars/goruck/home-generative-agent.svg?style=for-the-badge
+[stars]: https://github.com/goruck/home-generative-agent/stargazers
 [commits]: https://github.com/goruck/home-generative-agent/commits/main
 [license-shield]: https://img.shields.io/github/license/goruck/home-generative-agent.svg?style=for-the-badge
 [maintenance-shield]: https://img.shields.io/badge/maintainer-Lindo%20St%20Angel%20%40goruck-blue.svg?style=for-the-badge
