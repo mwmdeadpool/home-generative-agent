@@ -60,6 +60,8 @@ from .const import (
     CONF_VIDEO_ANALYZER_MODE,
     CONF_VIDEO_ANALYZER_MOTION_CAMERA_MAP,
     CONF_VIDEO_ANALYZER_UNIQUENESS_ENABLED,
+    CONF_VLM_PROMPT_EXTRA,
+    CONF_VLM_RESPONSE_LANGUAGE,
     CONF_WIKIPEDIA_ENABLED,
     CONFIG_ENTRY_VERSION,
     CRITICAL_PIN_MAX_LEN,
@@ -78,6 +80,8 @@ from .const import (
     RECOMMENDED_TOOL_RETRIEVAL_LIMIT,
     RECOMMENDED_VIDEO_ANALYZER_MODE,
     RECOMMENDED_VIDEO_ANALYZER_UNIQUENESS_ENABLED,
+    RECOMMENDED_VLM_PROMPT_EXTRA,
+    RECOMMENDED_VLM_RESPONSE_LANGUAGE,
     RECOMMENDED_WIKIPEDIA_ENABLED,
     SUBENTRY_TYPE_FEATURE,
     SUBENTRY_TYPE_MODEL_PROVIDER,
@@ -205,6 +209,24 @@ async def _schema_for_options(
             description={"suggested_value": opts.get(CONF_PROMPT)},
             default=llm.DEFAULT_INSTRUCTIONS_PROMPT,
         ): TemplateSelector(),
+        vol.Optional(
+            CONF_VLM_RESPONSE_LANGUAGE,
+            description={
+                "suggested_value": opts.get(
+                    CONF_VLM_RESPONSE_LANGUAGE, RECOMMENDED_VLM_RESPONSE_LANGUAGE
+                )
+            },
+            default=RECOMMENDED_VLM_RESPONSE_LANGUAGE,
+        ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT)),
+        vol.Optional(
+            CONF_VLM_PROMPT_EXTRA,
+            description={
+                "suggested_value": opts.get(
+                    CONF_VLM_PROMPT_EXTRA, RECOMMENDED_VLM_PROMPT_EXTRA
+                )
+            },
+            default=RECOMMENDED_VLM_PROMPT_EXTRA,
+        ): TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT, multiline=True)),
         vol.Optional(
             CONF_LLM_HASS_API,
             description={"suggested_value": opts.get(CONF_LLM_HASS_API, [])},
@@ -495,6 +517,8 @@ class HomeGenerativeAgentOptionsFlow(OptionsFlowWithReload):
         for k in (
             CONF_FACE_API_URL,
             CONF_NOTIFY_SERVICE,
+            CONF_VLM_RESPONSE_LANGUAGE,
+            CONF_VLM_PROMPT_EXTRA,
         ):
             if not _get_str(final_options, k):
                 final_options.pop(k, None)

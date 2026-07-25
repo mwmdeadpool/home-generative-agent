@@ -74,6 +74,8 @@ This document covers the named constants that affect integration behaviour, orga
 | `RECOMMENDED_OPENAI_COMPATIBLE_VLM` | `gpt-4o` | OpenAI-compatible VLM model |
 | `RECOMMENDED_VLM_TEMPERATURE` | `0.2` | Sampling temperature for vision responses |
 | `RECOMMENDED_OLLAMA_VLM_KEEPALIVE` | `300` (s) | Seconds to keep Ollama VLM loaded |
+| `RECOMMENDED_VLM_RESPONSE_LANGUAGE` | `""` (empty) | Language for VLM camera descriptions; empty = English. The `Scene unchanged.` sentinel always stays in English |
+| `RECOMMENDED_VLM_PROMPT_EXTRA` | `""` (empty) | Extra instructions appended to the VLM system prompt; never replaces built-in rules |
 
 **Code-only:**
 
@@ -209,6 +211,11 @@ This document covers the named constants that affect integration behaviour, orga
 | Constant | File | Value | Purpose |
 |---|---|---|---|
 | `ACTUATION_KEYWORDS_REGEX` | `const.py` | (regex) | Keywords that force-attach entity control tools regardless of similarity score. Prevents the agent from missing control tools when the user issues a command verb. |
+| `AUTOMATION_INTENT_MARKERS_REGEX` | `const.py` | (regex) | Standalone automation-intent vocabulary ("automate", "remind me", recurring schedules like "every 30 minutes") that force-binds the `add_automation` tool during retrieval. English-only; non-matching languages fall back to similarity ranking. |
+| `AUTOMATION_TRIGGER_CLAUSE_REGEX` | `const.py` | (regex) | Trigger-clause words (when/whenever/always/if). Combined with an action verb it signals conditional-actuation automation intent ("turn on the porch light when motion is detected"). |
+| `AUTOMATION_ACTION_KEYWORDS_REGEX` | `const.py` | (regex) | Action verbs for the conditional-actuation signal. Mirrors `ACTUATION_KEYWORDS_REGEX` plus notification verbs (notify, tell, warn, text); the two must stay in sync when verbs are added. |
+| `_MAX_INTENT_SCAN_CHARS` | `agent/graph.py` | `20000` | Cap on message characters scanned by the intent regexes so a pathologically long chat message cannot stall the event loop. |
+| `_AUTOMATION_CONTEXT_HUMAN_TURNS` | `agent/graph.py` | `3` | Trailing human turns checked for automation-creation context, so short follow-ups ("yes") keep `add_automation` bound. |
 | `_LC_TOOL_TIMEOUT_S` | `agent/graph.py` | `30.0` (s) | Per-tool execution timeout. Tools that do not return within this window are cancelled and the agent receives an error. Affects VLM and any slow external tool. |
 
 ---
@@ -248,7 +255,7 @@ This document covers the named constants that affect integration behaviour, orga
 | `_VIDEO_MODEL_SEMAPHORE_WAIT_SEC` | `core/video_analyzer.py` | `30` (s) | Max wait for the video semaphore before dropping the frame |
 | `_VIDEO_QUEUE_BACKLOG_THRESHOLD` | `core/video_analyzer.py` | `2` | Drop stale queued frames when the backlog exceeds this count |
 | `_METRICS_REPORT_INTERVAL_SEC` | `core/video_analyzer.py` | `3600` (s) | How often the per-camera metrics line is logged (counters such as analyzed / dropped / `sentinel_dropped`, plus latency percentiles) |
-| `_SNAPSHOT_STALE_MAX_AGE_SEC` | `core/video_analyzer.py` | `1800` (s) | Skip capture and count a snapshot failure (once per staleness episode) when a ring-mqtt camera's `timestamp` attribute shows the retained frame is older than this (frozen interval snapshot, issue #490); 3x the slowest known ring-mqtt interval (600 s on battery). Only applies to cameras with an `event_select` sibling |
+| `_SNAPSHOT_STALE_MAX_AGE_SEC` | `core/video_analyzer.py` | `1800` (s) | Skip capture and count a snapshot failure (once per staleness episode) when a ring-mqtt camera's `timestamp` attribute shows the retained frame is older than this (stalled interval snapshot, or a snapshot mode that never refreshes battery cameras — ring-mqtt#1103; issue #490); 3x the slowest known ring-mqtt Interval-mode refresh (600 s on battery). Only applies to cameras with an `event_select` sibling |
 | `_SNAPSHOT_TS_EPOCH_MIN` | `core/video_analyzer.py` | `1_000_000_000` | `timestamp` attribute values below this are not epoch seconds and never trigger the stale guard |
 | `_SNAPSHOT_TS_FUTURE_SLACK_SEC` | `core/video_analyzer.py` | `3600` (s) | `timestamp` values further in the future than this (e.g. millisecond epochs) are not plausible epoch seconds and never trigger the stale guard |
 | `_STALE_REREPORT_INTERVAL_SEC` | `core/video_analyzer.py` | `3600` (s) | Re-record an ongoing staleness episode this often so the failure streak can escalate and hourly metrics reflect a persistent freeze |
@@ -452,6 +459,18 @@ These constants live outside `const.py` in individual modules. They affect runti
 | Constant | Value | Purpose |
 |---|---|---|
 | `EMBEDDING_INDEX_TEXT_MAX_CHARS` | `1200` | Maximum characters embedded per tool in the tool index. Controls how much of each tool's description is stored in the vector DB. |
+
+### `agent/tools.py`
+
+| Constant | Value | Purpose |
+|---|---|---|
+| `_AVAILABLE_CAMERA_NAMES_MAX` | `25` | Maximum camera names listed in the "available cameras" hint returned when a chat-requested camera name cannot be resolved. Larger installs get a truncated list with an `and N more` marker. |
+
+### `conversation.py`
+
+| Constant | Value | Purpose |
+|---|---|---|
+| `_STREAM_ERROR_REASON_MAX_CHARS` | `280` | Maximum characters of the failure reason appended to the fallback chat message when a streaming turn fails (only `HomeAssistantError` messages are shown verbatim; other exceptions surface their class name only). |
 
 ### `core/video_analyzer.py`
 

@@ -99,6 +99,8 @@ Each feature is enabled separately under **+ Setup** and has its own model/provi
 
 Global options such as system prompt, face recognition URL, context management parameters, and the critical-action PIN live in the integration's **Options** flow (gear icon on the integration page).
 
+> **Models that pin temperature** — Some OpenAI models (o-series and other reasoning-style models) only accept their default `temperature`/`top_p` and reject any other value with a 400 error. When that happens, HGA logs a warning and automatically retries the call without the rejected parameter, so conversation, camera analysis, summarization, and Sentinel keep working. In a multi-provider fallback chain the retry is applied per provider; a provider that still rejects its sampling settings fails over to the next provider in the chain and counts toward the circuit breaker. To avoid the extra retry on every call, leave the feature's temperature at the model's supported default (`top_p` has no UI setting — its default is a code-only constant, see the [Constants Reference](constants.md)).
+
 ---
 
 ## Tool Retrieval (RAG)
@@ -106,6 +108,8 @@ Global options such as system prompt, face recognition URL, context management p
 > **Thanks to [1Jamie](https://github.com/1Jamie) for this feature!**
 
 On startup the integration indexes all available tools as vector embeddings in PostgreSQL. Each turn, only the most relevant tools for the user's message are loaded into the agent's prompt — keeping context short and tool selection accurate.
+
+A few tools bypass similarity ranking: `GetLiveContext` is always available, and `add_automation` is guaranteed to be available whenever your message signals automation-creation intent — explicit wording ("automate...", "remind me every 30 minutes") or an action verb plus a when/if trigger clause ("turn on the porch light when motion is detected"). Read-only state questions ("check if the garage door is open") do not trigger it. These are appended on top of the retrieval limit, so they never crowd out ranked tools. Intent detection is English-only for now; see [Architecture](architecture.md#tools) for details.
 
 Two options in the **Options** flow control this:
 
@@ -200,6 +204,8 @@ Alarm control panels use their own alarm code, which is separate from the critic
 The **Options** flow (gear icon on the integration page) exposes:
 
 - System prompt override
+- **Camera description language** (`vlm_response_language`) — optional, e.g. `Czech`. When set, camera image descriptions (chat camera tool, `save_and_analyze_snapshot`, and the proactive video analyzer) are requested in that language. Leave empty for English. The internal `Scene unchanged.` repeated-scene reply is deliberately kept in English — it is matched by code, not shown to users (see [Camera Entities](camera-entities.md)).
+- **Additional camera analysis instructions** (`vlm_prompt_extra`) — optional multiline text appended to the VLM prompt, e.g. `Ignore cars in the driveway`. Appended after the built-in rules, never replacing them; where your instruction conflicts with or narrows the built-in description request, your instruction takes precedence (the `Scene unchanged.` contract always still applies). It is restated on the per-image request itself because chat-tuned VLMs can ignore system-prompt-only instructions; when the chat agent analyzes a camera for specific objects you asked about in conversation, that live request is left untouched.
 - Face recognition service URL
 - Context management parameters (`max_messages_in_context`, `max_tokens_in_context`, `manage_context_with_tokens`)
 - Critical action PIN toggle and value

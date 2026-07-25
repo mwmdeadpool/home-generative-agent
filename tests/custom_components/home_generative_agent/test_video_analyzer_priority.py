@@ -52,6 +52,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
+import openai
 import pytest
 from homeassistant.exceptions import HomeAssistantError
 from ollama import ResponseError as OllamaResponseError
@@ -2647,6 +2649,28 @@ def test_stale_recorded_once_per_episode(hass: MagicMock, va: VideoAnalyzer) -> 
     assert va._snapshot_fail_streak["camera.front_door"] == 2  # type: ignore[attr-defined]
 
 
+def test_stale_reason_names_snapshot_mode_cause(
+    hass: MagicMock, va: VideoAnalyzer
+) -> None:
+    """
+    The stale-frame failure reason must point at the snapshot-mode cause.
+
+    Field data (#466, upstream tsightler/ring-mqtt#1103) showed ring-mqtt's
+    Auto/Motion modes never snapshot battery cameras — nothing "freezes", so
+    the reason must name the mode remedy instead of implying a crash that an
+    add-on restart would fix.
+    """
+    now = datetime.now(dt.UTC)
+    hass.states.get.return_value = _state_with_ts(now.timestamp() - 5 * 86400)
+    recorder = MagicMock()
+    va._record_snapshot_failure = recorder  # type: ignore[method-assign]
+    assert va._retained_frame_is_stale("camera.front_door", now) is True  # type: ignore[attr-defined]
+    reason = recorder.call_args.args[1]
+    assert "ring-mqtt#1103" in reason
+    assert "Interval" in reason
+    assert "appears frozen" not in reason
+
+
 def test_stale_threshold_boundary(hass: MagicMock, va: VideoAnalyzer) -> None:
     """Exactly-threshold and future (clock-skew) ages are not stale."""
     now = datetime.now(dt.UTC)
@@ -2830,3 +2854,61 @@ async def test_capture_snapshot_skips_when_stale(
     result = await va._capture_snapshot("camera.front_door", now)  # type: ignore[attr-defined]
     assert result is None
     hass.services.async_call.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Unsupported sampling parameter retry through VLM/summary paths (issue #502)
+# ---------------------------------------------------------------------------
+
+
+def _unsupported_temperature_error() -> Exception:
+    """Build the OpenAI 400 raised when a model rejects the temperature param."""
+    request = httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
+    response = httpx.Response(400, request=request)
+    body = {
+        "message": "Unsupported value: 'temperature' does not support 0.2.",
+        "type": "invalid_request_error",
+        "param": "temperature",
+        "code": "unsupported_value",
+    }
+    return openai.BadRequestError("Error code: 400", response=response, body=body)
+
+
+@pytest.mark.asyncio
+async def test_analyze_image_drops_unsupported_temperature() -> None:
+    """analyze_image retries once without temperature on an OpenAI 400."""
+    model = MagicMock()
+    model.ainvoke = AsyncMock(
+        side_effect=[_unsupported_temperature_error(), MagicMock(content="a caption")]
+    )
+
+    result = await analyze_image(model, _FakeImageFile.BYTES, None)
+
+    assert result == "a caption"
+    assert model.ainvoke.await_count == 2
+    retry_config = model.ainvoke.await_args_list[1].args[1]
+    assert retry_config["configurable"]["temperature"] is None
+
+
+@pytest.mark.asyncio
+async def test_summary_drops_unsupported_temperature(va: VideoAnalyzer) -> None:
+    """_generate_summary retries once without temperature on an OpenAI 400."""
+    _model_deployment_get(va).return_value = "cloud"
+    configured_sum = va.entry.runtime_data.summarization_model.with_config.return_value
+    configured_sum.ainvoke = AsyncMock(
+        side_effect=[
+            _unsupported_temperature_error(),
+            MagicMock(content="A person walks by."),
+        ]
+    )
+
+    frame_descs = [
+        {"A person is at the gate. t+0s.": []},
+        {"The person walks away. t+3s.": []},
+    ]
+    result = await va._generate_summary(frame_descs)  # type: ignore[attr-defined]
+
+    assert "A person walks by." in result
+    assert configured_sum.ainvoke.await_count == 2
+    retry_config = configured_sum.ainvoke.await_args_list[1].args[1]
+    assert retry_config["configurable"]["temperature"] is None
