@@ -194,22 +194,27 @@ class HgaProposalsCard extends HTMLElement {
     if (!Array.isArray(evidencePaths)) {
       return [];
     }
+    const stripQuotes = (s) => s.replace(/^['"`\s]+|['"`\s]+$/g, "");
     const entityIds = [];
     for (const path of evidencePaths) {
       if (typeof path !== "string") {
         continue;
       }
-      const marker = "entities[entity_id=";
-      const start = path.indexOf(marker);
-      if (start === -1) {
-        continue;
+      const idMarker = "entities[entity_id=";
+      const containsMarker = "entities[entity_ids contains ";
+      if (path.includes(idMarker)) {
+        const rest = path.slice(path.indexOf(idMarker) + idMarker.length);
+        const end = rest.indexOf("]");
+        if (end === -1) continue;
+        const entityId = stripQuotes(rest.slice(0, end));
+        if (entityId) entityIds.push(entityId);
+      } else if (path.includes(containsMarker)) {
+        const rest = path.slice(path.indexOf(containsMarker) + containsMarker.length);
+        const end = rest.indexOf("]");
+        if (end === -1) continue;
+        const entityId = stripQuotes(rest.slice(0, end));
+        if (entityId) entityIds.push(entityId);
       }
-      const rest = path.slice(start + marker.length);
-      const end = rest.indexOf("]");
-      if (end === -1) {
-        continue;
-      }
-      entityIds.push(rest.slice(0, end));
     }
     return entityIds;
   }
@@ -225,12 +230,31 @@ class HgaProposalsCard extends HTMLElement {
       .toLowerCase();
     const evidencePaths = candidate?.evidence_paths || [];
     const entityIds = this._extractEntityIds(evidencePaths);
-    const entryIds = entityIds.filter(
+    const NON_ENTRY_TOKENS = [
+      "motion","vmd","battery","occupancy","presence","smoke","gas",
+      "leak","moisture","flood","tamper","vibration","carbon","safety",
+    ];
+    let entryIds = entityIds.filter(
       (entityId) =>
-        entityId.includes("window") ||
-        entityId.includes("door") ||
-        entityId.includes("entry")
+        (entityId.includes("window") ||
+          entityId.includes("door") ||
+          entityId.includes("entry")) &&
+        !NON_ENTRY_TOKENS.some((tok) => entityId.includes(tok))
     );
+    const entryTextRe = /\b(?:doors?|windows?|entry|entries)\b/i;
+    let entryIdsFromText = false;
+    if (!entryIds.length) {
+      const binarySensorIds = entityIds.filter(
+        (id) =>
+          (id.startsWith("binary_sensor.") || id.startsWith("cover.")) &&
+          !NON_ENTRY_TOKENS.some((tok) => id.includes(tok))
+      );
+      if (binarySensorIds.length > 0 && entryTextRe.test(text)) {
+        entryIds = binarySensorIds;
+        entryIdsFromText = true;
+      }
+    }
+    const entryKindText = entryIdsFromText ? text : "";
     const hasNight =
       evidencePaths.includes("derived.is_night") || text.includes("night");
     const isAway =
@@ -245,16 +269,27 @@ class HgaProposalsCard extends HTMLElement {
       text.includes("present") ||
       evidencePaths.includes("derived.anyone_home");
     if (entryIds.length > 0) {
-      const entryKind = entryIds.some((entityId) => entityId.includes("window"))
-        ? "window"
-        : entryIds.some((entityId) => entityId.includes("door"))
-        ? "door"
-        : "entry";
+      const entryKind =
+        entryIds.some((entityId) => entityId.includes("window")) ||
+        /\bwindows?\b/i.test(entryKindText)
+          ? "window"
+          : entryIds.some((entityId) => entityId.includes("door")) ||
+            /\bdoors?\b/i.test(entryKindText)
+          ? "door"
+          : "entry";
       if (hasNight && isAway) {
         return `open_entry_at_night_while_away_${entryKind}`;
       }
       if (hasNight && isHome) {
         return `open_entry_at_night_when_home_${entryKind}`;
+      }
+      if (hasNight) {
+        const hasAlarm = entityIds.some((id) =>
+          id.startsWith("alarm_control_panel.")
+        );
+        if (!hasAlarm) {
+          return `open_entry_at_night_${entryKind}`;
+        }
       }
       if (isAway) {
         return `open_entry_while_away_${entryKind}`;
@@ -298,7 +333,8 @@ class HgaProposalsCard extends HTMLElement {
       if (end === -1) {
         return null;
       }
-      const cameraId = rest.slice(0, end);
+      const cameraId = rest.slice(0, end).replace(/^['"`\s]+|['"`\s]+$/g, "");
+      if (!cameraId) return null;
       return `motion_without_camera_${cameraId.replaceAll(".", "_")}`;
     }
 
@@ -602,9 +638,9 @@ class HgaProposalsCard extends HTMLElement {
         const card = document.createElement("div");
         card.className = "card";
         card.innerHTML = `
-          <div><strong>${filteredCandidate.candidate_id}</strong></div>
-          <div class="meta">Reason: ${this._dedupeReasonLabel(filteredCandidate.dedupe_reason)}</div>
-          <div class="meta">Semantic Key: ${filteredCandidate.semantic_key || "-"}</div>
+          <div><strong>${this._esc(filteredCandidate.candidate_id)}</strong></div>
+          <div class="meta">Reason: ${this._esc(this._dedupeReasonLabel(filteredCandidate.dedupe_reason))}</div>
+          <div class="meta">Semantic Key: ${this._esc(filteredCandidate.semantic_key || "-")}</div>
         `;
         discoveryFiltered.appendChild(card);
       }
@@ -667,12 +703,12 @@ class HgaProposalsCard extends HTMLElement {
         const card = document.createElement("div");
         card.className = "card";
         card.innerHTML = `
-          <div><strong>${candidate.title || rec.candidate_id}</strong></div>
-          <div class="meta">Status: ${rec.status || "draft"}</div>
-          <div>${candidate.summary || ""}</div>
-          <div class="meta">Candidate ID: ${rec.candidate_id}</div>
-          <div class="meta">Rule ID: ${rec.rule_id || "-"}</div>
-          <div class="meta">Covered Rule: ${rec.covered_rule_id || "-"}</div>
+          <div><strong>${this._esc(candidate.title || rec.candidate_id)}</strong></div>
+          <div class="meta">Status: ${this._esc(rec.status || "draft")}</div>
+          <div>${this._esc(candidate.summary || "")}</div>
+          <div class="meta">Candidate ID: ${this._esc(rec.candidate_id)}</div>
+          <div class="meta">Rule ID: ${this._esc(rec.rule_id || "-")}</div>
+          <div class="meta">Covered Rule: ${this._esc(rec.covered_rule_id || "-")}</div>
           ${
             isUnsupported
               ? `<div class="warn">Unsupported: this proposal cannot be mapped to an existing deterministic template yet.</div>`
@@ -772,12 +808,12 @@ class HgaProposalsCard extends HTMLElement {
         const card = document.createElement("div");
         card.className = "card";
         card.innerHTML = `
-          <div><strong>${candidate.title || rec.candidate_id}</strong></div>
-          <div class="meta">Status: ${rec.status || "draft"}</div>
-          <div>${candidate.summary || ""}</div>
-          <div class="meta">Candidate ID: ${rec.candidate_id}</div>
-          <div class="meta">Rule ID: ${rec.rule_id || "-"}</div>
-          <div class="meta">Covered Rule: ${rec.covered_rule_id || "-"}</div>
+          <div><strong>${this._esc(candidate.title || rec.candidate_id)}</strong></div>
+          <div class="meta">Status: ${this._esc(rec.status || "draft")}</div>
+          <div>${this._esc(candidate.summary || "")}</div>
+          <div class="meta">Candidate ID: ${this._esc(rec.candidate_id)}</div>
+          <div class="meta">Rule ID: ${this._esc(rec.rule_id || "-")}</div>
+          <div class="meta">Covered Rule: ${this._esc(rec.covered_rule_id || "-")}</div>
           <div class="meta">Rule State: ${
             historyRuleId
               ? isRuleEnabled === false
@@ -845,6 +881,15 @@ class HgaProposalsCard extends HTMLElement {
       `${flattenedFiltered.length} filtered candidate(s), ` +
       `${visiblePendingProposals.length} pending draft(s), ` +
       `${historicalProposals.length} historical draft(s) at ${new Date().toLocaleTimeString()}`;
+  }
+
+  _esc(value) {
+    return String(value == null ? "" : value)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
   }
 
   _dedupeReasonLabel(reason) {
