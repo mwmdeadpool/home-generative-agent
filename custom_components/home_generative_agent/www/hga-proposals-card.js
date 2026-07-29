@@ -257,17 +257,17 @@ class HgaProposalsCard extends HTMLElement {
     const entryKindText = entryIdsFromText ? text : "";
     const hasNight =
       evidencePaths.includes("derived.is_night") || text.includes("night");
+    // Word-bounded to mirror _AWAY_TERMS_PATTERN/_HOME_TERMS_PATTERN in
+    // proposal_templates.py — "present" must not match "presence" and "home"
+    // must not match "anyone_home"/"armed_home" (issue #514).
     const isAway =
-      text.includes("away") ||
-      text.includes("no one home") ||
-      text.includes("nobody home") ||
-      text.includes("empty") ||
-      text.includes("unoccupied");
+      /\b(?:away|no one home|nobody home|empty|unoccupied|no occupants|without occupants)\b/.test(
+        text
+      );
     const isHome =
-      text.includes("home") ||
-      text.includes("occupied") ||
-      text.includes("present") ||
-      evidencePaths.includes("derived.anyone_home");
+      /\b(?:someone home|occupied|home|present|occupants|residents)\b/.test(
+        text
+      ) || evidencePaths.includes("derived.anyone_home");
     if (entryIds.length > 0) {
       const entryKind =
         entryIds.some((entityId) => entityId.includes("window")) ||
