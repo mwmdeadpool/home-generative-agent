@@ -18,7 +18,7 @@ from custom_components.home_generative_agent.sentinel.models import (
     AnomalyFinding,
     build_anomaly_id,
 )
-from custom_components.home_generative_agent.sentinel.power_units import (
+from ..power_units import (
     is_power_unit,
     watts_per_unit,
 )
