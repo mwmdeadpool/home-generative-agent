@@ -214,6 +214,16 @@ WARNING per event that a window-scoped check could suppress.
 
 ---
 
+### Extract shared motion-evidence helper across motion evaluators
+
+**What:** `_eval_motion_detected_at_night_while_away`, `_eval_motion_detected_at_night_while_alarm_disarmed`, and `_eval_motion_while_alarm_disarmed_and_home_present` repeat the params list-check / entity resolution / `motion_states` evidence block (the new evaluator now uses per-entity any-of resolution while the alarm two remain all-of `zip(..., strict=False)`). A shared helper would encode the resolution invariant once — and is the natural place to extend any-of resilience to the alarm-motion evaluators.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** v3.22.0
+
+---
+
 ## Audit Store
 
 ### Audit notifier-drop findings as non-user-facing (delivery status from async_notify)
@@ -448,6 +458,78 @@ Entity-backed evidence path instruction added to `USER_PROMPT_TEMPLATE` in `expl
 
 ---
 
+### Text/device_class fallback for locale-named motion sensors
+
+**What:** `_find_motion_entity_ids` matches only the substrings `motion`/`vmd` in entity IDs, so a locale-named PIR like `binary_sensor.chodba` (`device_class: motion`) can never normalize into `motion_detected_at_night_while_away` or the alarm-motion templates — the candidate dies as `missing_required_entities`. Flagged by Codex adversarial review during the v3.22.0 ship (issue #516). The v3.23.0 prose fallback (issue #518) shares the same substring limitation — a locale-named ID in prose is not promoted either.
+
+**How to apply:** Mirror the issue-504 locale entry fallback: when candidate text names motion and evidence cites `binary_sensor.*` IDs not classified as any other kind, promote them as motion sensors — with the same gating pitfalls (word-bounded text, absence of higher-priority entity classes, JS card mirror). Alternatively use snapshot `device_class` as the positive signal (see the existing device_class TODO above).
+
+**Effort:** M
+**Priority:** P2
+**Depends on:** v3.22.0
+
+---
+
+### Card severity preview disagrees with server-registered severity
+
+**What:** `_severityForCandidate` in hga-proposals-card.js returns "high" for any away/night candidate, but the server registers e.g. `motion_detected_at_night_while_away` as medium and `open_entry_at_night_when_home` as medium — the GitHub rule-request prefill and UI disagree with what gets stored. Pre-existing; surfaced during the v3.22.0 ship review.
+
+**How to apply:** Mirror the per-template severity table from `proposal_templates.py` into the card, or include the normalized severity in the proposal record and display that.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** v3.22.0
+
+---
+
+### Dispatch-level dedup for overlapping night/day away-motion findings
+
+**What:** A household running both `motion_detected_at_night_while_away` and `motion_detected_while_away` over the same sensors gets two findings (two pushes, doubled audit rows) for every night motion event. An evaluator-level dedup was implemented and reverted during the v3.23.0 ship: `evaluate_dynamic_rules` runs before snooze/exclusion/pending-prompt suppression, so dropping the day finding while the night rule was snoozed silently lost the alert entirely (verification round 5). Docs currently advise replacing the night rule instead.
+
+**How to apply:** Dedup at dispatch time in the engine/notifier, after per-finding suppression decisions are known: when both findings for overlapping sensors would dispatch, send only the night one; when the night finding is suppressed, the day finding dispatches normally.
+
+**Effort:** M
+**Priority:** P2
+**Depends on:** v3.23.0
+
+---
+
+### Proposal dedup does not treat night=any motion rules as covering night=1 candidates
+
+**What:** `rule_key_covers_candidate_key` is exact equality for non-template keys, so an active `motion_detected_while_away` rule (`night=any|home=0`) does not cover a later night-worded re-proposal of the same sensors (`night=1|home=0`) — discovery can propose the night sibling of an already-active any-hour rule. Runtime double-alerting is already prevented by the evaluator's overlap dedup (v3.23.0); this is proposal-side noise only. Flagged by testing-specialist + red-team review during the v3.23.0 ship (issue #518).
+
+**How to apply:** Teach `rule_key_covers_candidate_key` that `night=any` subsumes `night=1` when subject/predicate/home/entities are identical (one direction only — a night rule never covers an any-hour candidate). Pin both directions with tests; consider whether `home=any` ⊇ `home=0/1` deserves the same treatment while in there.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** v3.23.0
+
+---
+
+### Proposals card should render normalized rule params before Approve
+
+**What:** The pending-proposal card shows title/summary/candidate_id but never the normalized `template_id`/params, so the user approves prose while the system persists params the prose viewer cannot audit (e.g. a motion entity named only in the hidden `pattern` field). Impact is capped — advisory-only actions, charset-constrained IDs, approval-time entity resolution (v3.23.0) — but the approval trust boundary should show the actual rule scope. Flagged by security-specialist review during the v3.23.0 ship (issue #518).
+
+**How to apply:** Run `explain_normalize_candidate` server-side when listing proposals (or store the normalization in the proposal record) and render template_id + entity params in the card above the Approve button.
+
+**Effort:** M
+**Priority:** P3
+**Depends on:** v3.23.0
+
+---
+
+### Night-branch guard symmetry for unknown-person/camera candidates
+
+**What:** The day-agnostic away-motion branch (v3.23.0) excludes unknown-person and camera-evidence candidates so they keep their camera-template routing, but the night branch (v3.22.0) still captures night-worded candidates of those classes — a "unknown person and motion at night while away" candidate registers a low-signal motion rule instead of the sensitive camera rule. Left asymmetric deliberately: changing the night branch's routing would re-key candidates whose rules users already activated (dedup churn without a migration story).
+
+**How to apply:** Add the `not has_unknown_person_signal` / `camera_id is None` guards to the night branch together with a one-time semantic-key migration or documented re-proposal expectation, and update the card mirror's night branch in the same change.
+
+**Effort:** M
+**Priority:** P3
+**Depends on:** v3.23.0
+
+---
+
 ## Video Analyzer
 
 ### Caption novelty: per-analysis notification-status metadata
@@ -576,9 +658,9 @@ early-frame selection.
 
 ### Deduplicate the _friendly_type label maps
 
-**What:** `sentinel/notifier.py` and `explain/llm_explain.py` each carry a byte-identical `_friendly_type` `known` map (and matching prefix-stripping fallback). Every new anomaly type requires the same entries in both maps plus mirrored tests in `test_sentinel_notifier.py` and `test_llm_explain.py` — the v3.21.0 ship added the four `open_entry_at_night*` keys in four places. A missed side silently regresses user-visible labels to the title-cased fallback.
+**What:** `sentinel/notifier.py` and `explain/llm_explain.py` each carry a byte-identical `_friendly_type` `known` map (and matching prefix-stripping fallback). Every new anomaly type requires the same entries in both maps plus mirrored tests in `test_sentinel_notifier.py` and `test_llm_explain.py` — the v3.21.0 ship added the four `open_entry_at_night*` keys in four places. A missed side silently regresses user-visible labels to the title-cased fallback. The v3.22.0 ship widened the duplication: `_KNOWN_TYPE_LABELS` and a `_display_type` helper (template-label fallback for slugified dynamic-rule IDs) are now mirrored verbatim in both modules, so each new rule type needs two edits plus two mirrored tests. Re-flagged by the maintainability specialist during the v3.22.0 ship.
 
-**How to apply:** Extract the type→label map and the fallback prettifier into one shared helper module (e.g. `sentinel/labels.py` or `core/`), import it from both `notifier.py` and `llm_explain.py`, and collapse the duplicated tests into one suite against the shared module.
+**How to apply:** Hoist `_KNOWN_TYPE_LABELS`, `_display_type`, and the fallback prettifier into one shared module (e.g. `sentinel/labels.py` or a small `core/labels.py`), import it from both `notifier.py` and `llm_explain.py`, and collapse the duplicated tests into one suite against the shared module.
 
 **Effort:** S
 **Priority:** P3
