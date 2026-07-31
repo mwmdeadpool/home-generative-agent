@@ -239,7 +239,10 @@ class HgaProposalsCard extends HTMLElement {
         (entityId.includes("window") ||
           entityId.includes("door") ||
           entityId.includes("entry")) &&
-        !NON_ENTRY_TOKENS.some((tok) => entityId.includes(tok))
+        // Motion-named IDs with an entry substring (outdoor_motion,
+        // doorbell_motion) are motion sensors, not entries — mirrors the
+        // server's non_motion_entry_ids guard (issue #516).
+        !(entityId.includes("motion") || entityId.includes("vmd"))
     );
     const entryTextRe = /\b(?:doors?|windows?|entry|entries)\b/i;
     let entryIdsFromText = false;
@@ -261,7 +264,8 @@ class HgaProposalsCard extends HTMLElement {
     // proposal_templates.py — "present" must not match "presence" and "home"
     // must not match "anyone_home"/"armed_home" (issue #514).
     const isAway =
-      /\b(?:away|no one home|nobody home|empty|unoccupied|no occupants|without occupants)\b/.test(
+      evidencePaths.includes("not derived.anyone_home") ||
+      /\b(?:away|no(?:body|\s+one)\s+(?:is\s+)?(?:at\s+)?home|empty|unoccupied|no occupants|without occupants)\b/.test(
         text
       );
     const isHome =
@@ -313,6 +317,93 @@ class HgaProposalsCard extends HTMLElement {
       if (alarmId && entryIds.length > 0) {
         return `alarm_disarmed_open_entry_${alarmId.replaceAll(".", "_")}`;
       }
+    }
+
+    // Motion sensors named in the candidate. Evidence-path IDs first; when
+    // no MOTION-named evidence ID resolves (index-based paths like
+    // entities[31].state carry no entity ID, issue #518), fall back to
+    // prose IDs — the per-class gate mirrors `if not motion_ids:` in
+    // proposal_templates.py, so a candidate with resolvable non-motion
+    // evidence (person.*) plus an index-based motion path still predicts
+    // the motion route the server takes (issue #518 review).
+    const evidenceMotionIds = entityIds.filter(
+      (entityId) => entityId.includes("motion") || entityId.includes("vmd")
+    );
+    let motionSensorIds = evidenceMotionIds;
+    if (evidenceMotionIds.length === 0) {
+      // Capture-group form instead of a lookbehind: a lookbehind regex
+      // literal is an early SyntaxError on WebKit < 16.4 and would stop
+      // the whole card script from parsing (issue #518 red-team review).
+      // Mirrors _find_text_motion_entity_ids (binary_sensor-only).
+      motionSensorIds = [];
+      const proseIdRe = /(?:^|[^a-z0-9_.])(binary_sensor\.[a-z0-9_]+)/g;
+      let proseMatch;
+      while ((proseMatch = proseIdRe.exec(text)) !== null) {
+        const proseId = proseMatch[1];
+        if (proseId.includes("motion") || proseId.includes("vmd")) {
+          motionSensorIds.push(proseId);
+        }
+      }
+    }
+    const awayMotionIds = motionSensorIds.filter((entityId) =>
+      entityId.startsWith("binary_sensor.")
+    );
+    // Mirrors _is_away_motion_candidate in proposal_templates.py: entity
+    // guards keep alarm/lock/battery candidates on their existing routing;
+    // the text guards keep prose-only battery/lock/staleness/open-entry
+    // predicates from silently collapsing into a plain motion rule
+    // (issue #518 Codex adversarial review).
+    const motionGuardsPass =
+      (text.includes("motion") || text.includes("vmd")) &&
+      awayMotionIds.length > 0 &&
+      !/\b(?:alarms?|(?:dis)?armed)\b/.test(text) &&
+      !text.includes("unavailable") &&
+      !text.includes("offline") &&
+      !text.includes("unreachable") &&
+      !(
+        text.includes("battery") &&
+        (text.includes("low") || text.includes("below") || text.includes("weak"))
+      ) &&
+      !/\b(?:un)?lock(?:s|ed)?\b/.test(text) &&
+      !["stale", "not updated", "last seen", "last updated"].some((term) =>
+        text.includes(term)
+      ) &&
+      !(entryTextRe.test(text) && text.includes("open")) &&
+      !entityIds.some(
+        (entityId) =>
+          entityId.startsWith("alarm_control_panel.") ||
+          entityId.startsWith("lock.") ||
+          entityId.includes("battery")
+      );
+    // Contrastive any-hour phrasing suppresses the night gate — mirrors
+    // _ANY_HOUR_TEXT_PATTERN (issue #518 red-team review).
+    const anyHourRe =
+      /\b(?:day (?:or|and) night|night (?:or|and) day|any ?time|any hour|24\/7|around the clock|regardless of (?:the )?time|not (?:just|only) (?:at )?night|including night(?:time)?)\b/;
+    // Motion at night while away (issue #516) — mirrors the normalizer's
+    // motion_detected_at_night_while_away branch.
+    if (hasNight && !anyHourRe.test(text) && isAway && motionGuardsPass) {
+      return "motion_detected_at_night_while_away";
+    }
+    // Motion while away, any hour (issue #518) — the night branch above
+    // wins for night-worded candidates, mirroring the normalizer's branch
+    // order. Unknown-person and camera-evidence candidates keep their
+    // camera-template routing (server-side day-branch guards).
+    const hasUnknownPerson =
+      ["unknown", "unrecognized", "stranger", "unidentified", "indeterminate"].some(
+        (term) => text.includes(term)
+      ) &&
+      ["person", "people", "face", "occupant", "resident"].some((term) =>
+        text.includes(term)
+      );
+    const hasCameraEvidence =
+      entityIds.some((entityId) => entityId.startsWith("camera.")) ||
+      (Array.isArray(evidencePaths) &&
+        evidencePaths.some(
+          (path) =>
+            typeof path === "string" && path.startsWith("camera_activity[")
+        ));
+    if (isAway && motionGuardsPass && !hasUnknownPerson && !hasCameraEvidence) {
+      return "motion_detected_while_away";
     }
 
     if (text.includes("motion") || text.includes("camera")) {
