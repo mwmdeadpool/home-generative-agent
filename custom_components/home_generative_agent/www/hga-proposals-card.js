@@ -194,26 +194,64 @@ class HgaProposalsCard extends HTMLElement {
     if (!Array.isArray(evidencePaths)) {
       return [];
     }
-    const stripQuotes = (s) => s.replace(/^['"`\s]+|['"`\s]+$/g, "");
     const entityIds = [];
+    const markers = ["entities[entity_id=", "entities[entity_ids contains "];
+    // Bare-bracket format: entities[sensor.foo].state (issue #522). The
+    // bracket token must be a domain-qualified entity ID, so index-based
+    // brackets (entities[31].state, issue #518) still resolve nothing.
+    // Mirrors _extract_entity_id_from_evidence_path in proposal_templates.py.
+    const bareBracketDomains = [
+      "alarm_control_panel",
+      "binary_sensor",
+      "camera",
+      "cover",
+      "input_boolean",
+      "input_number",
+      "light",
+      "lock",
+      "media_player",
+      "person",
+      "sensor",
+      "switch",
+      "vacuum",
+    ];
     for (const path of evidencePaths) {
       if (typeof path !== "string") {
         continue;
       }
-      const idMarker = "entities[entity_id=";
-      const containsMarker = "entities[entity_ids contains ";
-      if (path.includes(idMarker)) {
-        const rest = path.slice(path.indexOf(idMarker) + idMarker.length);
+      let matched = false;
+      for (const marker of markers) {
+        const start = path.indexOf(marker);
+        if (start === -1) {
+          continue;
+        }
+        const rest = path.slice(start + marker.length);
         const end = rest.indexOf("]");
-        if (end === -1) continue;
-        const entityId = stripQuotes(rest.slice(0, end));
-        if (entityId) entityIds.push(entityId);
-      } else if (path.includes(containsMarker)) {
-        const rest = path.slice(path.indexOf(containsMarker) + containsMarker.length);
+        if (end === -1) {
+          continue;
+        }
+        // Entity IDs may be quote-wrapped (LLM output variance).
+        const token = rest.slice(0, end).replace(/^['"`]+|['"`]+$/g, "");
+        if (token) {
+          entityIds.push(token);
+        }
+        matched = true;
+        break;
+      }
+      if (!matched && path.startsWith("entities[")) {
+        const rest = path.slice("entities[".length);
         const end = rest.indexOf("]");
-        if (end === -1) continue;
-        const entityId = stripQuotes(rest.slice(0, end));
-        if (entityId) entityIds.push(entityId);
+        if (end === -1) {
+          continue;
+        }
+        const token = rest.slice(0, end).replace(/^['"`]+|['"`]+$/g, "");
+        // Prefix match tolerates an attribute suffix inside the bracket
+        // (entities[sensor.x.state], LLM variance) — mirrors the server's
+        // _DOT_NOTATION_ENTITY_PATTERN prefix semantics.
+        const dotMatch = /^([a-z_]+\.[a-z0-9_]+)(?:[.[]|$)/.exec(token);
+        if (dotMatch && bareBracketDomains.includes(dotMatch[1].split(".")[0])) {
+          entityIds.push(dotMatch[1]);
+        }
       }
     }
     return entityIds;
@@ -230,12 +268,34 @@ class HgaProposalsCard extends HTMLElement {
       .toLowerCase();
     const evidencePaths = candidate?.evidence_paths || [];
     const entityIds = this._extractEntityIds(evidencePaths);
-    const NON_ENTRY_TOKENS = [
-      "motion","vmd","battery","occupancy","presence","smoke","gas",
-      "leak","moisture","flood","tamper","vibration","carbon","safety",
+    // Word-bounded so "indoor"/"outdoor"/"doorbell" don't read as entries;
+    // mirrors _ENTRY_TEXT_PATTERN in proposal_templates.py.
+    const entryTextRe = /\b(?:doors?|windows?|entry|entries)\b/;
+    const nonEntryIdTokens = [
+      "motion",
+      "vmd",
+      "battery",
+      "occupancy",
+      "presence",
+      "smoke",
+      "gas",
+      "leak",
+      "moisture",
+      "flood",
+      "tamper",
+      "vibration",
+      "carbon",
+      "safety",
     ];
     let entryIds = entityIds.filter(
       (entityId) =>
+        // Domain restriction mirrors _find_entry_entity_ids server-side
+        // (binary_sensor/cover/domainless only): without it a
+        // sensor.front_door_lock_battery reads as an entry and previews
+        // open_entry_* for a battery candidate (issue #522 Codex review).
+        (entityId.startsWith("binary_sensor.") ||
+          entityId.startsWith("cover.") ||
+          !entityId.includes(".")) &&
         (entityId.includes("window") ||
           entityId.includes("door") ||
           entityId.includes("entry")) &&
@@ -244,20 +304,81 @@ class HgaProposalsCard extends HTMLElement {
         // server's non_motion_entry_ids guard (issue #516).
         !(entityId.includes("motion") || entityId.includes("vmd"))
     );
-    const entryTextRe = /\b(?:doors?|windows?|entry|entries)\b/i;
     let entryIdsFromText = false;
-    if (!entryIds.length) {
-      const binarySensorIds = entityIds.filter(
-        (id) =>
-          (id.startsWith("binary_sensor.") || id.startsWith("cover.")) &&
-          !NON_ENTRY_TOKENS.some((tok) => id.includes(tok))
+    if (entryIds.length === 0 && entryTextRe.test(text)) {
+      // Locale-named entity IDs (e.g. Czech "okno") carry no English entry
+      // token — when the candidate text names an entry, promote unclassified
+      // binary_sensor/cover IDs (mirrors proposal_templates.py, issue #504).
+      entryIds = entityIds.filter(
+        (entityId) =>
+          (entityId.startsWith("binary_sensor.") || entityId.startsWith("cover.")) &&
+          !nonEntryIdTokens.some((token) => entityId.includes(token))
       );
-      if (binarySensorIds.length > 0 && entryTextRe.test(text)) {
-        entryIds = binarySensorIds;
-        entryIdsFromText = true;
+      entryIdsFromText = entryIds.length > 0;
+    }
+    // Low-battery context (issue #522) — computed before the entry legs so
+    // the lock-battery precedence check below can mirror the normalizer,
+    // whose lock-battery branch precedes the open-entry branches.
+    const { hasLowBatterySignal } = this._lowBatteryContext(candidate, text);
+    let batterySensorIds = entityIds.filter(
+      (entityId) =>
+        entityId.startsWith("sensor.") && entityId.includes("battery")
+    );
+    if (batterySensorIds.length === 0 && hasLowBatterySignal) {
+      // Locale-named sensor IDs (Czech "baterie") carry no English battery
+      // token: mirror _find_text_battery_sensor_entity_ids — promote a
+      // SINGLE unambiguous non-excluded sensor.* evidence ID.
+      const nonBatteryIdTokens = [
+        "power",
+        "energy",
+        "watt",
+        "voltage",
+        "current",
+        "temperature",
+        "humidity",
+        "illuminance",
+        "lux",
+        "pressure",
+        "co2",
+        "motion",
+        "door",
+        "window",
+        "occupancy",
+        "presence",
+        "smoke",
+        "gas",
+        "leak",
+        "moisture",
+        "flood",
+        "signal",
+        "rssi",
+        "linkquality",
+      ];
+      const fallback = [
+        ...new Set(
+          entityIds.filter(
+            (entityId) =>
+              entityId.startsWith("sensor.") &&
+              !nonBatteryIdTokens.some((token) => entityId.includes(token))
+          )
+        ),
+      ];
+      if (fallback.length === 1) {
+        batterySensorIds = fallback;
       }
     }
-    const entryKindText = entryIdsFromText ? text : "";
+    // Lock-battery precedence: the normalizer routes lock + low-battery
+    // candidates to low_battery_sensors (or refuses them) BEFORE any
+    // open-entry branch — without this a lock+entry+battery compound would
+    // preview as open_entry_* while the server registers a battery rule.
+    if (
+      hasLowBatterySignal &&
+      entityIds.some((entityId) => entityId.startsWith("lock."))
+    ) {
+      return batterySensorIds.length > 0
+        ? this._sanitizeRuleName(candidate?.candidate_id) || "low_battery_sensors"
+        : null;
+    }
     const hasNight =
       evidencePaths.includes("derived.is_night") || text.includes("night");
     // Word-bounded to mirror _AWAY_TERMS_PATTERN/_HOME_TERMS_PATTERN in
@@ -273,27 +394,31 @@ class HgaProposalsCard extends HTMLElement {
         text
       ) || evidencePaths.includes("derived.anyone_home");
     if (entryIds.length > 0) {
-      const entryKind =
-        entryIds.some((entityId) => entityId.includes("window")) ||
-        /\bwindows?\b/i.test(entryKindText)
-          ? "window"
-          : entryIds.some((entityId) => entityId.includes("door")) ||
-            /\bdoors?\b/i.test(entryKindText)
-          ? "door"
-          : "entry";
+      // Text-derived kind only for text-derived entry IDs — mirrors the
+      // registry-stability gating in proposal_templates.py.
+      const entryKind = entryIds.some((entityId) => entityId.includes("window"))
+        ? "window"
+        : entryIds.some((entityId) => entityId.includes("door"))
+        ? "door"
+        : entryIdsFromText && /\bwindows?\b/.test(text)
+        ? "window"
+        : entryIdsFromText && /\bdoors?\b/.test(text)
+        ? "door"
+        : "entry";
       if (hasNight && isAway) {
         return `open_entry_at_night_while_away_${entryKind}`;
       }
       if (hasNight && isHome) {
         return `open_entry_at_night_when_home_${entryKind}`;
       }
-      if (hasNight) {
-        const hasAlarm = entityIds.some((id) =>
-          id.startsWith("alarm_control_panel.")
-        );
-        if (!hasAlarm) {
-          return `open_entry_at_night_${entryKind}`;
-        }
+      // Alarm candidates fall through to the alarm_disarmed_open_entry
+      // inference below, mirroring the normalizer's branch order.
+      const hasAlarmSignal =
+        text.includes("alarm") ||
+        text.includes("disarmed") ||
+        entityIds.some((entityId) => entityId.startsWith("alarm_control_panel."));
+      if (hasNight && !hasAlarmSignal) {
+        return `open_entry_at_night_${entryKind}`;
       }
       if (isAway) {
         return `open_entry_while_away_${entryKind}`;
@@ -301,6 +426,13 @@ class HgaProposalsCard extends HTMLElement {
       if (isHome) {
         return `open_entry_when_home_${entryKind}`;
       }
+    }
+
+    // Non-lock low-battery candidates (issue #522): the lock-precedence
+    // check above handled lock evidence; here the conjunctive signal plus a
+    // battery sensor routes ahead of the unlocked-lock text leg.
+    if (hasLowBatterySignal && batterySensorIds.length > 0) {
+      return this._sanitizeRuleName(candidate?.candidate_id) || "low_battery_sensors";
     }
 
     if (text.includes("lock") || text.includes("unlocked")) {
@@ -360,10 +492,10 @@ class HgaProposalsCard extends HTMLElement {
       !text.includes("unavailable") &&
       !text.includes("offline") &&
       !text.includes("unreachable") &&
-      !(
-        text.includes("battery") &&
-        (text.includes("low") || text.includes("below") || text.includes("weak"))
-      ) &&
+      // Mirrors _is_away_motion_candidate's slug-aware battery guard
+      // (issue #522): a candidate whose slug says low_battery must not
+      // collapse into a plain motion rule.
+      !hasLowBatterySignal &&
       !/\b(?:un)?lock(?:s|ed)?\b/.test(text) &&
       !["stale", "not updated", "last seen", "last updated"].some((term) =>
         text.includes(term)
@@ -424,12 +556,53 @@ class HgaProposalsCard extends HTMLElement {
       if (end === -1) {
         return null;
       }
-      const cameraId = rest.slice(0, end).replace(/^['"`\s]+|['"`\s]+$/g, "");
-      if (!cameraId) return null;
+      const cameraId = rest.slice(0, end);
       return `motion_without_camera_${cameraId.replaceAll(".", "_")}`;
     }
 
+    // Late generic battery leg — mirrors the normalizer's post-camera
+    // low_battery branch: prose keeps its legacy any-of predicate, the
+    // candidate_id slug counts only via the conjunctive signal (the
+    // conjunctive leg above mirrors the lock-precedence and
+    // fallback-promotion branches).
+    if (
+      batterySensorIds.length > 0 &&
+      (text.includes("battery") ||
+        text.includes("low") ||
+        text.includes("below") ||
+        hasLowBatterySignal)
+    ) {
+      return (
+        this._sanitizeRuleName(candidate?.candidate_id) || "low_battery_sensors"
+      );
+    }
+
     return null;
+  }
+
+  _lowBatteryContext(candidate, text) {
+    // candidate_id is often the only English surface when the discovery LLM
+    // writes prose in the home's locale — mirrors battery_text in
+    // proposal_templates.py (issue #522), scoped to battery checks only so
+    // slug tokens never widen night/occupancy signals. Shared by rule-id
+    // inference and severity so the predicate cannot drift between them.
+    // Qualifier list mirrors _LOW_BATTERY_QUALIFIERS server-side — an
+    // asymmetric list breaks candidate/rule dedup (issue #522 review).
+    // Prose keeps substring matching; the candidate_id slug is matched on
+    // whole tokens per surface, so "backup_battery_water_flow" cannot
+    // qualify via the "low" inside "flow" (server mirror).
+    const qualifiers = ["low", "below", "under", "weak"];
+    const slugTokens = new Set(
+      String(candidate?.candidate_id || "")
+        .toLowerCase()
+        .split(/[^a-z0-9]+/)
+    );
+    const hasLowBatterySignal =
+      (text.includes("battery") &&
+        qualifiers.some((qualifier) => text.includes(qualifier))) ||
+      (slugTokens.has("battery") &&
+        qualifiers.some((qualifier) => slugTokens.has(qualifier)));
+    return { hasLowBatterySignal };
   }
 
   _sanitizeRuleName(value) {
@@ -460,6 +633,34 @@ class HgaProposalsCard extends HTMLElement {
       text.includes("nobody home") ||
       text.includes("empty") ||
       text.includes("unoccupied");
+    // Low-battery candidates register at severity "low" server-side
+    // regardless of night/away wording (issue #522) — checked before the
+    // night/away branch so it doesn't inflate the issue-prefill severity.
+    // Covers both server battery routes: the conjunctive signal and the
+    // legacy prose any-of over battery-named evidence sensors. Compound
+    // open-entry candidates keep their entry severity: the normalizer's
+    // entry branches outrank the generic battery branch, so a "door left
+    // open, battery low" candidate is an entry proposal (issue #522
+    // red-team review).
+    const severityBatteryEvidence = this._extractEntityIds(
+      Array.isArray(candidate?.evidence_paths) ? candidate.evidence_paths : []
+    ).some(
+      (entityId) =>
+        entityId.startsWith("sensor.") && entityId.includes("battery")
+    );
+    if (
+      (this._lowBatteryContext(candidate, text).hasLowBatterySignal ||
+        (severityBatteryEvidence &&
+          (text.includes("battery") ||
+            text.includes("low") ||
+            text.includes("below")))) &&
+      !(
+        /\b(?:doors?|windows?|entry|entries)\b/.test(text) &&
+        text.includes("open")
+      )
+    ) {
+      return "low";
+    }
     if (isAway || hasNight) {
       return "high";
     }
@@ -678,10 +879,10 @@ class HgaProposalsCard extends HTMLElement {
         const card = document.createElement("div");
         card.className = "card";
         card.innerHTML = `
-          <div><strong>${candidate.title || candidate.candidate_id}</strong></div>
-          <div>${candidate.summary || ""}</div>
-          <div class="meta">Candidate ID: ${candidate.candidate_id}</div>
-          <div class="meta">Type: ${candidate.suggested_type || "unspecified"}</div>
+          <div><strong>${this._esc(candidate.title || candidate.candidate_id)}</strong></div>
+          <div>${this._esc(candidate.summary || "")}</div>
+          <div class="meta">Candidate ID: ${this._esc(candidate.candidate_id)}</div>
+          <div class="meta">Type: ${this._esc(candidate.suggested_type || "unspecified")}</div>
         `;
         const row = document.createElement("div");
         row.className = "row";
@@ -974,15 +1175,6 @@ class HgaProposalsCard extends HTMLElement {
       `${historicalProposals.length} historical draft(s) at ${new Date().toLocaleTimeString()}`;
   }
 
-  _esc(value) {
-    return String(value == null ? "" : value)
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;")
-      .replace(/'/g, "&#39;");
-  }
-
   _dedupeReasonLabel(reason) {
     const reasonMap = {
       batch_duplicate: "Duplicate in this discovery batch",
@@ -990,6 +1182,17 @@ class HgaProposalsCard extends HTMLElement {
       novel: "Novel candidate",
     };
     return reasonMap[reason] || reason || "Unknown";
+  }
+
+  // Candidate fields originate from LLM output — escape before any innerHTML
+  // interpolation so a prompt-injected candidate cannot become stored XSS.
+  _esc(value) {
+    return String(value ?? "")
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;")
+      .replaceAll("'", "&#39;");
   }
 
 }
