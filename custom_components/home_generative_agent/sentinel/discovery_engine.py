@@ -15,27 +15,29 @@ import voluptuous as vol
 from homeassistant.util import dt as dt_util
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from ..const import (
+from custom_components.home_generative_agent.const import (
     CONF_SENTINEL_DISCOVERY_INTERVAL_SECONDS,
 )
-from ..core.utils import (
+from custom_components.home_generative_agent.core.utils import (
     SENTINEL_ADMISSION_TIMEOUT_S,
     SentinelLLMDeferredError,
     extract_final,
     run_sentinel_model_call,
 )
-from ..explain.discovery_prompts import (
+from custom_components.home_generative_agent.explain.discovery_prompts import (
     SYSTEM_PROMPT,
     USER_PROMPT_TEMPLATE,
 )
-from ..snapshot.builder import (
+from custom_components.home_generative_agent.snapshot.builder import (
     async_build_full_state_snapshot,
 )
-from ..snapshot.discovery_reducer import (
+from custom_components.home_generative_agent.snapshot.discovery_reducer import (
     reduce_snapshot_for_discovery,
 )
+
 from .discovery_schema import DISCOVERY_OUTPUT_SCHEMA, DISCOVERY_SCHEMA_VERSION
 from .discovery_semantic import candidate_semantic_key, rule_semantic_key
+from .evidence_paths import is_derived_path
 from .logging_utils import RepeatingLogLimiter
 
 if TYPE_CHECKING:
@@ -536,15 +538,24 @@ class SentinelDiscoveryEngine:
             # back to a title+summary hash so they are still deduplicated.
             identity_key = key or _candidate_identity_hash(candidate)
 
-            # Hard filter: candidates whose every evidence_path starts with
-            # 'derived.' have no concrete entity evidence and can never be
-            # promoted to a rule.  Gate BEFORE the dedup check so these do not
-            # pollute the dedup exclusion set.
+            # Hard filter: candidates whose every evidence_path is a
+            # 'derived.*' context path have no concrete entity evidence and
+            # can never be promoted to a rule.  Gate BEFORE the dedup check
+            # so these do not pollute the dedup exclusion set. Negated
+            # spellings count too — a lone "not derived.anyone_home" is just
+            # as unpromotable (issue #524).
+            # Non-string junk elements are not concrete evidence: the gate
+            # passes only when at least one STRING path resolves outside
+            # derived.* (adversarial review — a junk element must not count
+            # as the concrete entity path).
             evidence_paths = candidate.get("evidence_paths")
             if (
-                evidence_paths is not None
+                isinstance(evidence_paths, list)
                 and len(evidence_paths) > 0
-                and all(p.startswith("derived.") for p in evidence_paths)
+                and not any(
+                    isinstance(p, str) and not is_derived_path(p)
+                    for p in evidence_paths
+                )
             ):
                 dropped.append(
                     {
@@ -647,7 +658,14 @@ def _candidate_text_entity_mismatches(
     evidence_entity_ids: set[str],
     entity_descriptor_index: dict[str, frozenset[str]],
 ) -> set[str]:
-    """Return known non-evidence entities named by candidate text."""
+    """
+    Return known non-evidence entities named by candidate text.
+
+    English-only by construction: descriptor tokens come from entity
+    object-ids, so the subset match silently never fires against
+    non-English prose. Fine while discovery prose stays English — the
+    translation follow-up to issue #524 must revisit this guard.
+    """
     if not evidence_entity_ids or not entity_descriptor_index:
         return set()
     text = " ".join(
