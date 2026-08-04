@@ -38,68 +38,6 @@
 
 ---
 
-### Expose-aware camera resolution and enumeration
-
-**What:** `_resolve_camera_entity_id` and `_available_camera_names` (agent/tools.py) scan every `camera.*` state with no Assist expose filtering. The not-found hint lists every camera name — including entities deliberately hidden from the conversation LLM API — and resolution captures any camera by name.
-
-**Why:** Cross-model adversarial finding on the #502 camera resolver (Codex rated P1). Deferred at ship time (2026-07-23, user decision): strict `async_should_expose` filtering would break camera analysis on default installs, because HA does not expose cameras to Assist by default. Capture-by-name reach is pre-existing behavior; the new surface is the name enumeration. Needs a deliberate design — likely an opt-in option (`respect Assist expose settings`) or filtering the hint list only, with migration notes.
-
-**How to apply:** Evaluate `homeassistant.components.homeassistant.exposed_entities.async_should_expose(hass, "conversation", entity_id)` for both the resolver candidate set and the hint list, behind a config option; decide the default with reporter input.
-
-**Effort:** M
-**Priority:** P2
-
----
-
-### Sentinel sync sampling-retry can outlive the triage timeout
-
-**What:** `run_sentinel_model_call`'s executor leg now runs `invoke_dropping_unsupported_params` in the worker thread. The thread already outlives `asyncio.timeout` cancellation (threads can't be cancelled); the drop-retry can add up to two more provider HTTP calls after the sentinel caller has timed out and moved on.
-
-**Why:** Codex adversarial note on #502. Bounded (max 2 extra calls, only when a provider rejects sampling params — a misconfiguration state that also logs warnings), and the underlying thread-outlives-timeout shape is pre-existing. Worth a deadline check between retry attempts if field reports show thread/request pile-ups.
-
-**How to apply:** Pass a deadline (monotonic timestamp) into the sync helper and skip the retry when it has passed.
-
-**Effort:** S
-**Priority:** P3
-
----
-
-### Scale stale-snapshot budget from the camera's own refresh interval
-
-**What:** The stale-snapshot guard (issue #490) uses a fixed 30-minute budget
-(`_SNAPSHOT_STALE_MAX_AGE_SEC = 1800`), sized as 3× the battery-camera
-interval. ring-mqtt publishes each camera's actual interval as
-`number.<camera>_snapshot_interval` (field-observed: 600 s battery, 30 s
-wired), so the budget is ~60× too lenient for wired cameras — a frozen wired
-cam goes undetected for half an hour. Better still for `event_select`-owned
-windows: compare the snapshot `timestamp` against the event that opened the
-window, which is exact rather than a heuristic.
-
-**Why:** Raised by @andymcmanus in #466 field testing (2026-07-18 comment,
-n=12 events: frame staleness at event open ranged 3–54 min, mean 21 min).
-The guard already only applies to ring-mqtt `event_select` cameras, so
-reading ring-mqtt's own interval entity adds no new integration coupling.
-
-**How to apply:** In `_retained_frame_is_stale`, resolve
-`number.<base>_snapshot_interval` via the same sibling/device-registry
-lookup as `_has_event_select_sibling`; budget = 3× that value, falling back
-to 1800 s when absent. For loops the `event_select` path owns, prefer
-comparing against the window-opening event's timestamp. The two halves are
-NOT interchangeable: interval scaling only tightens the wired case — in
-Auto/Motion mode on battery the real cadence is *never* (ring-mqtt#1103),
-which no scaled budget can detect; only the event-timestamp comparison
-covers it. The event-timestamp comparison also governs the common case
-today: with mean staleness of 21 min at event open (n=12), the previous
-event's frame usually passes the 30-min budget and is analyzed as if
-current (misattributed imagery), and with the take_snapshot automation
-installed, quiet cameras (>30 min gaps) log one expected snapshot-failure
-WARNING per event that a window-scoped check could suppress.
-
-**Effort:** M
-**Priority:** P2
-
----
-
 ### asyncio.gather concurrency policy for state-mutating tools
 
 **What:** Add per-tool annotation or global policy for whether a tool is safe to run concurrently. State-mutating HA tools (`turn_on`, `turn_off`, lock, unlock, `alarm_control`) called in the same model batch could interleave under `asyncio.gather`.
@@ -154,6 +92,32 @@ WARNING per event that a window-scoped check could suppress.
 **Priority:** P2 (post-ship validation)
 **Depends on:** feat/streaming-chatlog
 **Completed:** v3.12.0 (2026-04-21)
+
+---
+
+### Expose-aware camera resolution and enumeration
+
+**What:** `_resolve_camera_entity_id` and `_available_camera_names` (agent/tools.py) scan every `camera.*` state with no Assist expose filtering. The not-found hint lists every camera name — including entities deliberately hidden from the conversation LLM API — and resolution captures any camera by name.
+
+**Why:** Cross-model adversarial finding on the #502 camera resolver (Codex rated P1). Deferred at ship time (2026-07-23, user decision): strict `async_should_expose` filtering would break camera analysis on default installs, because HA does not expose cameras to Assist by default. Capture-by-name reach is pre-existing behavior; the new surface is the name enumeration. Needs a deliberate design — likely an opt-in option (`respect Assist expose settings`) or filtering the hint list only, with migration notes.
+
+**How to apply:** Evaluate `homeassistant.components.homeassistant.exposed_entities.async_should_expose(hass, "conversation", entity_id)` for both the resolver candidate set and the hint list, behind a config option; decide the default with reporter input.
+
+**Effort:** M
+**Priority:** P2
+
+---
+
+### Sentinel sync sampling-retry can outlive the triage timeout
+
+**What:** `run_sentinel_model_call`'s executor leg now runs `invoke_dropping_unsupported_params` in the worker thread. The thread already outlives `asyncio.timeout` cancellation (threads can't be cancelled); the drop-retry can add up to two more provider HTTP calls after the sentinel caller has timed out and moved on.
+
+**Why:** Codex adversarial note on #502. Bounded (max 2 extra calls, only when a provider rejects sampling params — a misconfiguration state that also logs warnings), and the underlying thread-outlives-timeout shape is pre-existing. Worth a deadline check between retry attempts if field reports show thread/request pile-ups.
+
+**How to apply:** Pass a deadline (monotonic timestamp) into the sync helper and skip the retry when it has passed.
+
+**Effort:** S
+**Priority:** P3
 
 ---
 
@@ -725,6 +689,72 @@ early-frame selection.
 
 **Effort:** S
 **Priority:** P3
+
+---
+
+### Scale stale-snapshot budget from the camera's own refresh interval
+
+**What:** The stale-snapshot guard (issue #490) uses a fixed 30-minute budget
+(`_SNAPSHOT_STALE_MAX_AGE_SEC = 1800`), sized as 3× the battery-camera
+interval. ring-mqtt publishes each camera's actual interval as
+`number.<camera>_snapshot_interval` (field-observed: 600 s battery, 30 s
+wired), so the budget is ~60× too lenient for wired cameras — a frozen wired
+cam goes undetected for half an hour. Better still for `event_select`-owned
+windows: compare the snapshot `timestamp` against the event that opened the
+window, which is exact rather than a heuristic.
+
+**Why:** Raised by @andymcmanus in #466 field testing (2026-07-18 comment,
+n=12 events: frame staleness at event open ranged 3–54 min, mean 21 min,
+with 2/12 over the 30-min budget — so 10/12 passed it and were analyzed).
+The guard already only applies to ring-mqtt `event_select` cameras, so
+reading ring-mqtt's own interval entity adds no new integration coupling.
+
+**How to apply:** Two candidate checks, NOT interchangeable, each with a
+precondition that must be solved first.
+
+*Interval scaling (tightens wired cameras only).* In
+`_retained_frame_is_stale`, resolve `number.<base>_snapshot_interval` via
+the same sibling/device-registry lookup as `_has_event_select_sibling`;
+budget = 3× that value, falling back to 1800 s when absent. Do NOT apply
+this unconditionally: the entity is a configured timer period, not a bound
+on frame age, and it is published even when nothing is scheduled to honour
+it. ring-mqtt defaults it in the camera constructor
+(`devices/camera.js:58-60`, v5.9.3) to 600 on battery / 30 on wired and
+publishes it whenever any snapshot mode is active, while `Auto` separately
+disables the *interval* path for battery devices (`:415-417`). A battery
+camera in the default mode therefore advertises 600 while no interval
+refresh is scheduled at all — only the motion path remains, and that fires
+only when Ring's push carries an image UUID (`:758-769`), which #466 field
+testing reports never happening on the two battery models tested. Scaling off the
+entity there yields an 1800 s budget on exactly the cameras needing the
+tightest check. Even on wired cameras it is a nominal cadence rather than a
+ceiling: scheduled refreshes are skipped while offline or while a motion
+ding is active (`:735`), and requests can fail, so real age can exceed it.
+**Precondition:** `_has_event_select_sibling` carries no power-source or
+snapshot-mode signal, so there is currently no way to enforce the
+wired-only restriction. Gate on a resolved mode/power signal (or on the
+camera's `type` attribute reading `interval`) before using this leg at all.
+
+*Event-timestamp comparison (the only check that works in Auto/Motion).*
+For loops the `event_select` path owns, compare the snapshot `timestamp`
+against the event that opened the window. **Precondition:**
+`_handle_event_select_change` sees only an HA state change carrying
+`eventId`/`recordingUrl`, and ring-mqtt discovers new events on a ~1-minute
+poll cycle and publishes `eventId` only after fetching the recording URL
+(`:439-448`). That state-change time is therefore *detection* time, not
+Ring capture time, and a strict comparison would reject a genuinely current
+frame published before the delayed `eventId`. Propagate the real Ring event
+timestamp, or allow a documented skew.
+
+This comparison also governs the common case today: at a mean staleness of
+21 min at event open (10/12 events under the 30-min budget), the previous
+event's frame usually passes and is analyzed as if current (misattributed
+imagery). With the take_snapshot automation installed, quiet cameras (>30
+min gaps) log one expected snapshot-failure WARNING per event that a
+window-scoped check could suppress.
+
+**Effort:** M
+**Priority:** P2
 
 ---
 
