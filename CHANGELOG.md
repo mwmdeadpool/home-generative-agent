@@ -2,6 +2,31 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.29.1] - 2026-08-13
+
+### Fixed
+
+- **Sentinel settings no longer shows "Translation error: MALFORMED_ARGUMENT" under the advanced exclusions field.** Two different template engines read the integration's translation strings and disagree about braces: hassfest validates them with `str.format` semantics, where a literal brace is doubled (`{{`), while the Home Assistant frontend renders the same strings through ICU MessageFormat, where `{{` is not an escape at all but a malformed argument. The advanced-exclusions help text carried a literal JSON example, so it could satisfy one engine or the other but never both — v3.29.0 shipped the spelling that passes CI and fails to render. The JSON examples are now written as prose, which both engines accept. The same defect is fixed in the two "must be a JSON object..." validation errors for camera entry links and rule entity exclusions, which have carried it longer and would have replaced the message explaining a bad entry with the same render error. A test now rejects literal braces in any translation value, in either spelling, across `strings.json` and all four translation files.
+
+## [3.29.0] - 2026-08-12
+
+### Added
+
+- **An entity picker for the common "ignore this everywhere" exclusion.** Excluding a phantom entry point — an ESPHome touch panel's template lock that only mirrors a real lock elsewhere — previously meant hand-typing raw JSON (`{"*": ["lock.x"]}`) into a single-line text field. The Sentinel settings form now has an **Exclude entities from all Sentinel rules** picker for that case, and the JSON field is relabelled **Advanced** for what the picker cannot express: per-rule keys and glob patterns. Both write to the same stored map with the same shape, so hand-edited storage and the documented JSON examples keep working. The picker's help text now also states the consequence the docs already carried: an excluded entity stops waking Sentinel, so anomalies involving it are caught on the next poll rather than instantly.
+
+### Fixed
+
+- **`camera_entry_unsecured` now honors entity exclusions for the unsecured lock or door.** That rule names only the camera in its triggering entities and carries the unsecured entity in its evidence, so the engine's generic exclusion filter — which inspects triggering entities — could never suppress it, and excluding a phantom lock had no effect no matter how it was configured. The rule now applies the exclusion itself, before the entity becomes evidence, for both same-area entities and cross-area `camera_entry_links` entities. A co-located *real* unsecured entry still alerts; only the excluded entity is dropped.
+- **An excluded entity can no longer serve as a camera's activity timestamp.** When a camera advertises no `last_activity`, the rule falls back to the most recent `last_changed` among nearby sensors. That fallback ignored exclusions, so a chatty phantom sensor kept the camera looking permanently active and kept firing the alerts it was excluded to stop — the exclusion appeared to do nothing. Exclusions now apply to the fallback too, and every in-rule suppression is counted in the rule's debug skip tally rather than happening silently.
+- **A glob exclusion under `"*"` no longer makes the Sentinel settings form unsubmittable.** Home Assistant's entity picker rejects anything that is not a literal entity ID, and voluptuous validates a field's default even when the field is untouched, so a stored `{"*": ["camera.map_*"]}` — a configuration `docs/sentinel.md` recommends — would have rejected every submission of the whole form, with the offending value invisible in both fields. The form now splits the stored map on entry shape rather than on the map key: literal entity IDs go to the picker, globs stay in the advanced JSON field where they can still be edited.
+- **Picker entries are validated the same way JSON entries are.** The picker accepts a bare entity-registry UUID, which the engine silently discards at load because it has no dot. Such entries are now rejected by the form instead of being persisted as an exclusion that never takes effect.
+## [3.28.1] - 2026-08-12
+
+### Fixed
+
+- **Voice timers work again on OpenAI** ([#545](https://github.com/goruck/home-generative-agent/pull/545)). Speaking to an OpenAI-powered assistant from a timer-capable voice satellite failed every request with `Invalid schema for function 'HassStartTimer': schema must have type 'object' and not have 'oneOf'/'anyOf'/'allOf'/... at the top level`. Home Assistant's timer intents (`HassStartTimer`, `HassDecreaseTimer`) declare "give at least one of hours, minutes, seconds" as a top-level `anyOf` that OpenAI's function-calling validator rejects — and since those tools only join the tool list for requests coming from a device that can ring a timer, the failure hit voice interactions while the chat box kept working, making it look intermittent. The schema is now flattened for OpenAI-family providers only, with the at-least-one constraint restated in the tool description so the model still knows not to send an empty timer call. Anthropic and Ollama keep the original schema untouched, and Gemini keeps its own existing rewrite. Credit to @hruba202 for finding and diagnosing the failure (his PR #545 is superseded by this release — his version removed the constraint for every provider).
+- **One malformed tool schema can no longer break OpenAI conversations.** Hardening from pre-release adversarial review: tool schemas arriving with a non-dict `properties` or a string-valued `required` (possible from third-party LLM APIs or stale store entries) are now skipped gracefully during the new flattening instead of raising mid-conversation, and flattening events are debug-logged so field reports of odd tool-calling on OpenAI-compatible backends are diagnosable.
+
 ## [3.28.0] - 2026-08-11
 
 ### Added
