@@ -101,6 +101,20 @@ Also: unknown action types fail closed (a future HA construct over-prompts rathe
 
 ---
 
+### Provider-gated schema normalisation vs mixed-provider fallback chains
+
+**What:** `_format_and_dedupe_tools` gates its subtractive schema passes (OpenAI top-level-union flatten, Gemini anyOf-required sanitizer) on the statically configured primary provider, but `FallbackChatModel.bind_tools` (`core/fallback.py`) binds the same formatted tool list to every model in the chain. In a mixed-provider chain (e.g. Ollama primary with an OpenAI fallback), runtime failover hands the un-flattened top-level `anyOf` to OpenAI and reproduces the `HassStartTimer` schema 400 — and `_is_retryable` does not classify schema 400s as chain-advance errors, so the turn hard-fails instead of falling through. Symmetric mild case: an OpenAI primary that fails over hands the lossy flattened schema to a union-capable fallback.
+
+**Why:** Found by red-team review during the v3.28.1 ship. The same latent pattern has existed for the Gemini sanitizer since v3.26.1 (#536); no field report yet, because it requires a mixed-provider chain plus (for the OpenAI leg) a timer-capable voice device. Fixing it properly is a `FallbackChatModel` restructuring, out of scope for the v3.28.1 fix.
+
+**How to apply:** Format tools per chain member — have `FallbackChatModel.bind_tools` re-run the provider-gated normalisation per member provider type (chain entries already carry provider entry ids), or bind provider-specific tool lists when building the chain. Minimum viable: extend `_is_retryable` to treat invalid-function-schema 400s as chain-advance errors.
+
+**Effort:** M
+**Priority:** P2
+**Depends on:** v3.28.1
+
+---
+
 ### Tool-name collision hardening for force-injection guard
 
 **What:** The step-3d injection guard and `_format_and_dedupe_tools` key on bare tool name. A remote (e.g. MCP) API exposing a tool named `add_automation` would suppress injection of the local tool and route automation YAML to the foreign tool (first-seen-wins dedupe predates v3.20.2). Consider `(api_id, name)` matching for the guard and explicit precedence in dedupe.
@@ -191,6 +205,32 @@ Also: unknown action types fail closed (a future HA construct over-prompts rathe
 
 **Effort:** S
 **Priority:** P3
+
+---
+
+### Generalize evidence-entity exclusion instead of per-rule constructor injection
+
+**What:** `CameraEntryUnsecuredRule` takes an `is_entity_excluded` callback so it can honor `sentinel_rule_entity_exclusions` for entities that live only in `evidence`. `_filter_excluded_findings` inspects `triggering_entities` only, so any other rule with the same shape has the same gap. `alarm_disarmed_external_threat.py` already does: it puts `alarm_entity_ids` (all disarmed panels) in evidence while `triggering_entities` carries only the primary panel and the camera, so a secondary excluded phantom panel still reaches the notification and the audit record.
+
+**Why:** Red-team finding on PR #544. The constructor-injection pattern does not generalize — every new rule with entity-bearing evidence has to remember to opt in, and the UI copy promises exclusion applies everywhere. A shared post-rule pass would make new rules inherit the behavior.
+
+**How to apply:** Add a scrub step in the engine between rule evaluation and `_filter_excluded_findings` that walks a registry of known entity-ID-bearing evidence keys (`unsecured_entities`, `unsecured_entity_areas`, `alarm_entity_ids`), drops excluded entities, and drops the whole finding when scrubbing empties the set. Then remove the per-rule callback. Watch the anomaly-id hash: `camera_entry_unsecured` hashes `unsecured_same_area`, so scrubbing at a different layer changes ids unless the hash input is taken pre-scrub.
+
+**Effort:** M
+**Priority:** P2
+
+---
+
+### Basic setup silently wipes Sentinel entity exclusions and camera entry links
+
+**What:** `async_step_basic_settings` does `data = _default_payload()` and its schema exposes only four fields, so re-running Basic setup resets `sentinel_rule_entity_exclusions` and `sentinel_camera_entry_links` to `{}`. The overwrite warning says settings will be overwritten with recommended defaults but does not name these two.
+
+**Why:** Pre-existing, but PR #544 changed the exposure: exclusions used to be an advanced-only JSON field, so the population that configured them and the population that runs Basic setup did not overlap. A friendly entity picker is exactly what a Basic-setup user will configure and then destroy, and the symptom — phantom alerts returning with no visible cause — is hard to attribute.
+
+**How to apply:** Carry `CONF_SENTINEL_RULE_ENTITY_EXCLUSIONS` and `CONF_SENTINEL_CAMERA_ENTRY_LINKS` over from `current.data` in the basic path, or name them explicitly in the `sentinel_overwrite_warning` string.
+
+**Effort:** S
+**Priority:** P2
 
 ---
 
