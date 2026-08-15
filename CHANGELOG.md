@@ -2,6 +2,37 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.30.2] - 2026-08-14
+
+### Fixed
+
+- **Frame captions can no longer invent a second person from the previous frame's text.** Field validation of v3.30.1 caught the last phantom-person channel: each frame's caption request includes the previous frame's description as motion context, and the captioner could describe the current frame's person as "another man ..." relative to that text — inventing a cross-frame distinction no single image can actually show. The batch summarizer then faithfully narrated two people ("A person stands on a porch ... while another man in dark shirt and light pants descends"), and the invented "another" also falsely tripped the single-person statement's contrast-cue veto, withholding the v3.30.1 fix exactly when it was needed. The captioner now describes each person from the current image alone, using the previous text for motion and continuity only; "another person" wording is reserved for a single image that itself shows two or more people at once.
+
+## [3.30.1] - 2026-08-14
+
+### Fixed
+
+- **One person no longer becomes two in the summary itself.** v3.30.0's identity merge fixed the identity-tag side of the phantom-person bug, but field validation caught the caption side: frames where no face was detectable (back turned, looking down at a phone) still got narrated as a second actor — "a person stands in an open doorway, then Lindo appears." When a batch's full face evidence proves exactly one enrolled person, the summary request now states that fact to the summarizer outright, overriding the prompt rule that previously turned faceless person-mentioning frames into an extra actor. Documented in Camera Entities → Batch Identity Consolidation.
+- The single-person statement is deliberately hard to earn, and it licenses attribution rather than denying plurality. It is decided over the batch's complete evidence — including frames whose scene analysis failed after face recognition succeeded, and frames beyond the summary's frame cap — and is withheld whenever anything suggests a second person: any unknown or second known face anywhere in the batch, any frame with two detected face boxes even when one embedding was unreadable, or any caption that affirmatively mentions multiple people (the camera's caption is the only sensor that can see a face-averted companion). Even when emitted, the statement only tells the summarizer who the lone person is — it never forbids narrating a second one — so a caption that genuinely describes two people, in wording or a language the vetoes don't recognize, remains narratable under the base rules — the design's worst-case failure is a mislabeled name rather than an erased companion. Person names that fail a strict character grammar are never interpolated into the summarizer instruction, and a name that passes is quoted inside a data tag, never spliced into the instruction prose.
+
+## [3.30.0] - 2026-08-13
+
+### Added
+
+- **One person no longer becomes two in camera notifications.** When someone walks through a camera's view, face recognition can identify them in some frames and return "Unknown Person" in others (face turned, motion blur, distance) — so summaries reported things like "Nico walks toward the entrance while an unknown person is present nearby" when only Nico was there. The video analyzer now consolidates identities within each batch: an "Unknown Person" face is renamed to the batch's known person, but only under strict conditions — exactly one known person appears in the batch, no frame shows two or more detected faces (a companion detected in the same frame always blocks the merge, including frames whose scene analysis failed after recognition succeeded), and the known person is the face's *nearest* enrolled match within a cosine distance of 0.85 (`VIDEO_ANALYZER_FACE_MERGE_THRESHOLD`). Anything short of all three keeps both identities. The merged result flows to summaries, notifications, `sensor.*_recognized_people`, and Sentinel evidence; Sentinel's unknown-person rules are unaffected by design, since they fire only when the camera's recognized list is empty — and a merge renames an existing entry, it never empties or fills the list. Documented in Camera Entities → Face Recognition, including a note for automations that key on the literal `"Unknown Person"` string.
+- **Merge decisions are observable and tunable.** Five per-camera counters in the hourly video-analyzer metrics report (`unknown_merged` plus four refusal reasons: same-frame co-occurrence, distance/nearest-match, multiple known names, and no-usable-lookup), with DEBUG logs carrying the measured distances. Face debug crops keep raw pre-merge names, so the threshold can be tuned from real data.
+
+### Fixed
+
+- **Face-recognition evidence now survives scene-analysis failures.** Frames whose VLM call timed out or was dropped by model-contention gates used to lose their face-recognition results entirely; the merge's companion guard now still sees them, so a two-person frame that failed scene analysis blocks the merge instead of blinding it.
+- **A malformed face-API response no longer discards a whole camera batch.** A face entry with a missing, wrong-sized, or non-finite embedding now degrades to "Indeterminate" for that face with a warning, instead of failing every frame in the batch.
+- **Reserved identity labels can no longer be enrolled as person names.** Enrolling someone as "Unknown Person", "Indeterminate", "None", or an empty name (in any casing) is refused, and gallery rows that already carry such names from older versions are never treated as a mergeable identity.
+
+### Changed
+
+- Identity-merge database lookups are bounded: five seconds per lookup and fifteen seconds per batch, degrading to a refusal instead of stalling the camera worker when the database is slow; after a database failure the remaining lookups in the batch are skipped.
+- The face-recognition match threshold (0.7) is now the named constant `FACE_RECOGNITION_THRESHOLD` in `person_gallery.py`.
+
 ## [3.29.1] - 2026-08-13
 
 ### Fixed

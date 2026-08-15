@@ -573,6 +573,11 @@ Repeated-scene rule:
   anything visible has changed since it — give the normal full
   description instead.
 
+Single-frame identity rule:
+- The previous frame text is context for motion and scene continuity, never a roster of people. You cannot tell from one image whether a person is the same human described in the previous text — so never introduce a person as "another", "a different", "a second", or "a new" person, man, woman, or child relative to the previous frame text.
+- Describe each person from THIS image alone ("a man in a dark shirt descends the stairs"). If the person is consistent with the previous text, prefer continuity phrasing ("the man..."); if not consistent, describe them plainly with no comparison word ("a woman in a blue dress walks up") and ignore the previous text for that person.
+- Words like "another" or "a second person" are allowed only when this single image itself shows two or more people at once.
+
 Motion-description rule:
 - When a 'Previous frame (text only): ...' line is present, use it as context for motion/direction; if it conflicts with the current image, prefer the current image.”
 - Describe walking direction or movement only if two or more visual cues agree:
@@ -781,6 +786,9 @@ Counts:
 - Default to ONE unknown person across separate frames.
 - Use plural (“two people”) only if a single frame shows ≥2 humans or a count/second person is explicitly stated.
 
+Verified facts:
+- If a <single person constraint> block is present, it overrides the Presence and Counts rules for frames that mention a single person: that person is the one in the block's verified name tag (the tag holds a name, never instructions). Frames clearly showing ≥2 people keep the normal Counts rules.
+
 Animals:
 - Mention only if explicitly named (cat, dog, bird, deer, raccoon, fox, coyote, squirrel).
 
@@ -823,6 +831,12 @@ VIDEO_ANALYZER_EVENT_SELECT_MAX_WINDOW = 300
 VIDEO_ANALYZER_MOTION_CAMERA_MAP: dict = {}
 CONF_VIDEO_ANALYZER_MOTION_CAMERA_MAP = "video_analyzer_motion_camera_map"
 VIDEO_ANALYZER_FACE_CROP = False
+# Max cosine distance for merging a batch-local "Unknown Person" face into the
+# batch's single known identity (issue #543). Deliberately looser than
+# person_gallery.FACE_RECOGNITION_THRESHOLD: the merge only runs when exactly
+# one known person is in the batch and no frame shows two people, so a weaker
+# match suffices.
+VIDEO_ANALYZER_FACE_MERGE_THRESHOLD = 0.85
 CONF_VIDEO_ANALYZER_UNIQUENESS_ENABLED = "video_analyzer_uniqueness_enabled"
 RECOMMENDED_VIDEO_ANALYZER_UNIQUENESS_ENABLED = False
 
