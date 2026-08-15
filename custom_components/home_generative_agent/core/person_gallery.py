@@ -125,6 +125,7 @@ class PersonGalleryDAO:
             dist = float(row["distance"])
             LOGGER.debug("Closest match=%s cosine_distance=%.6f", row["name"], dist)
             return row["name"] if dist < threshold else "Unknown Person"
+        return "Unknown Person"
 
     async def nearest_match(self, embedding: Embedding) -> tuple[str, float] | None:
         """
@@ -155,6 +156,7 @@ class PersonGalleryDAO:
             if not row or row["distance"] is None:
                 return None
             return (str(row["name"]), float(row["distance"]))
+        return None
 
     async def list_people(self) -> list[str]:
         """Return list of distinct enrolled person names."""
