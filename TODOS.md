@@ -95,9 +95,30 @@ Also: unknown action types fail closed (a future HA construct over-prompts rathe
 
 **How to apply:** On entry setup with `CONF_SCHEMA_FIRST_YAML` true, `adelete` the `hga_local::add_automation` store key and drop its content hash; or filter `add_automation` out of RAG results when schema-first is active.
 
+**Resolution:** The second option shipped structurally with #554's bind-time live-tool filter: in schema-first mode `add_automation` is excluded from `langchain_tools`, so `(hga_local, add_automation)` is not in the live set and the stale index row can never bind through RAG, safety, or the force-injection legs. The row itself still exists in the store (inert); physical deletion is folded into the "Tool index hygiene" eviction TODO.
+
 **Effort:** S
 **Priority:** P3
 **Depends on:** v3.20.2
+**Completed:** v3.30.4 (2026-08-15)
+
+---
+
+### Tool index hygiene: top-up cooldown, negative cache, stale-key eviction, delimiter-safe keys
+
+**What:** The per-turn index top-up (#554, v3.30.4) trusts configured LLM APIs. Four hygiene gaps deferred from that ship's review: (1) a hostile or buggy MCP server that rotates tool names forces embedding writes and index growth on every turn — no per-api cooldown or per-turn cap; (2) a live key that persistently fails to index (schema that can't serialize) retries every turn — cheap in-memory since the top-up sources from loaded API instances, but there is no negative cache; (3) index rows for removed APIs and renamed tools are inert (the bind-time live filter excludes them) but never evicted, so the store and `tool_content_hashes` grow monotonically; (4) composite index keys `f"{api_id}::{name}"` don't escape `::`, so `a` + `b::c` collides with `a::b` + `c` — retrieval re-validates the stored `name`/`api_id` fields against the live set, so a collision can shadow a legitimate row but not spoof one.
+
+**Why:** Security specialist + red team findings during the #554 ship review (2026-08-15). User decision: configured LLM APIs are inside the trust boundary (they already inject tool descriptions into the model context), so cap/cooldown machinery was deliberately deferred rather than added to the per-turn hot path.
+
+**How to apply:** Per-api_id top-up cooldown (skip delta if last top-up for that api was < N minutes ago and produced no new hashes); negative cache of keys that repeatedly fail to index, with a retry deadline; periodic eviction sweep deleting store rows whose keys have not been live for N days; delimiter-safe key encoding (escape `::` or hash the pair).
+
+Two adjacent gaps from the same review, same disposition (document + defer): (5) concurrent turns — while turn A's inline delta is writing, turn B from a *different* device-class short-circuits on `tool_indexing_in_progress` and proceeds without its own gated tools for that one turn (pre-fix behavior; self-heals on B's next turn); fixing needs per-key coordination or awaiting the active delta then recomputing. (6) a transient failure during the *startup* index run latches `tool_index_failed` until reload, which now also disables per-turn top-ups — startup deserves a retry/backoff instead of a one-shot latch.
+
+And two writer-consistency gaps: (7) `_mark_tool_index_stale` (embedding-provider switch) clears hashes with no generation/epoch guard, so an in-flight index write that completes after the switch marks old-provider rows current (and the background leg re-latches `tool_index_ready`), silently mixing embedding spaces until restart — pre-existing on the startup leg, window widened by the per-turn delta writer; fix wants a generation counter checked before `update()`/`ready=True`. (8) a partially-failed delta write commits zero hashes, so already-written chunks are re-embedded next turn — converges, but a per-chunk `(task, key)` commit would stop burning embedding quota under a flaky provider.
+
+**Effort:** M
+**Priority:** P3
+**Depends on:** v3.30.4
 
 ---
 
@@ -505,6 +526,20 @@ Also: unknown action types fail closed (a future HA construct over-prompts rathe
 ---
 
 ## Discovery
+
+### Sanitized candidate IDs can collide across distinct sensors
+
+**What:** `_strip_env_context_id_tokens` (discovery_semantic.py) folds occupancy/time-of-day tail tokens off environmental candidate IDs — not just `*_away`/`*_day`/`*_night` but the full `_ENV_CONTEXT_ID_TOKENS` set (`home`, `daytime`, `nighttime`, `occupied`, `unoccupied`, `overnight`, `present`, …) plus dangling connectives, so e.g. `..._deviation_home` and `..._deviation_away` both collapse to `..._deviation` — so two candidates with different sensors (distinct semantic keys, both stored) can converge on one `candidate_id`; `discovery_store.find_candidate` returns the newest match and `proposal_store` lookups are ID-keyed, so promoting one card could resolve to the other candidate or report a false existing-rule collision (Codex adversarial, env-context-sanitizer ship 2026-08-15).
+
+**Why:** Pre-existing hazard class — the LLM itself reuses generic IDs across cycles (a stored draft literally carries `candidate_id: "c1"`) — and `find_candidate`'s newest-first order resolves to the card the user most recently saw, so the sanitizer only widens the window slightly. Not worth blocking the ship; worth closing structurally.
+
+**How to apply:** Batch-level guard in `_filter_novel_candidates` (revert the ID strip when the sanitized ID would collide with a different semantic key in the same batch), plus make `find_candidate`/promote verify the semantic key when both a candidate_id and key are known.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** —
+
+---
 
 ### Domainless legacy battery object-IDs register rules the candidate key never covers
 

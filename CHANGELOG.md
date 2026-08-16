@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.30.4] - 2026-08-15
+
+### Fixed
+
+- **Voice satellites can set timers now.** "Set a timer for two minutes" used to make the agent cancel zero timers and then claim it cannot set timers at all — on every timer-capable satellite (HA Voice PE, ESPHome satellites), on the very first try. Home Assistant exposes the seven real timer tools (`HassStartTimer`, `HassCancelTimer`, …) only to requests from timer-capable devices, but the retrieval index was built once at startup with no device, so those tools could never enter it and never be retrieved — the model saw exactly one timer-shaped tool, the unconditionally exposed `HassCancelAllTimers`, and used it. The index now reconciles with the live tool set every turn: a cheap key comparison detects live tools the index has never seen, and any gap is indexed inline — sourced from the APIs already loaded for the turn, no second network round trip — before retrieval runs, so `HassStartTimer` is retrievable on the triggering turn itself (selection still follows normal relevance ranking). Turns where nothing is missing cost one set comparison, no discovery calls, no store writes. A failed top-up write never disables the index: the existing index keeps serving and the next turn retries automatically. (#554)
+- **Tools of a configured-but-failed LLM API are no longer offered to the model.** The same reconciliation gap had a mirror image: when an MCP server failed to load for a turn, its tools were still retrieved from the index and bound, and every call died at dispatch with "API not available". Retrieval candidates — including the `GetLiveContext` and `add_automation` force-injections — are now filtered against the tools actually loaded this turn, which also keeps device-gated tools indexed by one device (satellite timer tools) from binding in another context that doesn't have them (browser chat). PIN-confirmation injection is deliberately exempt. (#554)
+- **The Tool Index sensor stays truthful under per-turn reconciliation.** It reports the cumulative indexed total rather than the last batch size, returns to `ready` even when a top-up write fails mid-turn, and a stalled write gives up after 30 seconds instead of hanging the voice turn. One tool with an unserializable schema no longer blocks its API's other tools from being indexed, and phantom speech-to-text turns (background noise) never trigger index writes. (#554)
+
+## [3.30.3] - 2026-08-15
+
+### Fixed
+
+- **Environmental discovery proposals no longer advertise occupancy or time-of-day conditioning the rule doesn't have.** Field validation caught the discovery model decorating every environmental statistical candidate with context the prompt explicitly bans ("Garage Temperature Statistical Deviation While Away During Day", "iPhone Pressure Baseline Deviation During Daytime Home"): the rule that Approve activates was always the context-free baseline detector, but the approval card showed the decorated title, summary, and evidence — and approving would mint a rule permanently named `..._away_day`. Candidates are now sanitized deterministically at ingestion and again at the promote, approve, and preview boundaries (so candidates stored before this fix can't mint decorated drafts): occupancy/night evidence paths come off in every spelling the canonical parser recognizes, pure-decoration clauses and parentheticals are removed from prose while substantive wording ("home temperature", "Home Assistant", "the 7-day average") always survives, trailing context tokens are dropped from the ID that seeds the rule name, and a sanitized candidate must derive exactly the same dedup key as the original or the change is reverted wholesale. Candidates with numeric-threshold prose — whose night/occupancy conditions are real rule parameters — pass through untouched, hostile oversized prose can no longer stall Home Assistant in the stripping pass, and the honesty guards that drop hallucinated-entity candidates still judge the model's original output.
+
 ## [3.30.2] - 2026-08-14
 
 ### Fixed
