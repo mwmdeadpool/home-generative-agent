@@ -307,6 +307,37 @@ def _has_real_subject(normalized: str, recognized_names: list[str]) -> bool:
 # pipeline without leaking the raw error text into user-facing output.
 _PERSON_FALLBACK_CAPTION = "A person is present; scene analysis unavailable."
 
+# Neutral stand-in caption for a repeated-scene sentinel frame that face
+# recognition proved holds a person. The frame is kept so the detection is not
+# erased, but "Scene unchanged." is a control reply, not scene content: handed
+# to the summarizer as a frame description it produced "A man in a gray shirt
+# walks out of an open door onto the porch, then stands still as Lindo"
+# (field report 2026-08-17, camera.playroomdoor).
+#
+# The caption must CONTINUE the subject, never introduce one. The first
+# stand-in here read "A person is present." — an indefinite introduction — and
+# the summarizer, obliged by the Chronology rule to narrate every frame in
+# order, read a bare presence assertion arriving after an earlier frame as
+# somebody new turning up: "A man in a dark shirt stands on the porch at dusk,
+# then remains there as a person becomes visible nearby" (field report
+# 2026-08-18, camera.backyard, one human in frame). Same failure family as the
+# sentinel leak itself — evidence in the prompt that no frame ever held — and
+# the summary prompt's introduce-once rule cannot undo it, because that rule
+# governs the model's OUTPUT while this text is its INPUT.
+#
+# So the wording is load-bearing on three counts, each measured against the
+# live summarizer (temperature 0.2, n=10, real prompts):
+#   * "the same person" continues the subject, so no second actor appears
+#     (2/10 clean before, 10/10 after);
+#   * it still ASSERTS presence, so the detection survives when the VLM missed
+#     the person entirely — a scene-only phrasing ("The same scene continues.")
+#     dropped the person from the summary 3/10 when recognition had no name,
+#     which is the erasure this whole branch exists to prevent;
+#   * it keeps a word _HUMAN_TERM_RE matches, so _pick_notify_frame can still
+#     choose this frame's snapshot as the notification image.
+# It claims no motion, since the sentinel means the VLM reported no change.
+_PERSON_SENTINEL_CAPTION = "The same person remains in view."
+
 # Word-bounded human terms (singular + plural) for notify-frame selection.
 # has_human_terms does bare substring matching ("man" hits "manicured lawn")
 # and counts negated phrases ("no people visible") — good enough for subject
@@ -584,7 +615,10 @@ def _single_person_constraint(
         "this footage. Treat every frame description that mentions a single "
         "person as describing that named person; do not narrate those "
         "frames as different people or add an unknown person alongside "
-        "them. Only mention additional people if a frame description "
+        "them. Introduce that person by the verified name at their first "
+        "mention and continue with the same subject afterwards, so no "
+        "frame reintroduces them as “a person”. Only mention "
+        "additional people if a frame description "
         "clearly describes two or more people at once, or explicitly "
         "describes a different or additional person.\n"
         "</single person constraint>"
@@ -690,6 +724,10 @@ class VideoAnalyzer:
         self.entry = entry
         self._snapshot_queues: dict[str, asyncio.Queue[_SnapshotItem]] = {}
         self._retention_deques: dict[str, deque[Path]] = {}
+        # One-way latch set by stop(). An instance belongs to exactly one
+        # config-entry setup, so once it has been stopped it must never run
+        # again - see the note in start().
+        self._stopped = False
         # One-shot startup task that folds pre-restart files into retention.
         self._retention_seed_task: asyncio.Task[None] | None = None
         self._active_queue_tasks: dict[str, asyncio.Task[Any]] = {}
@@ -988,9 +1026,17 @@ class VideoAnalyzer:
                 # that full description — a sentinel carries no scene content
                 # for later frames to be compared against — and drop the
                 # frame from the summary input, unless face recognition
-                # caught an actual person the VLM missed.
+                # caught an actual person the VLM missed. Keep that frame
+                # under a neutral caption, never the sentinel text: "Scene
+                # unchanged." is a control reply carrying no scene content,
+                # and the summarizer must narrate the person it is told is
+                # there — given the sentinel verbatim it wrote "then stands
+                # still as Lindo" (field report 2026-08-17). Same reason the
+                # empty/error path above substitutes a caption.
                 if _has_detected_person(faces):
-                    frame_descriptions.append(entry)
+                    frame_descriptions.append(
+                        {f"t+{ts - t0}s. {_PERSON_SENTINEL_CAPTION}": faces}
+                    )
                     frame_hits.append(hits)
                     frame_paths.append(path)
                 else:
@@ -2837,6 +2883,19 @@ class VideoAnalyzer:
 
     def start(self) -> None:
         """Start the video analyzer."""
+        # A deferred start can still be in flight when the entry unloads.
+        # async_unload_entry() calls stop() and then awaits several more
+        # times, and Home Assistant runs the entry's on-unload callbacks
+        # only after it returns - so EVENT_HOMEASSISTANT_STARTED landing in
+        # one of those windows would resurrect this instance moments before
+        # HA deletes its runtime_data, leaving a live capture loop and a
+        # retention deque with deletion power over the replacement entry's
+        # snapshot files. The listener cancel cannot close that window; the
+        # latch can, because it is checked here rather than at dispatch.
+        if self._stopped:
+            LOGGER.debug("VideoAnalyzer stopped; refusing to start.")
+            return
+
         if hasattr(self, "_cancel_track"):
             LOGGER.warning("VideoAnalyzer already started.")
             return
@@ -2906,6 +2965,11 @@ class VideoAnalyzer:
 
     async def stop(self) -> None:
         """Stop the video analyzer."""
+        # Latch before the not-started early return, not after: the entry
+        # that never started is exactly the one whose deferred start is
+        # still armed.
+        self._stopped = True
+
         if not hasattr(self, "_cancel_track"):
             LOGGER.warning("VideoAnalyzer not started.")
             return
