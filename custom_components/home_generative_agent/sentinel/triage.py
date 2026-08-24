@@ -10,7 +10,8 @@ Design constraints (from sentinel_plan.md §6, §7)
   - Always included: ``type``, ``severity``, ``confidence``,
     ``is_sensitive``, ``entity_count``, ``suggested_actions_count``.
   - Optional sanitised evidence (when present in the finding):
-    ``is_night``, ``anyone_home``, ``recognized_people_count``,
+    ``is_night``, ``anyone_home``, ``recognized_people_count`` (enrolled
+    identities only), ``unknown_person_present``,
     ``last_changed_age_seconds``.
   - **Never** included: raw entity state values, attribute strings, area
     names, or free-form evidence text.
@@ -34,21 +35,21 @@ from typing import TYPE_CHECKING, Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from custom_components.home_generative_agent.core.utils import (
+from ..core.utils import (
     SENTINEL_ADMISSION_TIMEOUT_S,
     SentinelLLMDeferredError,
     extract_final,
     run_sentinel_model_call,
 )
-from custom_components.home_generative_agent.sentinel.logging_utils import (
-    RepeatingLogLimiter,
+from .logging_utils import RepeatingLogLimiter
+from .models import (
+    enrolled_people,
+    has_unknown_person,
 )
 
 if TYPE_CHECKING:
-    from custom_components.home_generative_agent.sentinel.models import AnomalyFinding
-    from custom_components.home_generative_agent.snapshot.schema import (
-        FullStateSnapshot,
-    )
+    from ..snapshot.schema import FullStateSnapshot
+    from .models import AnomalyFinding
 
 LOGGER = logging.getLogger(__name__)
 _PARSE_LOG_LIMITER = RepeatingLogLimiter(LOGGER)
@@ -74,6 +75,7 @@ _ALLOWED_EVIDENCE_KEYS: frozenset[str] = frozenset(
         "is_night",
         "anyone_home",
         "recognized_people_count",
+        "unknown_person_present",
         "last_changed_age_seconds",
     }
 )
@@ -254,10 +256,19 @@ def _build_prompt(
     if anyone_home is not None:
         evidence_items.append(f"anyone_home: {anyone_home}")
 
-    # recognized_people_count — count only, never names.
+    # recognized_people_count — count only, never names. Count ENROLLED
+    # identities only: the raw list carries reserved pipeline labels, and an
+    # unknown-person finding always contains "Unknown Person" — counting it
+    # would tell the triage LLM a known person was recognized and invite it
+    # to suppress the exact stranger alert the finding exists for. The
+    # stranger signal is surfaced explicitly instead.
     people = raw_evidence.get("recognized_people")
     if isinstance(people, list):
-        evidence_items.append(f"recognized_people_count: {len(people)}")
+        evidence_items.append(
+            f"recognized_people_count: {len(enrolled_people(people))}"
+        )
+        if has_unknown_person(people):
+            evidence_items.append("unknown_person_present: true")
 
     # last_changed_age_seconds — derived elapsed time, not raw timestamp.
     if "last_changed_age_seconds" in raw_evidence:

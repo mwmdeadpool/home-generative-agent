@@ -2,6 +2,43 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.31.1] - 2026-08-23
+
+### Fixed
+
+- **Baseline anomaly notifications no longer describe every sensor as a power appliance.** A humidity, temperature, or other non-power sensor watched by a `baseline_deviation` / `time_of_day_anomaly` rule used to alert as "power higher than expected … Check appliance." It now renders the sensor's own reading with its real unit — e.g. "Playroom Attic Humidity: 65.0% vs usual 49.2% (32% above normal). Worth checking." — with a matching subtitle in English and Czech. Power and energy sensors keep the appliance wording, including sensors that only reveal their power class through their unit (kWh under an exotic device class).
+- **Day-of-week time-of-day alerts show the actual readings again.** These findings stored their comparison value under a different evidence key, so the notification always fell back to a value-less "power N% above normal" line; they now show current-vs-expected values like every other baseline alert.
+- **A single bad sensor reading can no longer silently break anomaly detection for an entity.** `nan`/`inf` sensor states are rejected at baseline ingestion, previously poisoned stored averages self-heal on the next update instead of propagating forever, and notification rendering degrades gracefully instead of crashing the Sentinel run loop.
+- **Explanations no longer claim a near-zero thermometer "is not drawing power."** The LLM explanation guidance for near-zero readings is now conditioned on instantaneous power sensors: the model is instructed never to describe cumulative energy counters (which reset) as "off" and to use neutral "reading is near zero" phrasing for other sensor types. (Prompt guidance, not output validation — the explanation remains model prose.)
+- **Notification copy hardening.** The sensor unit shown in mobile alerts is length-capped and stripped of control/bidi characters before rendering, closing a text-spoofing vector via crafted `unit_of_measurement` attributes.
+
+## [3.31.0] - 2026-08-23
+
+### Added
+
+- **Sentinel notifications now speak your Home Assistant language.** The fixed parts of every Sentinel notification — the title (`Security Alert` / `Home Alert` / `Home Update`), the subtitle, finding-type labels, the burst-batch summary, the daily digest, and the permanent-snooze confirmation prompt — now follow the Home Assistant server language (**Settings → System → General**), currently in English and Czech with automatic fallback to English. This is independent of the `sentinel_response_language` option, which only affects the LLM-written explanation text. The deterministic security message bodies deliberately stay English: they quote exact cameras, entries, and times that a translation could blur. Contributed by [@hruba202](https://github.com/hruba202) ([#565](https://github.com/goruck/home-generative-agent/pull/565)).
+
+### Fixed
+
+- **Notification delivery can no longer be broken by unexpected stored data.** The daily digest now tolerates malformed audit records and findings with a missing severity, and a bad placeholder in any localized string degrades gracefully to the English text instead of raising on the alert path.
+
+## [3.30.11] - 2026-08-22
+
+### Fixed
+
+- **Sentinel's unknown-person rules now actually alert on strangers.** `unknown_person_camera_no_home`, `unknown_person_camera_night_home`, `alarm_disarmed_during_external_threat`, and the two dynamic unknown-person templates had never fired on face-recognition installs: they treated any non-empty recognition list as "a known person is here", but face recognition always leaves labels in that list — including "Unknown Person" itself, so a real stranger suppressed the very alert meant to catch them. The rules now fire on a positive "Unknown Person" sighting.
+- **A misconfigured camera can no longer silently disable Sentinel.** A timezone-naive timestamp from a third-party camera attribute could crash the evaluation loop until the integration was reloaded; timestamps are now normalized safely, and a timestamp more than two minutes in the future no longer counts as a fresh sighting.
+- **Stranger notifications say what was seen.** The alarm-disarmed alert now reads "saw an unrecognized person" instead of the vague "detected unrecognized outdoor activity", and privacy redaction no longer rewrites "an unknown person was seen" into "a recognised person was seen" — only enrolled residents' names are redacted.
+
+### Changed
+
+- **Unknown-person alerts require face recognition.** These rules key on face recognition's "Unknown Person" label; unless face recognition is enabled (the `face_recognition` option, off by default) with a configured face-service they do not fire — use the `motion_detected_*` discovery templates for motion-based intrusion alerts instead (see docs/sentinel.md).
+- **Alerts fire only on fresh, unaccompanied sightings.** A sighting must be within 10 minutes of the detection cycle (so one old sighting can't re-alert for hours), freshness is judged by the recognition event itself rather than camera motion a pet can refresh, and a stranger recognized alongside an enrolled resident is treated as an accompanied guest rather than an intruder.
+
+### Added
+
+- **Camera analysis results wake Sentinel immediately.** A completed camera analysis (which is when recognition labels can change) now triggers an evaluation cycle, so a stranger sighting is checked while it is still fresh even on installs with a long polling interval.
+
 ## [3.30.10] - 2026-08-21
 
 ### Changed
