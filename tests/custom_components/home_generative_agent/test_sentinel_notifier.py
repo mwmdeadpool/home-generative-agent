@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -27,11 +28,13 @@ from custom_components.home_generative_agent.sentinel.notifier import (
     _alarm_disarmed_mobile_message,
     _alarm_disarmed_open_entry_mobile_message,
     _appliance_power_duration_mobile_message,
+    _baseline_deviation_mobile_message,
     _build_actions,
     _build_subtitle,
     _display_type,
     _entity_staleness_mobile_message,
     _friendly_type,
+    _is_power_class_evidence,
     _mobile_message,
     _redact_if_sensitive,
 )
@@ -75,6 +78,10 @@ class DummyHass:
     def __init__(self) -> None:
         self.services = DummyServices()
         self.bus = DummyBus()
+        # Real HomeAssistant objects always carry a config with a language;
+        # model that here so notifier tests exercise the normal language
+        # resolution path (cs tests override .language after construction).
+        self.config = SimpleNamespace(language="en")
         self._pending_tasks: list[asyncio.Task[Any]] = []
 
     def async_create_task(self, coro: Any) -> asyncio.Task[Any]:
@@ -401,6 +408,38 @@ def test_no_redaction_when_no_recognized_people() -> None:
     result = _redact_if_sensitive(explanation, finding)
 
     assert result == explanation
+
+
+def test_redact_if_sensitive_ignores_unknown_person_label() -> None:
+    """
+    The reserved 'Unknown Person' label must never be redacted.
+
+    Unknown-person findings now carry ['Unknown Person'] in evidence;
+    substituting it would rewrite 'an unknown person was seen' into
+    'a recognised person was seen', inverting the security meaning.
+    """
+    finding = _finding(is_sensitive=True, recognized_people=["Unknown Person"])
+    explanation = "An unknown person was seen in the backyard."
+
+    result = _redact_if_sensitive(explanation, finding)
+
+    assert result == explanation
+
+
+def test_redact_if_sensitive_ignores_reserved_labels_but_redacts_names() -> None:
+    """Reserved labels pass through while enrolled names are still redacted."""
+    finding = _finding(
+        is_sensitive=True,
+        recognized_people=["Indeterminate", "Unknown Person", "John Doe"],
+    )
+    explanation = "John Doe stood near an unknown person."
+
+    result = _redact_if_sensitive(explanation, finding)
+
+    assert result is not None
+    assert "John Doe" not in result
+    assert "unknown person" in result
+    assert "a recognised person" in result
 
 
 @pytest.mark.asyncio
@@ -1050,7 +1089,13 @@ def test_alarm_disarmed_mobile_message_full_evidence() -> None:
 
 
 def test_alarm_disarmed_mobile_message_missing_timestamps() -> None:
-    """Missing timestamps fall back to 'reported' verb and 'currently disarmed'."""
+    """
+    Missing timestamps drop the age phrase and say 'currently disarmed'.
+
+    Newly generated findings always carry a numeric age (the rule's freshness
+    gate guarantees it), but findings persisted before that gate existed can
+    still re-render through this branch.
+    """
     ev: dict[str, Any] = {
         "camera_friendly_name": "Front Door",
         "camera_entity_id": "camera.front_door",
@@ -1059,9 +1104,9 @@ def test_alarm_disarmed_mobile_message_missing_timestamps() -> None:
     }
     msg = _alarm_disarmed_mobile_message(_alarm_finding(evidence=ev))
     assert "Front Door" in msg
-    assert "reported" in msg
+    assert "unrecognized person" in msg
+    assert "min ago" not in msg
     assert "currently disarmed" in msg
-    assert "recently" not in msg
     assert len(msg) <= MAX_MOBILE_MESSAGE_CHARS
 
 
@@ -1969,3 +2014,482 @@ async def test_held_batch_stores_redacted_explanation() -> None:
     assert held_explanation is not None
     assert "John Doe" not in held_explanation
     assert "a recognised person" in held_explanation
+
+
+# ---------------------------------------------------------------------------
+# 22. Localized notification chrome (PR #565)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_async_notify_czech_title_and_subtitle() -> None:
+    """
+    A cs-configured hass produces Czech title and type-label subtitle.
+
+    This is the only test shape that fails if the hass threading is dropped
+    at a call site (every localized helper defaults hass=None → English).
+    """
+    options = {CONF_NOTIFY_SERVICE: "notify.mobile_app_phone"}
+    notifier, hass, _suppression, _action_handler = _make_notifier(options)
+    hass.config.language = "cs"
+    snapshot = _minimal_snapshot()
+    finding = _finding_with_severity(
+        "high", anomaly_id="cs1", ftype="unlocked_lock_at_night"
+    )
+
+    await notifier.async_notify(finding, snapshot, None)  # type: ignore[arg-type]
+
+    assert len(hass.services.calls) == 1
+    call = hass.services.calls[0]
+    assert call["data"]["title"] == "Bezpečnostní výstraha"
+    assert call["data"]["data"]["subtitle"] == "Zámek ponechán odemčený"
+
+
+@pytest.mark.asyncio
+async def test_security_body_stays_english_under_czech_hass() -> None:
+    """
+    Deterministic security copy is never localized (PR #531 invariant).
+
+    Even against the new vector — hass itself Czech-configured — the body
+    stays English, while the chrome (title) around it IS Czech in the same
+    dispatch.
+    """
+    options = {
+        CONF_NOTIFY_SERVICE: "notify.mobile_app_phone",
+        CONF_SENTINEL_RESPONSE_LANGUAGE: "Czech",
+    }
+    notifier, hass, _suppression, _action_handler = _make_notifier(options)
+    hass.config.language = "cs"
+    snapshot = _minimal_snapshot()
+    finding = _alarm_finding(
+        anomaly_id="cssec1",
+        evidence={
+            "camera_friendly_name": "Backyard",
+            "camera_activity_age_minutes": 2.0,
+            "alarm_last_changed": None,
+        },
+    )
+    explanation = "Alarm byl vypnut, zatímco je někdo stále uvnitř."
+
+    await notifier.async_notify(finding, snapshot, explanation)  # type: ignore[arg-type]
+
+    assert len(hass.services.calls) == 1
+    call = hass.services.calls[0]
+    # Chrome is Czech (alarm finding is low severity → low title).
+    assert call["data"]["title"] == "Novinka z domova"
+    # Body keeps the exact English deterministic security copy.
+    body: str = call["data"]["message"]
+    assert body != explanation
+    assert "Backyard" in body
+    assert "stále uvnitř" not in body
+
+
+@pytest.mark.asyncio
+async def test_flush_batch_czech_title_and_type_label() -> None:
+    """Batch summary title and type labels localize under a cs hass."""
+    options = {CONF_NOTIFY_SERVICE: "notify.mobile_app_phone"}
+    notifier, hass, _suppression, _action_handler = _make_notifier(options)
+    hass.config.language = "cs"
+    finding = _finding_with_severity(
+        "low", anomaly_id="csflush1", ftype="motion_detected_while_away"
+    )
+    notifier._held_batch.append((finding, "Some message", "notify.mobile_app_phone"))
+
+    notifier._async_flush_batch()
+    await hass.drain_tasks()
+
+    assert len(hass.services.calls) == 1
+    call = hass.services.calls[0]
+    assert call["data"]["title"] == "Novinka z domova"
+    assert "Pohyb v nepřítomnosti" in call["data"]["message"]
+
+
+@pytest.mark.asyncio
+async def test_daily_digest_czech_title_and_severity_words() -> None:
+    """Digest title and severity words localize under a cs hass."""
+    from homeassistant.util import dt as dt_util
+
+    now_iso = dt_util.utcnow().isoformat()
+    records = [
+        _notified_record(now_iso, severity="high"),
+        _notified_record(now_iso, severity="low"),
+    ]
+    notifier, hass, _store = _make_digest_notifier(records=records)
+    hass.config.language = "cs"
+
+    await notifier._async_run_daily_digest()
+
+    assert len(hass.services.calls) == 1
+    call = hass.services.calls[0]
+    assert call["data"]["title"] == "Denní přehled Sentinelu"
+    msg: str = call["data"]["message"]
+    assert "vysoká" in msg
+    assert "nízká" in msg
+    assert "za posledních 24 h" in msg
+
+
+@pytest.mark.asyncio
+async def test_snooze_confirmation_czech() -> None:
+    """The permanent-snooze confirmation localizes title, message, and label."""
+    options = {CONF_NOTIFY_SERVICE: "notify.mobile_app_phone"}
+    notifier, hass, _suppression, action_handler = _make_notifier(options)
+    hass.config.language = "cs"
+    finding = _finding(anomaly_id="cssnooze1")
+    action_handler.register_finding(finding)
+
+    await notifier._handle_snooze(ACT_SNOOZE_ALWAYS, "cssnooze1")
+
+    assert len(hass.services.calls) == 1
+    call = hass.services.calls[0]
+    assert call["data"]["title"] == "Potvrdit trvalé ztlumení"
+    # The friendly type label inside the message is Czech too.
+    assert "Otevřený vstup v nepřítomnosti" in call["data"]["message"]
+
+
+@pytest.mark.asyncio
+async def test_unknown_severity_falls_back_to_medium_title() -> None:
+    """An unrecognized severity maps to the medium title in both languages."""
+    options = {CONF_NOTIFY_SERVICE: "notify.mobile_app_phone"}
+    for language, expected in (("en", "Home Alert"), ("cs", "Upozornění z domova")):
+        notifier, hass, _suppression, _action_handler = _make_notifier(options)
+        hass.config.language = language
+        snapshot = _minimal_snapshot()
+        finding = _finding_with_severity("critical", anomaly_id=f"sevx-{language}")
+
+        await notifier.async_notify(finding, snapshot, "msg")  # type: ignore[arg-type]
+
+        assert hass.services.calls[0]["data"]["title"] == expected
+
+
+@pytest.mark.asyncio
+async def test_daily_digest_survives_malformed_records() -> None:
+    """A null/non-dict finding or None severity must not kill the digest."""
+    from homeassistant.util import dt as dt_util
+
+    now_iso = dt_util.utcnow().isoformat()
+    records = [
+        _notified_record(now_iso, severity="high"),
+        {
+            "suppression_reason_code": "not_suppressed",
+            "finding": None,
+            "notification": {"notified_at": now_iso},
+        },
+        {
+            "suppression_reason_code": "not_suppressed",
+            "finding": "corrupt",
+            "notification": {"notified_at": now_iso},
+        },
+        {
+            "suppression_reason_code": "not_suppressed",
+            "finding": {"severity": None},
+            "notification": {"notified_at": now_iso},
+        },
+    ]
+    notifier, hass, _store = _make_digest_notifier(records=records)
+
+    await notifier._async_run_daily_digest()
+
+    assert len(hass.services.calls) == 1
+    msg: str = hass.services.calls[0]["data"]["message"]
+    assert "4 alerts" in msg
+    assert "3 unknown" in msg
+
+
+@pytest.mark.asyncio
+async def test_daily_digest_never_treats_stored_severity_as_message_key() -> None:
+    """
+    A corrupted severity colliding with a message id must render verbatim.
+
+    Routing stored data through notif_msg as a key would surface unrelated
+    copy (e.g. the action-hint sentence) inside the digest summary.
+    """
+    from homeassistant.util import dt as dt_util
+
+    now_iso = dt_util.utcnow().isoformat()
+    records = [_notified_record(now_iso, severity="action_hint_high")]
+    notifier, hass, _store = _make_digest_notifier(records=records)
+
+    await notifier._async_run_daily_digest()
+
+    msg: str = hass.services.calls[0]["data"]["message"]
+    assert "1 action_hint_high" in msg
+    assert "Urgent" not in msg
+
+
+def test_persistent_fallback_localizes_severity_word() -> None:
+    """The persistent fallback renders the localized severity word, not raw."""
+    finding = _finding(anomaly_id="persloc1")  # medium severity
+    cs_hass = SimpleNamespace(config=SimpleNamespace(language="cs"))
+    msg = _notifier_mod._persistent_message(None, finding, cs_hass)  # type: ignore[arg-type]
+    assert "závažnost střední" in msg
+    en_msg = _notifier_mod._persistent_message(None, finding, None)
+    assert "(severity medium)" in en_msg
+
+
+# ---------------------------------------------------------------------------
+# baseline_deviation / time_of_day_anomaly — metric-aware copy
+# ---------------------------------------------------------------------------
+
+
+def _baseline_finding(
+    evidence: dict[str, Any],
+    anomaly_type: str = "baseline_deviation",
+) -> AnomalyFinding:
+    return AnomalyFinding(
+        anomaly_id="bl1",
+        type=anomaly_type,
+        severity="low",
+        confidence=0.7,
+        triggering_entities=[str(evidence.get("entity_id") or "sensor.x")],
+        evidence=evidence,
+        suggested_actions=[],
+        is_sensitive=False,
+    )
+
+
+def _humidity_evidence(**overrides: Any) -> dict[str, Any]:
+    ev: dict[str, Any] = {
+        "template_id": "baseline_deviation",
+        "entity_id": "sensor.playroom_attic_humidity",
+        "friendly_name": "Playroom Attic Humidity",
+        "unit_of_measurement": "%",
+        "device_class": "humidity",
+        "current_value": 65.0,
+        "baseline_value": 49.2,
+        "deviation_pct": 32.0,
+        "deviation_direction": "above",
+    }
+    ev.update(overrides)
+    return ev
+
+
+def _power_evidence(**overrides: Any) -> dict[str, Any]:
+    ev: dict[str, Any] = {
+        "template_id": "baseline_deviation",
+        "entity_id": "sensor.dishwasher_power",
+        "friendly_name": "Dishwasher Power",
+        "unit_of_measurement": "W",
+        "device_class": "power",
+        "current_value": 1200.0,
+        "baseline_value": 400.0,
+        "deviation_pct": 200.0,
+        "deviation_direction": "above",
+    }
+    ev.update(overrides)
+    return ev
+
+
+def test_baseline_mobile_message_humidity_never_says_power() -> None:
+    """A humidity finding renders its unit and neutral copy, not power wording."""
+    finding = _baseline_finding(_humidity_evidence())
+    msg = _baseline_deviation_mobile_message(finding)
+    assert "power" not in msg.lower()
+    assert "Check appliance" not in msg
+    assert "65.0% vs usual 49.2%" in msg
+    assert "(32% above normal)" in msg
+    assert len(msg) <= MAX_MOBILE_MESSAGE_CHARS
+
+
+def test_baseline_mobile_message_power_copy_unchanged() -> None:
+    """Power findings keep the appliance wording and W unit."""
+    finding = _baseline_finding(_power_evidence())
+    msg = _baseline_deviation_mobile_message(finding)
+    assert "1200.0W vs usual 400.0W" in msg
+    assert "Check appliance." in msg
+
+
+def test_baseline_mobile_message_dow_expected_value_renders_values() -> None:
+    """
+    DOW time_of_day_anomaly findings carry expected_value, not baseline_value.
+
+    Regression: these previously fell through to the value-less
+    "power N% above normal" fallback for every sensor class.
+    """
+    ev = _humidity_evidence(template_id="time_of_day_anomaly")
+    del ev["baseline_value"]
+    ev["expected_value"] = 49.2
+    finding = _baseline_finding(ev, anomaly_type="time_of_day_anomaly")
+    msg = _baseline_deviation_mobile_message(finding)
+    assert "65.0% vs usual 49.2%" in msg
+    assert "power" not in msg.lower()
+
+
+def test_baseline_mobile_message_valueless_fallback_is_metric_aware() -> None:
+    """Without any comparison value, non-power copy says reading, not power."""
+    ev = _humidity_evidence()
+    del ev["baseline_value"]
+    del ev["current_value"]
+    finding = _baseline_finding(ev)
+    msg = _baseline_deviation_mobile_message(finding)
+    assert msg == "Playroom Attic Humidity reading 32% above normal. Worth checking."
+
+    ev_power = _power_evidence()
+    del ev_power["baseline_value"]
+    del ev_power["current_value"]
+    msg_power = _baseline_deviation_mobile_message(_baseline_finding(ev_power))
+    assert "power 200% above normal. Check appliance." in msg_power
+
+
+def test_baseline_mobile_message_legacy_evidence_keeps_power_copy() -> None:
+    """
+    Findings persisted before unit/device_class were captured still render.
+
+    The entity_id substring heuristic preserves the historical power wording
+    and inferred W unit for power entities.
+    """
+    ev = _power_evidence()
+    del ev["unit_of_measurement"]
+    del ev["device_class"]
+    finding = _baseline_finding(ev)
+    msg = _baseline_deviation_mobile_message(finding)
+    assert "1200.0W vs usual 400.0W" in msg
+    assert "Check appliance." in msg
+
+
+def test_baseline_mobile_message_legacy_non_power_evidence_is_neutral() -> None:
+    """Legacy findings for non-power entities render unitless neutral copy."""
+    ev = _humidity_evidence()
+    del ev["unit_of_measurement"]
+    del ev["device_class"]
+    finding = _baseline_finding(ev)
+    msg = _baseline_deviation_mobile_message(finding)
+    assert "power" not in msg.lower()
+    assert "65.0 vs usual 49.2" in msg
+
+
+def test_baseline_subtitle_humidity_says_reading() -> None:
+    """Non-power baseline findings get the reading-deviation subtitle."""
+    finding = _baseline_finding(_humidity_evidence())
+    subtitle = _build_subtitle(finding)
+    assert subtitle == "Playroom Attic Humidity: reading higher than expected"
+
+
+def test_baseline_subtitle_power_says_power() -> None:
+    """Power baseline findings keep the power-deviation subtitle."""
+    finding = _baseline_finding(_power_evidence())
+    subtitle = _build_subtitle(finding)
+    assert subtitle == "Dishwasher: power higher than expected"
+
+
+def test_baseline_subtitle_czech_reading_deviation() -> None:
+    """A cs-configured hass localizes the reading-deviation subtitle."""
+    finding = _baseline_finding(_humidity_evidence())
+    cs_hass = SimpleNamespace(config=SimpleNamespace(language="cs"))
+    subtitle = _build_subtitle(finding, cs_hass)  # type: ignore[arg-type]
+    assert subtitle == "Playroom Attic Humidity: hodnota vyšší, než se čekalo"
+
+
+def test_is_power_class_evidence_classification() -> None:
+    """device_class wins; unit decides next; entity_id is the legacy fallback."""
+    assert _is_power_class_evidence({"device_class": "power"})
+    assert _is_power_class_evidence({"device_class": "energy"})
+    assert not _is_power_class_evidence(
+        {"device_class": "humidity", "entity_id": "sensor.solar_power_humidity"}
+    )
+    assert _is_power_class_evidence({"unit_of_measurement": "W"})
+    assert _is_power_class_evidence({"unit_of_measurement": "kWh"})
+    assert not _is_power_class_evidence({"unit_of_measurement": "%"})
+    assert _is_power_class_evidence({"entity_id": "sensor.dishwasher_power"})
+    assert _is_power_class_evidence({"entity_id": "sensor.home_energy"})
+    assert not _is_power_class_evidence({"entity_id": "sensor.attic_humidity"})
+
+
+def test_is_power_class_evidence_unit_gates_entity_id_fallback() -> None:
+    """A non-power unit decides False; the entity_id substring never runs."""
+    assert not _is_power_class_evidence(
+        {"unit_of_measurement": "%", "entity_id": "sensor.dishwasher_power"}
+    )
+
+
+def test_baseline_mobile_message_legacy_energy_evidence_infers_kwh() -> None:
+    """Legacy energy findings (no unit/device_class) infer kWh from entity_id."""
+    ev = _power_evidence(
+        entity_id="sensor.home_energy",
+        friendly_name="Home Energy",
+        current_value=12.5,
+        baseline_value=5.0,
+        deviation_pct=150.0,
+    )
+    del ev["unit_of_measurement"]
+    del ev["device_class"]
+    finding = _baseline_finding(ev)
+    msg = _baseline_deviation_mobile_message(finding)
+    assert "12.5kWh vs usual 5.0kWh" in msg
+    assert "Check appliance." in msg
+
+
+def test_baseline_mobile_message_non_finite_evidence_never_raises() -> None:
+    """
+    NaN/inf values in persisted evidence must degrade, not crash dispatch.
+
+    Regression: round(float('nan')) raised ValueError inside the notifier,
+    which killed the Sentinel run loop until reload (red-team finding).
+    """
+    ev = _humidity_evidence(
+        current_value=float("nan"),
+        baseline_value=float("inf"),
+        deviation_pct=float("nan"),
+    )
+    msg = _baseline_deviation_mobile_message(_baseline_finding(ev))
+    assert msg == "Playroom Attic Humidity reading above normal. Worth checking."
+
+    ev_str = _humidity_evidence(deviation_pct="not-a-number")
+    msg_str = _baseline_deviation_mobile_message(_baseline_finding(ev_str))
+    assert "65.0% vs usual 49.2%" in msg_str
+    assert "not-a-number" not in msg_str
+
+
+def test_baseline_mobile_message_new_unitless_sensor_no_fabricated_unit() -> None:
+    """
+    A new finding with a present-but-empty unit gets no fabricated W/kWh.
+
+    Key ABSENCE marks legacy evidence; sensor.energy_score with captured
+    empty metadata is a unitless score, not an energy circuit.
+    """
+    ev = _humidity_evidence(
+        entity_id="sensor.energy_score",
+        friendly_name="Energy Score",
+        unit_of_measurement="",
+        device_class="",
+    )
+    msg = _baseline_deviation_mobile_message(_baseline_finding(ev))
+    assert "kWh" not in msg
+    assert "65.0 vs usual 49.2" in msg
+    assert "power" not in msg.lower()
+    assert "Worth checking." in msg
+
+
+def test_baseline_mobile_message_unitless_power_sensor_keeps_power_copy() -> None:
+    """device_class=power with an empty captured unit: power copy, no unit."""
+    ev = _power_evidence(unit_of_measurement="")
+    msg = _baseline_deviation_mobile_message(_baseline_finding(ev))
+    assert "1200.0 vs usual 400.0" in msg
+    assert "Check appliance." in msg
+
+
+def test_is_power_class_evidence_unit_wins_over_exotic_device_class() -> None:
+    """A power-dimension unit classifies even under a non-power device_class."""
+    assert _is_power_class_evidence(
+        {"device_class": "energy_storage", "unit_of_measurement": "kWh"}
+    )
+    assert _is_power_class_evidence(
+        {"device_class": "Power", "unit_of_measurement": "W"}
+    )
+    assert not _is_power_class_evidence(
+        {
+            "device_class": "",
+            "unit_of_measurement": "",
+            "entity_id": "sensor.energy_score",
+        }
+    )
+
+
+def test_baseline_mobile_message_unit_control_chars_stripped() -> None:
+    """Bidi/format control characters in the unit never reach the push text."""
+    rlo = "\u202e"  # right-to-left override (bidi spoofing)
+    zwsp = "\u200b"  # zero-width space
+    ev = _power_evidence(unit_of_measurement=f"{rlo}W evil{zwsp}")
+    msg = _baseline_deviation_mobile_message(_baseline_finding(ev))
+    assert rlo not in msg
+    assert zwsp not in msg
+    assert "W evil" in msg

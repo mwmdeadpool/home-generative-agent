@@ -328,6 +328,36 @@ And two writer-consistency gaps: (7) `_mark_tool_index_stale` (embedding-provide
 
 ## Sentinel Rules
 
+### Unknown-person rules are inert on installs without face recognition
+
+**What:** The stranger-present predicate (unknown-person rules fix, 2026-08-22) makes `unknown_person_camera_no_home`, `unknown_person_camera_night_home`, `alarm_disarmed_during_external_threat`, and the two dynamic unknown-person templates fire only on a positive `"Unknown Person"` label — which only the face-recognition pipeline produces. On installs without a configured face service these five rules never fire, and `alarm_disarmed_during_external_threat` previously fell back to motion/VMD/summary evidence, so an upgrade silently narrows real coverage there. Docs note it, but nothing at runtime does. Same family, narrower trigger (Codex structured review): the snapshot sources `recognized_people` solely from the `image.*_last_event` entities, so a user who disables that entity in the entity registry (it vanishes from `hass.states`) silently makes the rules inert even WITH face recognition running. Surfaced independently by the security specialist and both Codex passes during the ship of the fix.
+
+**How to apply:** Detect at engine start whether face recognition is configured (face-service URL option); if not, raise a one-time repair issue (or rate-limited log) saying these rules are inert and pointing at the `motion_detected_*` discovery templates as the replacement. Alternatively carry a `face_recognition_enabled` flag in the snapshot and let the rules fall back to a motion-evidence predicate when it is false. For the disabled-entity sub-case, source recognition metadata from an always-on runtime cache (e.g. VideoAnalyzer._last_recognized via runtime_data) instead of the optional UI entity — that also removes the image-entity round-trip entirely.
+
+**Effort:** M
+**Priority:** P2
+**Depends on:** unknown-person rules fix (2026-08-22)
+
+### Companion suppression works on the event-level identity union, not frame co-occurrence
+
+**What:** The accompanied-guest gate suppresses an `"Unknown Person"` sighting whenever an enrolled name appears anywhere in the same analyzed event's `recognized_people` union — including an intruder presenting a photo of a resident in one frame, or a resident passing through the clip window minutes before the stranger. Kept deliberately for now: recognition flapping on one person produces exactly the `[known, "Unknown Person"]` refused-merge shape, and firing on it would re-create the #543 phantom-stranger alerts. Surfaced by both the security specialist and the Codex adversarial pass.
+
+**How to apply:** Carry frame-level co-occurrence evidence into the snapshot (e.g. a `companion_confirmed` flag set only when a known name and an unknown share a single frame, which `_merge_unknown_faces` already computes as its condition-2 check) and suppress only on confirmed co-occurrence; or fire a low-severity variant instead of full suppression when both labels are present. Needs live tuning against #543-style flapping before changing the default.
+
+**Effort:** M
+**Priority:** P2
+**Depends on:** unknown-person rules fix (2026-08-22)
+
+### Legacy gallery rows with near-reserved names defeat label classification
+
+**What:** `RESERVED_IDENTITY_LABELS` matching is exact strip+lowercase. Gallery rows enrolled before the reserved-name guard (or via direct DB insert) under variants like `"unknown-person"`, internal double spaces, or homoglyphs are classified as enrolled identities — a face-API match to such a row suppresses the unknown-person rules via the accompanied-guest gate; conversely a legacy row literally named `"Unknown Person"` makes an enrolled resident fire stranger alerts on every fresh sighting. Surfaced by the security specialist during the ship of the unknown-person rules fix.
+
+**How to apply:** Add a startup/migration sweep over `person_gallery` that flags (or renames with user confirmation) rows whose collapsed-whitespace lowercased name is in — or one edit away from — `RESERVED_IDENTITY_LABELS`; optionally normalize with internal-whitespace collapse on both the enrollment guard and the Sentinel matchers so both ends agree.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** unknown-person rules fix (2026-08-22)
+
 ### Dynamic `sensor_threshold_condition` rules don't normalize units
 
 **What:** Discovery's `sensor_threshold_condition` template (`sentinel/proposal_templates.py`) compares an LLM-extracted numeric threshold against the sensor's native state with no unit normalization — the #461 bug class: a rule meaning "over 100 watts" against a kW sensor never fires (the template only extracts above-thresholds today; a below-variant would invert the failure — always firing). Arguably the user's threshold is native-unit by intent, but nothing disambiguates. Surfaced by adversarial review during the v3.21.3 ship.
@@ -937,18 +967,6 @@ Entity-backed evidence path instruction added to `USER_PROMPT_TEMPLATE` in `expl
 
 ---
 
-### Sentinel unknown-person rules are suppressed by any non-empty recognized list
-
-**What:** `unknown_person_camera_night_home` (and the dynamic no-home/when-home variants) skip whenever `recognized_people` is truthy — but the raw list dispatched to the image entity and Sentinel snapshot contains the literal `"Unknown Person"` and `"Indeterminate"` strings, so with face recognition enabled, a detected-but-unrecognized visitor *suppresses* the unknown-person rules rather than firing them. Decide whether the rules should filter negative identities before the emptiness check, or whether the snapshot layer should strip them.
-
-**Why:** Pre-existing behavior surfaced by the v3.30.0 adversarial review (the merge provably cannot change rule firing, but the rules' emptiness check is only vacuously aligned with their name). Changing it changes alerting behavior, so it needs its own focused decision, docs, and field validation — not a drive-by fix.
-
-**Effort:** M
-**Priority:** P2
-**Depends on:** v3.30.0
-
----
-
 ### Caption novelty: per-analysis notification-status metadata
 
 **What:** Store whether each video analysis triggered a notification alongside the
@@ -1127,15 +1145,73 @@ window-scoped check could suppress.
 
 ## Notifier / Observability
 
-### Baseline-deviation notifications guess the display unit from the entity_id
+### Sanitize friendly_name-derived text in notification copy like the unit string
 
-**What:** `_baseline_deviation_mobile_message` (`sentinel/notifier.py:904`) picks the display unit with `"W" if "power" in entity_id else "kWh" if "energy" in entity_id else ""`. A kW-denominated sensor renders as e.g. "0.4W vs usual 0.3W", and a power sensor without "power" in its entity_id gets no unit at all. Surfaced during the #461 unit-normalization review (v3.21.3).
+**What:** The v3.31.1 baseline-copy fix strips control/bidi characters and length-caps the untrusted `unit_of_measurement` before it reaches push text (`_baseline_deviation_mobile_message`), but the appliance/sensor display name (`friendly_name` → `_strip_power_suffix(...).title()`) is still embedded uncapped and unfiltered in the same messages, and camera names elsewhere use only a `[:30]` cap with no control-char strip. A crafted device name can carry the same bidi-reorder / instruction-text spoofing the unit fix closed (raised by both the Claude adversarial and Codex passes on v3.31.1; same class, pre-existing convention).
 
-**How to apply:** Plumb the sensor's `unit_of_measurement` into the baseline finding evidence in `sentinel/baseline.py` (alongside `current_value`/`baseline_value`, which stay native) and render it verbatim in the notifier, falling back to the current heuristic for old persisted findings.
+**Why:** Notification copy is a trust boundary: entity names arrive from semi-trusted integrations (MQTT/ESPHome/template sensors over untrusted data).
+
+**How to apply:** Extract the unit sanitizer (category-C strip + whitespace collapse + cap) into a small helper and apply it to every evidence-derived display string in `sentinel/notifier.py` (appliance names, camera names, entry names), with a generous cap (e.g. 40) for names. One test per surface.
 
 **Effort:** S
 **Priority:** P3
 **Depends on:** None
+
+---
+
+### Remaining notification-localization gaps after PR #565 (buttons, cs plural, uncurated labels)
+
+**What:** Three gaps deliberately shipped with the v3.31.0 notification-chrome localization (PR #565), awaiting @hruba202's input (asked in the close-out comment, issuecomment-5386281819): (1) **action-button titles stay English** — "Confirm"/"Cancel" under the Czech permanent-snooze prompt guide a destructive action in the wrong language (cross-model review's top remaining finding), plus "Ask Agent"/"Arm Alarm"/"Snooze Always"; (2) **cs `batch_message` plural** — "{count} novinek" is grammatically wrong for counts 1–4, the common batch size (needs novinka/novinky/novinek forms or a count-agnostic phrasing); (3) **uncurated type labels** — `camera_missing_snapshot_night_home`, `unknown_person_camera_no_home`, `phone_battery_low_at_night_home`, `vehicle_detected_near_camera_home`, `pet_detected_at_night_no_occupancy` are absent from `_KNOWN_TYPE_LABEL_KEYS`, so they render as prettified English slugs on Czech installs.
+
+**Why:** Merged without waiting for the native-speaker answers (maintainer decision 2026-08-23); these need Czech wording from a native speaker, and (1) needs a scope decision on how button titles flow through the mobile-app notification payload.
+
+**How to apply:** (1) route the `actions[].title` strings through `notif_msg` with new keys; (2)+(3) add the corrected/new cs strings and label keys to `_MESSAGES` in `sentinel/notifier_messages.py` — parity tests will enforce key coverage.
+
+**Effort:** S
+**Priority:** P2
+**Depends on:** hruba202 wording input (PR #565 close-out)
+
+---
+
+### Unify the duplicated localized-message machinery (pin_messages / notifier_messages)
+
+**What:** `sentinel/notifier_messages.py` (PR #565) is a second copy of `agent/pin_messages.py`'s `_resolve_language` + fallback-chain machinery, and the copies have already drifted inside the PR that created the second one: notifier_messages guards `getattr(hass, "config", None)` (config-less test doubles / degraded runtime states) and degrades gracefully on a bad `.format` placeholder, while pin_messages dereferences `hass.config` directly and formats unguarded. Neither normalizes underscore locales (`cs_CZ` resolves to silent English; real HA stores hyphenated codes, so low likelihood).
+
+**Why:** Surfaced during the PR #565 review (2026-08-21) — the maintainability specialist flagged the triple-copy pattern and the adversarial pass confirmed the hardening drift. Every robustness fix now has to land twice or the tables behave differently under the same failure.
+
+**How to apply:** Extract a shared `localized_message(table, hass, key, **kwargs)` helper (e.g. `core/localized_messages.py`) holding `_resolve_language` (with the config getattr guard, `str(language).replace("_", "-")` normalization, and the guarded-format fallback chain); `pin_messages` and `notifier_messages` keep only their `_MESSAGES` tables and thin `pin_msg`/`notif_msg` wrappers. Port the contract tests (key parity, placeholder subset, call-site kwargs) to cover both tables.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** None
+
+---
+
+### llm_explain's type-label table now drifts from the notifier's
+
+**What:** `explain/llm_explain.py:124` keeps its own `_KNOWN_TYPE_LABELS` (type → English text) plus duplicate `_display_type`/`_friendly_type`/`_severity_action_hint`, while `sentinel/notifier.py` switched to `_KNOWN_TYPE_LABEL_KEYS` (type → message id) in PR #565 — differently shaped tables with no test forcing agreement. #565 added `appliance_power_duration` to the notifier copy only; output coincides today purely because the slug-prettify fallback (`"appliance_power_duration".replace("_", " ").capitalize()`) happens to equal the curated label, so the next label edit in one file gives the explanation prompt and the notification different names for the same finding.
+
+**Why:** Found during the PR #565 review (2026-08-21) by the Enum & Value Completeness pass (consumers outside the diff) and independently by two review agents.
+
+**How to apply:** Either have `llm_explain` derive its English labels from `notif_msg(None, key)` via the notifier's key table, or add a cross-file parity test asserting `llm_explain._KNOWN_TYPE_LABELS[t] == notif_msg(None, _KNOWN_TYPE_LABEL_KEYS[t])` for every shared type and that the key sets match (deliberate exclusions asserted explicitly). The prompt side must stay English (LLM input), so this is label-source unification, not localization.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** None
+
+---
+
+### Compound notifications hide the unknown-person signal behind the alarm title
+
+**What:** When the correlator bundles same-cycle findings into a `CompoundFinding`, `_dispatch_compound` picks the representative for notification rendering by highest confidence (`engine.py`: `best = max(compound.constituent_findings, key=lambda f: f.confidence)`). `alarm_disarmed_during_external_threat` (confidence 0.9) therefore always outranks `unknown_person_camera_night_home` (0.7) and the dynamic `unknown_person_camera_when_home` rules, so a genuine stranger sighting renders under the title "Outdoor activity while alarm disarmed" and the alarm rule's mobile copy. Field-observed 2026-08-23 (first-ever `unknown_person_camera_night_home` firings, 11:51/11:52 UTC): the user saw only alarm-disarmed pushes and concluded the unknown-person rules were not firing — the stranger evidence was only visible in the audit store. A person-on-camera alert is also arguably the more actionable headline than the alarm state that merely contextualizes it.
+
+**How to apply:** Rank compound representatives by security salience before confidence — e.g. a small type-priority table (unknown-person types > alarm-disarmed types > entry/motion types) used as the primary sort key with confidence as tiebreak, or simply prefer any constituent whose evidence has `unknown_person_present`/a stranger label when choosing `best`. Alternatively keep `best` for execution policy but render the notification title/copy from the highest-salience constituent, and consider appending a one-line "+ N related findings" suffix so the compound's breadth is visible. Mind the localization boundary: security-critical copy stays deterministic English (`_is_security_copy`), and the existing per-type deterministic formatters must keep receiving the constituent they were written for.
+
+**Why:** The whole point of the v3.30.11 unknown-person fix was making stranger sightings visible; the confidence-ranked compound title re-hides them at the last hop. Surfaced during v3.30.11 field validation.
+
+**Effort:** S
+**Priority:** P2
+**Depends on:** v3.30.11
 
 ---
 
@@ -1398,6 +1474,37 @@ window-scoped check could suppress.
 ---
 
 ## Completed
+
+### Baseline-deviation notifications guess the display unit from the entity_id
+
+**What:** `_baseline_deviation_mobile_message` (`sentinel/notifier.py:904`) picks the display unit with `"W" if "power" in entity_id else "kWh" if "energy" in entity_id else ""`. A kW-denominated sensor renders as e.g. "0.4W vs usual 0.3W", and a power sensor without "power" in its entity_id gets no unit at all. Surfaced during the #461 unit-normalization review (v3.21.3).
+
+**How to apply:** Plumb the sensor's `unit_of_measurement` into the baseline finding evidence in `sentinel/baseline.py` (alongside `current_value`/`baseline_value`, which stay native) and render it verbatim in the notifier, falling back to the current heuristic for old persisted findings.
+
+**Resolution:** Shipped as prescribed in the metric-aware baseline-copy fix: `evaluate_baseline_deviation` and `_evaluate_dow_anomaly` capture `unit_of_measurement` and `device_class` into finding evidence, and `_baseline_deviation_mobile_message` renders the captured unit (sanitized — control/bidi characters stripped, length-capped). The entity_id heuristic survives only for legacy persisted findings whose evidence lacks the unit key; a present-but-empty unit means a genuinely unitless sensor and no unit is fabricated. Anomaly-id stability across the new evidence keys is preserved via `DISPLAY_ONLY_EVIDENCE_KEYS` / `hashable_evidence` in `sentinel/models.py`. Follow-up spoofing gap for `friendly_name`-derived text is tracked as its own P3 above.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** None
+**Completed:** v3.31.1 (2026-08-23)
+
+---
+
+### Sentinel unknown-person rules are suppressed by any non-empty recognized list
+
+**What:** `unknown_person_camera_night_home` (and the dynamic no-home/when-home variants) skip whenever `recognized_people` is truthy — but the raw list dispatched to the image entity and Sentinel snapshot contains the literal `"Unknown Person"` and `"Indeterminate"` strings, so with face recognition enabled, a detected-but-unrecognized visitor *suppresses* the unknown-person rules rather than firing them. Decide whether the rules should filter negative identities before the emptiness check, or whether the snapshot layer should strip them.
+
+**Why:** Pre-existing behavior surfaced by the v3.30.0 adversarial review (the merge provably cannot change rule firing, but the rules' emptiness check is only vacuously aligned with their name). Changing it changes alerting behavior, so it needs its own focused decision, docs, and field validation — not a drive-by fix.
+
+**Effort:** M
+**Priority:** P2
+**Depends on:** v3.30.0
+
+**Resolution:** Fixed in the unknown-person rules overhaul: the rules now fire on a positive "Unknown Person" label (normalized), enrolled names suppress as accompanied-guest, and a 10-minute freshness gate keyed to the recognition event prevents stale re-fires. See the three new Sentinel Rules follow-up items for the deliberately deferred edges.
+
+**Completed:** v3.30.11 (2026-08-22)
+
+---
 
 ### Config entry lifecycle leaks in the deferred-start block
 
