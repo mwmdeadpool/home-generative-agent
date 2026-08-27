@@ -3,9 +3,15 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
+from custom_components.home_generative_agent.sentinel.discovery_engine import (
+    _candidate_identity_hash,
+)
 from custom_components.home_generative_agent.sentinel.discovery_semantic import (
+    battery_slug_device_token,
     candidate_semantic_key,
     is_battery_level_entity_id,
     rule_key_covers_candidate_key,
@@ -14,6 +20,142 @@ from custom_components.home_generative_agent.sentinel.discovery_semantic import 
 from custom_components.home_generative_agent.sentinel.proposal_templates import (
     normalize_candidate,
 )
+
+
+def _effective_dedup_key(candidate: dict[str, Any]) -> str:
+    """
+    Mirror the engine's dedup key: semantic key, else the identity hash.
+
+    _filter_novel_candidates dedups on `key or _candidate_identity_hash(...)`,
+    so a test that only asserts `candidate_semantic_key(...) is None` says
+    nothing about whether two candidates actually stay distinct downstream.
+    """
+    return candidate_semantic_key(candidate) or _candidate_identity_hash(candidate)
+
+
+def test_battery_slug_device_token_extracts_hex_id() -> None:
+    """The device token is what's left after stripping known topic words."""
+    candidate = {
+        "candidate_id": "low_battery_sensor_0xffffaa67127301f8",
+        "title": "Nízká úroveň baterie senzoru 0xffffaa67127301f8",
+        "summary": "Baterie senzoru 0xffffaa67127301f8 klesla na 12 %.",
+    }
+    assert battery_slug_device_token(candidate) == "0xffffaa67127301f8"
+
+
+def test_battery_slug_device_token_none_without_low_battery_signal() -> None:
+    """No low-battery signal in text or slug means no device token."""
+    candidate = {
+        "candidate_id": "front_door_camera_offline",
+        "title": "Front door camera offline",
+        "summary": "The front door camera stopped responding.",
+    }
+    assert battery_slug_device_token(candidate) is None
+
+
+def test_battery_slug_device_token_none_when_ambiguous() -> None:
+    """Two or more leftover tokens is ambiguous, not a device token."""
+    candidate = {
+        "candidate_id": "hall_and_garage_low_battery_sensor",
+        "title": "Nízká baterie",
+        "summary": "Baterie senzoru je nízká.",
+    }
+    assert battery_slug_device_token(candidate) is None
+
+
+def test_battery_slug_device_token_none_when_slug_is_all_topic_words() -> None:
+    """A slug with no device-identifying leftover token returns None."""
+    candidate = {
+        "candidate_id": "low_battery_sensor",
+        "title": "Low battery sensor",
+        "summary": "A sensor battery is low.",
+    }
+    assert battery_slug_device_token(candidate) is None
+
+
+def test_battery_slug_device_token_reads_the_same_surface_as_the_key_leg() -> None:
+    """
+    The low-battery gate reads _candidate_text_blob, not just title+summary.
+
+    Review of #573: the extractor originally gated on title+summary alone
+    while candidate_semantic_key's battery leg gates on _candidate_text_blob
+    (title + summary + pattern + suggested_type). A locale-prose candidate
+    whose only English battery surface is suggested_type took the battery
+    leg for keying but not here, so the exact class this exists to stabilize
+    kept re-proposing every cycle. One more hand-mirrored predicate free to
+    drift is this module's recurring failure mode (#516, #518, #522, #524).
+    """
+    candidate = {
+        "candidate_id": "sensor_0xffffaa67127301f8",
+        "title": "Nízká úroveň baterie senzoru 0xffffaa67127301f8",
+        "summary": "Baterie senzoru 0xffffaa67127301f8 klesla na 12 %.",
+        "pattern": "low battery threshold",
+        "suggested_type": "low_battery_sensors",
+        "evidence_paths": [],
+    }
+    # The Czech prose carries no English "battery" substring and the slug
+    # carries no battery token either, so _has_low_battery_signal fires
+    # only via pattern/suggested_type — the two fields the narrow
+    # title+summary surface dropped.
+    assert candidate_semantic_key(candidate) is None
+    assert battery_slug_device_token(candidate) == "0xffffaa67127301f8"
+
+
+def test_battery_slug_device_token_declines_bare_mac_without_0x() -> None:
+    """
+    A bare MAC-style id is deliberately NOT trusted, and that is safe.
+
+    Codex passes 2-6 on the #573 hardening each broke a looser shape test
+    with a room label wearing the same grammar, ending at "a1234567".
+    A device address and a place code are syntactically identical, so the
+    gate is the 0x literal marker and nothing else. "aabbccddeeff" is a
+    real object id and is given up with the rest: it falls back to the
+    prose hash, which is exactly what base main does, so this costs
+    coverage and never correctness.
+    """
+    candidate = {
+        "candidate_id": "low_battery_sensor_aabbccddeeff",
+        "title": "Low battery on the hallway sensor",
+        "summary": "Battery for AA:BB:CC:DD:EE:FF is low.",
+    }
+    assert battery_slug_device_token(candidate) is None
+
+
+@pytest.mark.parametrize(
+    "slug",
+    [
+        "low_battery_sensor_kitchen",  # room name, not a device
+        "kitchen_battery_low",  # same room name, different device
+        "low_battery_sensor_98",  # too short to identify anything
+        "candidate_low_battery",  # generic scaffolding word
+        "low_battery_sensor_kitchen1",  # word + digit is not an address
+        "low_battery_sensor_basement1",  # nor is it once it self-corroborates
+        "low_battery_sensor_room1234",  # half digits, still a room not a device
+        "low_battery_sensor_livingroom",  # long, all letters, not hex
+        "low_battery_sensor_12345678",  # hex-legal but reads as a room number
+        "low_battery_sensor_a1234567",  # hex letter does not make it an address
+        "low_battery_sensor_0x123456",  # 0x-prefixed but only 6 body characters
+        "low_battery_sensor_0xghijklmn",  # 0x-prefixed but not hexadecimal
+        "low_battery_sensor_0x00000000",  # the null EUI identifies nothing
+    ],
+)
+def test_battery_slug_device_token_rejects_word_shaped_tokens(slug: str) -> None:
+    """
+    Only hardware-address-shaped tokens are trusted as device identities.
+
+    Review of #573: the "exactly one leftover token" rule does not prevent
+    the false merge it was believed to prevent. Two unrelated sensors in
+    one room both reduce to "kitchen" and would collapse into one card,
+    silently hiding the second. A token must be at least
+    _MIN_BATTERY_DEVICE_TOKEN_LEN characters and contain a digit, which
+    the reported Zigbee IEEE address does and a room name does not.
+    """
+    candidate = {
+        "candidate_id": slug,
+        "title": "Low battery",
+        "summary": "The sensor battery is low at 12 %.",
+    }
+    assert battery_slug_device_token(candidate) is None
 
 
 def test_candidate_semantic_key_collapses_similar_window_home_night() -> None:
@@ -1130,6 +1272,246 @@ def test_candidate_semantic_key_weak_wording_keys_low_battery() -> None:
     key = candidate_semantic_key(candidate)
     assert key is not None
     assert "predicate=low_battery" in key
+
+
+def test_zero_evidence_low_battery_candidate_keys_none() -> None:
+    """
+    A low-battery candidate with no resolvable entity evidence keys None.
+
+    The slug-based signal ("low_battery_sensor_<id>") is enough to route the
+    candidate through the low_battery predicate leg, but with no
+    entities[...] evidence_paths to resolve, _battery_sensor_entity_ids
+    returns []. Emitting a "subject=unknown|...|entities=" key here would be
+    strictly worse than no key: every such evidence-less low_battery
+    candidate — regardless of which physical sensor it concerns — would
+    collide on that identical generic string (over-merging unrelated
+    sensors), while it could never match a properly-evidenced duplicate
+    about the very same sensor (the reported symptom: two pending
+    candidates for one sensor's low battery never dedup against each
+    other). Returning None routes these through _candidate_identity_hash
+    instead, matching the existing null-key candidate design (Bug 2 fix).
+    """
+    candidate = {
+        "candidate_id": "low_battery_sensor_0xffffaa67127301f8",
+        "title": "Nízká úroveň baterie senzoru 0xffffaa67127301f8",
+        "summary": "Baterie senzoru 0xffffaa67127301f8 klesla pod doporučenou hranici.",
+    }
+    assert candidate_semantic_key(candidate) is None
+
+
+def test_zero_evidence_low_battery_candidates_do_not_force_collide() -> None:
+    """Two different zero-evidence battery candidates must not share a key."""
+    candidate_a = {
+        "candidate_id": "low_battery_sensor_0xffffaa67127301f8",
+        "title": "Nízká úroveň baterie senzoru 0xffffaa67127301f8",
+        "summary": "Baterie senzoru 0xffffaa67127301f8 klesla pod doporučenou hranici.",
+    }
+    candidate_b = {
+        "candidate_id": "low_battery_sensor_0xaaaa11122233344",
+        "title": "Nízká úroveň baterie senzoru 0xaaaa11122233344",
+        "summary": "Baterie senzoru 0xaaaa11122233344 klesla pod doporučenou hranici.",
+    }
+    # Assert the EFFECTIVE dedup key, not just that both are None: the
+    # semantic key going away is only useful if the identity-hash fallback
+    # the engine substitutes actually separates the two sensors. Asserting
+    # `is None` twice would pass even if both collapsed onto one hash.
+    assert _effective_dedup_key(candidate_a) != _effective_dedup_key(candidate_b)
+
+
+def test_window_worded_zero_evidence_low_battery_candidate_keys_none() -> None:
+    """
+    Window prose must not rescue a zero-evidence battery candidate.
+
+    The subject back-fill near the end of candidate_semantic_key promotes an
+    unresolved subject to entry_window on "window"/"windows" prose. It runs
+    AFTER the battery leg, so a battery leg that merely blanked its predicate
+    and fell through would land on a constant
+    "subject=entry_window|predicate=unknown|...|entities=" key — the exact
+    over-merge the None path exists to prevent, and window/door contacts are
+    the battery-powered devices this leg sees most. The leg therefore returns
+    None directly instead of falling through.
+    """
+    candidate_a = {
+        "candidate_id": "low_battery_sensor_win_a",
+        "title": "Low battery on the bedroom window sensor",
+        "summary": "The bedroom window sensor battery dropped below the limit.",
+    }
+    candidate_b = {
+        "candidate_id": "low_battery_sensor_win_b",
+        "title": "Low battery on the kitchen window sensor",
+        "summary": "The kitchen window sensor battery dropped below the limit.",
+    }
+    assert candidate_semantic_key(candidate_a) is None
+    assert candidate_semantic_key(candidate_b) is None
+    assert _effective_dedup_key(candidate_a) != _effective_dedup_key(candidate_b)
+
+
+@pytest.mark.parametrize(
+    ("evidence_path", "expected_subject"),
+    [
+        ("entities[entity_id=alarm_control_panel.house].state", "alarm"),
+        ("entities[entity_id=binary_sensor.front_door_contact].state", "entry_door"),
+        ("entities[entity_id=binary_sensor.hall_motion].state", "motion"),
+        # The remaining two subject legs the fall-through has to preserve:
+        # entry_window is the FIRST arm of the subject chain (and the one the
+        # window back-fill would otherwise impersonate), and lock reaches the
+        # battery leg only because the lock-battery hoist above it resolves no
+        # battery sensor either — a lock with no battery sensor cited at all.
+        ("entities[entity_id=binary_sensor.bedroom_window].state", "entry_window"),
+        ("entities[entity_id=lock.front].state", "lock"),
+    ],
+)
+def test_battery_candidate_with_non_sensor_evidence_keeps_low_battery(
+    evidence_path: str, expected_subject: str
+) -> None:
+    """
+    A resolved subject keeps predicate=low_battery when no battery sensor resolves.
+
+    _battery_sensor_entity_ids only ever returns sensor.* IDs, so it is empty
+    for a battery candidate citing an alarm panel, a binary_sensor contact, or
+    a motion sensor — the normal way Zigbee/Z-Wave devices are cited. Blanking
+    the predicate for those would make them key identically to any unrelated
+    predicate-less candidate about the same entity, and the engine's novelty
+    filter would silently drop one for the other in LLM emission order. They
+    keep their pre-existing keying; the None path is scoped to candidates that
+    resolved nothing at all.
+    """
+    candidate = {
+        "candidate_id": "low_battery_device",
+        "title": "Low battery on the device",
+        "summary": "The device battery is low.",
+        "evidence_paths": [evidence_path],
+    }
+    key = candidate_semantic_key(candidate)
+    assert key is not None
+    assert f"subject={expected_subject}" in key
+    assert "predicate=low_battery" in key
+
+
+@pytest.mark.parametrize(
+    "evidence_paths",
+    [
+        pytest.param([], id="empty_list"),
+        pytest.param(["entities[31].state"], id="index_based_path"),
+        pytest.param(["derived.anyone_home"], id="derived_only_path"),
+        pytest.param(["snapshot.summary"], id="non_entity_path"),
+    ],
+)
+def test_zero_evidence_low_battery_unresolvable_paths_key_none(
+    evidence_paths: list[str],
+) -> None:
+    """
+    Present-but-unresolvable evidence_paths key None, exactly like a missing key.
+
+    The None path is reached whenever _battery_sensor_entity_ids resolves
+    nothing AND no other evidence gave the candidate a subject — which is a
+    property of what the paths RESOLVE to, not of whether the key exists.
+    An index-based path (entities[31].state, issue #518), a derived-only
+    context path, and a non-entity path all resolve to no entity ID, so each
+    must key None rather than the constant
+    "subject=unknown|predicate=low_battery|...|entities=" string every other
+    such candidate would also produce.
+    """
+    candidate = {
+        "candidate_id": "low_battery_sensor_0xffffaa67127301f8",
+        "title": "Low battery on the sensor",
+        "summary": "The sensor battery dropped below the recommended limit.",
+        "evidence_paths": evidence_paths,
+    }
+    assert candidate_semantic_key(candidate) is None
+
+
+@pytest.mark.parametrize(
+    "entity_id",
+    [
+        "camera.front_porch",
+        "device_tracker.phone",
+        "light.kitchen",
+        "cover.garage",
+    ],
+)
+def test_zero_evidence_low_battery_non_subject_domain_keys_none(
+    entity_id: str,
+) -> None:
+    """
+    Evidence in a domain the subject chain ignores still leaves the key None.
+
+    The subject chain only resolves window/door/lock/motion/alarm/sensor IDs,
+    so a battery candidate whose only evidence is a camera, a device tracker,
+    a light, or a domain-name-less cover resolves a subject of "unknown" just
+    like a candidate with no evidence at all — and would otherwise emit the
+    same constant key as every other one of them. Camera evidence in
+    particular does NOT reach the camera leg above: that leg additionally
+    requires unknown/person wording, which a battery candidate never carries.
+    """
+    candidate = {
+        "candidate_id": "low_battery_sensor_abc",
+        "title": "Low battery on the device",
+        "summary": "The device battery is low.",
+        "evidence_paths": [f"entities[entity_id={entity_id}].state"],
+    }
+    assert candidate_semantic_key(candidate) is None
+
+
+@pytest.mark.parametrize(
+    ("evidence_ids", "expected_entities"),
+    [
+        pytest.param(
+            ["sensor.kitchen_thing", "sensor.hall_thing"],
+            "sensor.hall_thing,sensor.kitchen_thing",
+            id="two_ambiguous_sensors",
+        ),
+        pytest.param(
+            ["sensor.kitchen_power", "sensor.hall_lux"],
+            "sensor.hall_lux,sensor.kitchen_power",
+            id="two_excluded_sensors",
+        ),
+        pytest.param(
+            ["sensor.kitchen_power"],
+            "sensor.kitchen_power",
+            id="single_excluded_sensor",
+        ),
+        pytest.param(["binary_sensor.leak"], "binary_sensor.leak", id="binary_sensor"),
+    ],
+)
+def test_low_battery_sensor_subject_without_battery_id_keeps_base_keying(
+    evidence_ids: list[str], expected_entities: str
+) -> None:
+    """
+    subject=sensor shapes that resolve no battery ID keep their base-parity key.
+
+    _battery_sensor_entity_ids returns [] whenever no battery-NAMED sensor.*
+    exists and the non-excluded sensor.* fallback is not exactly one survivor:
+    two ambiguous sensors (fallback count 2), two sensors both filtered by
+    _NON_BATTERY_ID_TOKENS, a single filtered sensor, and binary_sensor-only
+    evidence. All of them still resolved subject=sensor from the subject
+    chain, so the new None path must NOT fire for them — they keep the exact
+    key they produced before the fix, entities included.
+
+    The pinned key is NOT claimed to be correct. For several of these shapes
+    it is a known mirror mismatch: a lone sensor.*_power with battery prose
+    keys predicate=low_battery here while the normalizer skips its battery
+    branch (no battery target) and registers baseline_deviation, so the
+    activated rule can never cover this candidate (cross-model adversarial,
+    reproduced). That divergence is pre-existing and belongs to the
+    derive-keys-from-the-normalizer's-routing work tracked in TODOS.md — this
+    test pins BASE PARITY so the scoped None path cannot silently re-key
+    these shapes on its way past, which is exactly the regression an earlier
+    round of this fix introduced. Fixing the mismatch means changing this
+    expectation deliberately, not discovering it by surprise.
+    """
+    candidate = {
+        "candidate_id": "low_battery_device",
+        "title": "Low battery on the device",
+        "summary": "The device battery is low.",
+        "evidence_paths": [
+            f"entities[entity_id={entity_id}].state" for entity_id in evidence_ids
+        ],
+    }
+    assert candidate_semantic_key(candidate) == (
+        "v1|subject=sensor|predicate=low_battery|night=any|home=any|scope=any|"
+        f"entities={expected_entities}"
+    )
 
 
 def test_lock_battery_candidate_keys_sensor_subject() -> None:

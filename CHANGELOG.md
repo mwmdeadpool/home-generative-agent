@@ -2,6 +2,38 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.32.1] - 2026-08-27
+
+### Fixed
+
+- **A suggestion the model labelled itself can no longer bury an unrelated one.** Sentinel lets the model attach its own internal label to a suggestion. When a suggestion had no label the system could compute for it, whatever the model had written there was stored anyway and then trusted — so a suggestion about, say, a stale phone tracker could carry the label belonging to "open windows at night while nobody is home" and quietly suppress that real proposal for as long as it stayed in recent history. Model-supplied labels are now dropped on that path and never trusted when read back, so suggestions already stored with a borrowed label stop hiding anything on the next Sentinel run rather than waiting weeks to age out. Contributed by [@hruba202](https://github.com/hruba202) ([#573](https://github.com/goruck/home-generative-agent/pull/573), following [#571](https://github.com/goruck/home-generative-agent/issues/571)).
+- **Repeated low-battery suggestions for the same device stop stacking up.** The model rewrites its wording every cycle and usually quotes the current reading ("battery at 12%", then "11%"), and unlabelled suggestions were told apart by that wording alone — so one device could mint a fresh card every run. Where the suggestion's id contains a hardware address (the `0x…` form Zigbee devices use), that address is now used as the device's identity instead of the drifting text, and the two are matched together so a re-proposal is recognised whichever of the two stayed put. This was the remaining half of [#571](https://github.com/goruck/home-generative-agent/issues/571)'s report.
+- **Two different devices are never merged into one card by a shared name.** Only a genuine `0x` hardware address counts as a device identity. Anything else — a room name, a room name with a number, a unit code, a placeholder address — falls back to matching on wording exactly as before, because a suggestion hidden by a false match is a battery warning you never see, while a suggestion the system declines to match costs only a repeat card.
+- **Low-battery suggestions written in your own language are recognised again.** The check that decides whether a suggestion is about a battery read a narrower part of the text than the rest of the system did, so a suggestion whose only English battery wording sat in a field the check skipped was treated inconsistently and kept re-proposing. Both now read the same text.
+
+Note: [#571](https://github.com/goruck/home-generative-agent/issues/571) stays open. A low-battery suggestion you rejected while it named no entity can still return once it starts citing one, because those two forms are identified in fundamentally different ways.
+
+## [3.32.0] - 2026-08-26
+
+### Added
+
+- **Pick exactly which tools the agent may use.** A new **Excluded tools** option lists every tool of every selected LLM API — each MCP server's tools grouped under its name, plus Assist's own intent tools — and anything you tick there is removed from the agent entirely: never advertised to the model, never retrieved, and never executed, so a call to it by name is rejected instead of run. Tool retrieval ranks by similarity and can hand back a near neighbour of what you meant (`web_search` vs `web_search_images`); this is the deterministic complement to it, and it matters most for local and smaller models, where a large MCP server's tool definitions eat a real share of the context window. Requested by [@krishgcek](https://github.com/krishgcek) ([#570](https://github.com/goruck/home-generative-agent/issues/570)).
+
+  The picker subtracts, which keeps three things predictable: excluding nothing (the default) behaves exactly as before; a tool a server adds later arrives enabled, so you are never silently missing new capability; and if a server is unreachable when you open the Options page, its stored exclusions are kept and shown as `Server: tool_name (not currently available)` rather than being dropped — deselecting one is always your explicit action. Excluded tools stay in the vector index, so re-enabling one takes effect on the next turn with no re-index.
+
+  Tool names come from whatever MCP server you configured, so the names shown in the picker are stripped of hidden characters, length-capped, and have their parentheses rewritten to square brackets before display. Without that, a server could name a tool `something (not currently available)` and have it render exactly like a tool that is already switched off — so you would scan past a dangerous tool believing it inactive while it was live and callable. Hidden right-to-left overrides could achieve the same thing by reversing the text around them. The same stripping already applied to tool names written to the log, and both now share one routine.
+
+  Tools that Home Assistant only exposes to capable devices — the timer intents, offered only to timer-capable voice satellites — can be excluded too. An options page has no device to ask on behalf of, so those names are taken from the tool index instead. Previously they would have been callable on every voice turn with no way to switch them off.
+
+## [3.31.3] - 2026-08-25
+
+### Fixed
+
+- **Low-battery suggestions for different sensors no longer hide each other.** When the model proposed a low-battery idea without citing a machine-readable entity — common when it names the device only in prose — every such proposal was filed under one identical internal label, regardless of which sensor it was about. The first one through claimed the slot and later ones for *other* sensors were silently discarded as duplicates, so a second device's dying battery could simply never reach you. Those proposals are now told apart by their own wording, so proposals that name their sensor stay separate. Two proposals worded identically still count as one, and re-proposals whose text carries a changing reading ("battery at 12%", then "11%") can still show up more than once — both are being tracked for a follow-up. Reported by [@hruba202](https://github.com/hruba202) ([#571](https://github.com/goruck/home-generative-agent/issues/571)); fix contributed by [@hruba202](https://github.com/hruba202).
+- **A low-battery proposal for a lock, alarm panel, or door/window contact is no longer mistaken for an unrelated one.** These devices report battery through a companion sensor the proposal does not always cite, and a fix for the case above initially stripped them of their "low battery" identity — which would have let any other unlabelled suggestion about the same device displace them, or them displace it. Whichever arrived first would win and the other would vanish. They keep their own identity, so a dead alarm-panel battery is never swallowed by an unrelated suggestion about the same panel.
+
+Note: after upgrading, low-battery suggestions you had already dismissed may reappear once while their stored identifiers migrate to the new form; they settle after a single Sentinel run.
+
 ## [3.31.2] - 2026-08-24
 
 ### Fixed
