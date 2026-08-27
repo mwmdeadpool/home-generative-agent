@@ -123,6 +123,8 @@ Also: unknown action types fail closed (a future HA construct over-prompts rathe
 
 **How to apply:** Per-api_id top-up cooldown (skip delta if last top-up for that api was < N minutes ago and produced no new hashes); negative cache of keys that repeatedly fail to index, with a retry deadline; periodic eviction sweep deleting store rows whose keys have not been live for N days; delimiter-safe key encoding (escape `::` or hash the pair).
 
+**Second consumer of the composite key (v3.32.0, #570):** the excluded-tools picker round-trips `tool_index_key`/`split_tool_index_key` through its flat selector values, so gap (4)'s delimiter fix must migrate *stored* `tool_exclusions` values too, not just index rows — a re-encoding that changes the key spelling silently voids every saved exclusion. `split_tool_index_key` deliberately splits on the FIRST `::` (api ids are the constrained side; tool names are free-form), so a tool literally named `a::b` round-trips today, but an api_id containing `::` would not.
+
 Two adjacent gaps from the same review, same disposition (document + defer): (5) concurrent turns — while turn A's inline delta is writing, turn B from a *different* device-class short-circuits on `tool_indexing_in_progress` and proceeds without its own gated tools for that one turn (pre-fix behavior; self-heals on B's next turn); fixing needs per-key coordination or awaiting the active delta then recomputing. (6) a transient failure during the *startup* index run latches `tool_index_failed` until reload, which now also disables per-turn top-ups — startup deserves a retry/backoff instead of a one-shot latch.
 
 And two writer-consistency gaps: (7) `_mark_tool_index_stale` (embedding-provider switch) clears hashes with no generation/epoch guard, so an in-flight index write that completes after the switch marks old-provider rows current (and the background leg re-latches `tool_index_ready`), silently mixing embedding spaces until restart — pre-existing on the startup leg, window widened by the per-turn delta writer; fix wants a generation counter checked before `update()`/`ready=True`. (8) a partially-failed delta write commits zero hashes, so already-written chunks are re-embedded next turn — converges, but a per-chunk `(task, key)` commit would stop burning embedding quota under a flaky provider.
@@ -144,6 +146,33 @@ And two writer-consistency gaps: (7) `_mark_tool_index_stale` (embedding-provide
 **Effort:** M
 **Priority:** P2
 **Depends on:** v3.28.1
+
+---
+
+### Translation parity is enforced for cs only, not ru/tr
+
+**What:** The translation parity test checks `cs` against `en` for missing keys, while `ru` and `tr` are only checked for *unknown* keys. A PR can therefore ship a new `en` string with no `ru`/`tr` counterpart and CI stays green; the user silently sees English in an otherwise translated form.
+
+**Why:** Surfaced during the #570 ship review (v3.32.0) when all four locales happened to be updated together. Not a regression — the asymmetry predates that change — but it means the completeness of `ru`/`tr` decays invisibly rather than failing loudly.
+
+**How to apply:** Extend the missing-key assertion to every locale in `translations/`, or make the locale list explicit and require a deliberate opt-out for any locale intentionally kept partial. Expect an initial batch of failures for keys that are already missing.
+
+**Effort:** S
+**Priority:** P4
+
+---
+
+### Excluded-tools picker: label trust markers and identity are forgeable
+
+**What:** Five findings deferred from the #570 ship review (v3.32.0), all in the options-form exclusion picker. (1) **Marker forgery is narrowed, not closed** — `_label_text` rewrites `(`/`)` to brackets so a tool named `x (not currently available)` cannot imitate the trusted suffix, but that matches only U+0028/U+0029; fullwidth (U+FF08/09), small (U+FE59/5A), white (U+2985/86), superscript and tortoise-shell parens all survive `sanitize_tool_text` and read as parentheses. (2) **Duplicate labels** — `seen` dedupes on value, never on label, so two MCP servers both reporting `serverInfo.name = "Files"` with a `delete_file` each render byte-identical rows; the operator ticks one and leaves the other live. (3) **entry_id churn** — MCP api ids are `mcp-<entry_id>` and `entry_id` is regenerated on delete-and-re-add, so every stored exclusion for that server becomes an orphan that the UI still shows ticked while the new entry's identical tools enumerate unexcluded. (4) **No cardinality cap** — nothing bounds the number of `SelectOptionDict`s or the indexed-key union, and index rows are never evicted, so one server advertising tens of thousands of tools poisons the form permanently. (5) **Permissive `__eq__`** — `filter_excluded_tools` keeps a non-str `.name` (isinstance fails) while `APIInstance.async_call_tool` dispatches on `tool.name == tool_input.tool_name`, so a custom `llm.API` could register an object that is kept by the filter and dispatched by the caller.
+
+**Why:** All five are deceptions or losses in the UI of a *security control* — the user believes a tool is switched off when it is not — but none is reachable through the stock MCP integration by a merely buggy server, and (1) and (2) need a design decision rather than a patch: an in-band lexical marker in a flat label string cannot be made forgery-proof by escaping, because the adversary controls the surrounding text. Documented honestly in `docs/configuration.md` rather than silently carried. Deferred at the 3-cycle review bound after two rounds of fixes each introduced new bugs.
+
+**How to apply:** For (1)+(2) together, stop concatenating remote text with trust markers: put the state in a non-remote position (prefix `[unavailable] Server: tool`, rejecting a leading `[` in sanitized text) and disambiguate colliding labels with the api id, which is unique by construction. Alternatively NFKC-fold the remote half and match the Unicode Ps/Pe categories, which closes (1) only. For (3), consider matching on server name as a secondary key, or warn when an orphaned exclusion's tool name matches a live tool of another api — any auto-migration is a guess about identity, so surface it rather than silently remap. For (4), cap the total choice count and the indexed-key union, and label index-sourced entries distinctly from live-enumerated ones. For (5), one line of honesty in the comment plus an equality-based rather than isinstance-based keep test.
+
+**Effort:** M
+**Priority:** P3
+**Depends on:** v3.32.0
 
 ---
 
@@ -567,6 +596,102 @@ And two writer-consistency gaps: (7) `_mark_tool_index_stale` (embedding-provide
 ---
 
 ## Discovery
+
+### Identically-worded candidates about different devices still merge; the device token cannot split them as a matcher
+
+**Priority:** P2
+
+**What:** Two evidence-less low-battery candidates with identical `title`/`summary` but different device addresses share an identity key and one card is dropped, hiding a battery warning the user never sees. Reproduced on v3.32.1 with the #571 candidate: same wording under `0xffffaa67127301f8` and `0xaaaa11122233344` still collide. This is base behaviour, not a v3.32.1 regression — it was listed as a known limit in the v3.31.3 close-out on #571 and restated in the v3.32.1 one (issuecomment-5438771917).
+
+**Why it is not already fixed:** `_candidate_identity_keys` returns a SET and matching is set intersection, which is a union of criteria. Adding the device key can only create matches, never break the prose match those two candidates already share. Discrimination is not expressible in that shape.
+
+**Why the obvious fix is wrong:** the tempting move is to drop the bare prose key whenever a device token resolves, so the keys become `{device, prose⊕device}`. That does split the case above, and it silently reintroduces the exact regression #573's review existed to fix: a re-proposal whose slug degrades (`…_0xffffaa67127301f8_again` resolves no token, because two tokens survive the strip) keys on bare prose only, the original keys on `prose⊕device`, and they no longer meet. That is `test_filter_zero_evidence_low_battery_dedups_on_identity_hash` failing again. Do not take this route.
+
+**How to apply:** the fix needs pairwise comparison, not a flat key set. Carry a structured identity `(device_token | None, prose_hash)` and match on a predicate rather than intersection:
+
+- both tokens present and equal -> match
+- both tokens present and different -> never match, regardless of prose
+- otherwise -> fall back to prose equality
+
+That satisfies all three cases at once: different devices with identical prose split, a drifting reading under one address collapses, and a degraded slug still meets its twin on prose. The cost is real: `existing_keys` and `seen_batch` stop being `set[str]`, which changes `_existing_semantic_context`'s return type and every caller, and those sets are shared with the semantic-key path — so the refactor must keep semantic keys matching by equality exactly as they do now. Re-verify every test in `test_discovery_engine_dedupe.py`, and add a case per bullet above.
+
+**Note on precedence:** giving one identity key precedence over another is what produced the transitivity defect during the #573 review (propagating dropped candidates' keys let A link B to C when B and C shared nothing). The predicate above avoids that only because it is evaluated pairwise and never mutates a shared set. Keep that property.
+
+### The battery slug topic-word list is English-only, so a locale slug never yields a device token
+
+**Priority:** P2
+
+**What:** `battery_slug_device_token` (`sentinel/discovery_semantic.py`) strips `_BATTERY_SLUG_TOPIC_WORDS` from the `candidate_id` slug and requires exactly one leftover token. That list is English (`low`, `battery`, `sensor`, `level`, …), so a slug the model writes in the home's language — `nizka_baterie_senzoru_0xffffaa67127301f8` — leaves four tokens and returns `None`. The candidate falls back to the prose hash and keeps minting a card per cycle, which is the exact drift v3.32.1 set out to remove. Reproduced during the #573 review; the #571 reporter's own screenshot shows the English `low_battery_sensor_0x…` form, so it is unknown whether his instance is actually affected — that question is open with him on the PR thread.
+
+**Why:** The whole point of preferring the slug over the prose is that the slug is the one surface that stays stable across cycles when the LLM writes prose in a non-English locale (the #522 premise). An English-only strip list silently undoes that for exactly the users who need it most.
+
+**How to apply:** Do not guess at stems. Wait for the reporter's answer on which slugs his instance emits, then either (a) anchor on the `0x…` token directly rather than by elimination — scan the slug for a token matching the device-address shape and ignore everything else, which removes the strip list from the critical path entirely, or (b) extend the strip list per supported locale. (a) is preferable: it makes the extractor locale-independent by construction and cannot drift the way a word list does.
+
+### A shared 0x address merges two devices, and no syntactic rule can prevent it
+
+**Priority:** P3
+
+**What:** `_is_device_shaped_token` accepts a non-null `0x`-prefixed hex body of 8+ characters as a device identity. If the discovery LLM emits one genuine address for two different sensors, both candidates key the same identity and one card is silently dropped. Six weaker shape tests were tried during the #573 review and an adversarial reviewer broke five with a place label wearing the same grammar (`kitchen1`, `basement1`, `room1234`, `12345678`, `a1234567`); the null EUI `0x00000000` is rejected for the same reason.
+
+**Why:** Accepted knowingly. A device address and a place code are syntactically identical, so no predicate over the token alone can separate them — and at the point the model has written one address onto two candidates it has asserted they are the same device. The failure is bounded (both candidates are evidence-less, so neither can ever be promoted to a rule) and the alternative — matching on prose alone, as base did — over-merges strictly more often.
+
+**How to apply:** Only worth revisiting with a corroborating signal from outside the candidate text, since the model authors both the slug and the prose and cannot corroborate itself (tried and reverted during the review). The real fix is upstream: TODOS.md's "derive keys from routing" item makes the whole textual-key chain unnecessary for any candidate the normalizer can resolve.
+
+### Earlier predicate legs still emit constant evidence-less keys
+
+**What:** #571 removed the constant `subject=unknown|predicate=low_battery|…|entities=` key from the battery leg, but the legs ABOVE it in `candidate_semantic_key`'s elif chain (`unlocked`, `open`, `unavailable`, `disarmed`) have the same shape and were not touched. They fire on prose alone, so an evidence-less candidate that trips one of them keys a constant string shared by every other candidate that trips the same leg. Reproduced: `{"title": "Battery sensor unavailable", "summary": "The battery is low and offline.", "evidence_paths": []}` keys `v1|subject=unknown|predicate=unavailable|night=any|home=any|scope=any|entities=`, and a second candidate about a different sensor with the same wording collides on it — the `unavailable` leg wins before the battery leg is ever reached. The normalizer resolves no entity either and returns `missing_required_entities`, so the key claims a predicate nothing will ever register.
+
+**Why:** Codex adversarial finding during the #571 ship (2026-08-25), empirically reproduced. Pre-existing and unchanged by that PR — base keys these identically — so it was not fixed there. Note the `staleness` leg already carries the right guard (`subject != "unknown"`) with a comment explaining exactly this hazard; the four legs above it never got it.
+
+**How to apply:** Give each prose-only predicate leg the same treatment the staleness leg has — either gate on a resolved subject, or return None when the leg resolves no entities and the subject is still unknown (the #571 shape). Each leg needs its own check against the normalizer's branch order first: `open`/`unlocked` can legitimately key entity-less for the any-window template, so a blanket guard would break `open_any_window_at_night_while_away` dedup. Pin each with a two-different-sensors non-collision test.
+
+**Effort:** M
+**Priority:** P2
+**Depends on:** —
+
+---
+
+### A null-key candidate persists the LLM's own `semantic_key` and can suppress an unrelated proposal
+
+**What:** `DISCOVERY_OUTPUT_SCHEMA` accepts an optional model-supplied `semantic_key` (discovery_schema.py). In `_filter_novel_candidates` (discovery_engine.py) the stored record is `enriched = dict(candidate)` and the computed key is written back only under `if key:` — so whenever `candidate_semantic_key` returns `None`, whatever string the model put in `semantic_key` survives into the stored discovery record. `_collect_existing_keys` then prefers that stored value over recomputation (`key = str(candidate.get("semantic_key", "")) or candidate_semantic_key(candidate)`), so the model's string lands in `filter_keys`. A candidate that keys `None` but declares e.g. `v1|subject=entry_window|predicate=open|night=1|home=0|scope=any|entities=` suppresses the real open-windows-at-night-while-away proposal as `existing_semantic_key` until that record ages out of the 200-record window.
+
+**Why:** Codex adversarial finding during the PR #572 review (2026-08-25). Pre-existing — every Bug-2-fix null-key class (staleness, subject-less candidates) already reaches it — but #572 enlarges the null-key population, and discovery output is LLM prose that entity names and attributes feed into, so it is not purely hypothetical. Not fixed in #572 because the fix belongs in the engine, not the key function, and wants its own tests.
+
+**How to apply:** On the null-key path, drop the field rather than leaving it: `enriched.pop("semantic_key", None)` when `key` is falsy. Consider also recomputing rather than trusting stored keys in `_collect_existing_keys`, which would close this and the migration gap below together. Pin with a test that a candidate declaring a foreign `semantic_key` cannot suppress a differently-keyed candidate.
+
+**Effort:** S
+**Priority:** P2
+**Depends on:** —
+
+---
+
+### Identity-hash dedup cannot collapse re-proposals whose prose carries live values
+
+**What:** Candidates that key `None` dedup on `_candidate_identity_hash` = SHA-256 of `title\0summary`. LLM candidate prose routinely embeds the current reading ("Baterie klesla na 12 %"), so the same topic re-proposed on successive cycles hashes differently every time and each one becomes a new pending-approval card. Measured during the #572 review: three re-proposals of one sensor with a drifting percentage produce 3 cards where the pre-#572 constant key produced 1. The 200-record exclusion window then evicts real history, resurfacing unrelated previously-suppressed topics (same hot-buffer eviction mode as PR #511).
+
+**Why:** #572 correctly stops the constant key from over-merging distinct sensors, but the fallback it routes to is a prose hash, which is the wrong primitive for a topic that is re-described every cycle. The reported #571 symptom (an evidence-less card and an evidenced card for the same sensor sitting side by side) also survives for the same reason: a hash can never equal a semantic key.
+
+**How to apply:** Derive a stable identity for evidence-less candidates from something that does not drift — the device/sensor token in the `candidate_id` slug (`low_battery_sensor_<id>`), normalized the way the battery leg already normalizes slug text — and hash that instead of, or in addition to, the prose. Alternatively tighten the discovery prompt/schema so a low-battery candidate naming a specific sensor must cite a matching `entities[entity_id=...]` evidence path (the author's own suggestion on #572), which removes the shape entirely. Both wants issue #571 kept open as the tracking home.
+
+**Effort:** M
+**Priority:** P2
+**Depends on:** —
+
+---
+
+### Stored discovery keys are never migrated when the key function changes
+
+**What:** `_collect_existing_keys` prefers a record's stored `semantic_key` over recomputation, and there is no key-version stamp. Any change to `candidate_semantic_key` therefore silently desynchronizes history from freshly computed keys: after #572, records holding the old constant `v1|subject=unknown|predicate=low_battery|night=any|home=any|scope=any|entities=` match nothing, so every previously-suppressed evidence-less battery topic — including ones the user **rejected** (`_collect_existing_keys` is the only thing keeping rejected proposals suppressed, the "Bug 1 fix") — reappears once as a fresh card. Pending proposals do not have this problem: they recompute.
+
+**Why:** The class is known and documented (docs/sentinel.md notes a one-shot re-proposal after the v3.25.0 structured-context migration), and it self-heals after one cycle, so it has been accepted each time. It has now happened at least twice; a stamp would make it a non-event and would let CHANGELOG stop hand-writing the warning.
+
+**How to apply:** Stamp records with the key-generation version (`DISCOVERY_SCHEMA_VERSION` or a dedicated `semantic_key_version`) and recompute on read when the stamp is older, or drop stored-key preference entirely and always recompute in `_collect_existing_keys` (cheap: it is a pure function over a dict). Until then, note the one-shot re-proposal in the CHANGELOG entry for any PR that changes the key chain.
+
+**Effort:** S
+**Priority:** P2
+**Depends on:** —
+
+---
 
 ### Sanitized candidate IDs can collide across distinct sensors
 
