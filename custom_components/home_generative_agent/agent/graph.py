@@ -2219,6 +2219,9 @@ async def _invoke_chat_model_with_schema_recovery(  # noqa: PLR0913
                 if tools
                 else base_model
             )
+    # `while True` with return/raise in every branch — unreachable, but
+    # satisfies static analysis that expects an explicit return path.
+    raise AssertionError("unreachable")  # pragma: no cover
 
 
 def _bind_model_tools(

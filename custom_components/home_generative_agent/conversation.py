@@ -877,11 +877,19 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
         # tool-using turns are already persisted in full by LangGraph, so
         # dropping their chat_log echo also removes a duplicate.
         message_history: list[HumanMessage | AIMessage] = []
+        pending_user_msg: HumanMessage | None = None
         turn_used_tools = False
         for m in chat_log.content:
             if isinstance(m, conversation.UserContent):
+                # Commit the buffered user message only when the turn it opened
+                # did NOT use tools. A tool-using turn's request must be dropped
+                # along with the rest of that turn; leaving an unanswered
+                # HumanMessage in history causes the model to re-execute or
+                # merge stale commands on the next invocation (#589 P1).
+                if pending_user_msg is not None and not turn_used_tools:
+                    message_history.append(pending_user_msg)
+                pending_user_msg = _convert_content(m)
                 turn_used_tools = False
-                message_history.append(_convert_content(m))
             elif isinstance(m, conversation.ToolResultContent):
                 turn_used_tools = True
             elif isinstance(m, conversation.AssistantContent):
@@ -891,8 +899,8 @@ class HGAConversationEntity(conversation.ConversationEntity, AbstractConversatio
                     turn_used_tools = True
                 elif not turn_used_tools:
                     message_history.append(_convert_content(m))
-        # The last chat log entry will be the current user request—add it later.
-        message_history = message_history[:-1]
+        # pending_user_msg holds the current user request; it is submitted as
+        # the current turn's input and must not be included in history.
 
         mhlen = len(message_history)
         if mhlen <= self.message_history_len:

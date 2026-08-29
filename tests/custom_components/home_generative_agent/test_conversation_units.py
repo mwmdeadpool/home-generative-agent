@@ -1167,10 +1167,10 @@ def test_message_history_drops_spoken_text_of_a_tool_using_turn() -> None:
 
     history = _history(content)
 
-    assert [type(m).__name__ for m in history] == ["HumanMessage"], (
-        "the spoken tail of a tool-using turn must not reach the model"
+    assert history == [], (
+        "a tool-using turn's user request must be dropped alongside the "
+        "assistant/tool entries — an orphaned HumanMessage re-executes stale commands"
     )
-    assert history[0].content == "Turn on the garage light."
     assert not any("Turned on the light" in str(m.content) for m in history), (
         "an assistant reply with the tool call erased is the poison itself"
     )
@@ -1234,10 +1234,10 @@ def test_message_history_tool_flag_resets_on_the_next_user_turn() -> None:
 
     assert [type(m).__name__ for m in history] == [
         "HumanMessage",
-        "HumanMessage",
         "AIMessage",
-    ], "the tool flag must clear at the next user message"
-    assert history[2].content == "You're welcome."
+    ], "the tool flag must clear at the next user message; the tool-using turn's request is dropped"
+    assert history[0].content == "thanks"
+    assert history[1].content == "You're welcome."
 
 
 def test_message_history_non_none_tool_calls_still_excluded() -> None:
@@ -1261,5 +1261,7 @@ def test_message_history_non_none_tool_calls_still_excluded() -> None:
 
     history = _history(content)
 
-    assert [type(m).__name__ for m in history] == ["HumanMessage"]
-    assert history[0].content == "hello"
+    assert history == [], (
+        "a turn whose tool_calls is non-None drops both the assistant entry and "
+        "the user request that opened it"
+    )
