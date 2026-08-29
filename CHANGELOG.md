@@ -2,6 +2,31 @@
 
 All notable changes to this project will be documented in this file.
 
+## [3.33.3] - 2026-08-29
+
+### Fixed
+
+- **The agent no longer learns to stop controlling your home.** When a command was handled by another assistant sharing the conversation — Home Assistant's own built-in one, for instance — the agent read that turn back as if the assistant had simply *said* "Turned on the light" without doing anything. That is a perfect example of the wrong behaviour, and the model copied it: the next command got a confident spoken reply and no action, which was then read back as another example, and so on. Nothing in the log looked wrong, because from the agent's side nothing failed. The whole of a turn that used tools is now kept out of the history rather than just the part that names the tool, so a reply that no longer shows its actions can't be mistaken for one that never needed any ([#588](https://github.com/goruck/home-generative-agent/issues/588)).
+
+  This is more likely to bite smaller local models, which follow the shape of a conversation more readily than the large cloud ones. **Conversations that already went wrong stay wrong** — the old messages are saved with the conversation. Start a new one and it will be clean.
+
+## [3.33.2] - 2026-08-28
+
+### Fixed
+
+- **Claude no longer fails a turn because of how Home Assistant describes its timer commands.** Two of Assist's built-in commands — start a timer and shorten a timer — say "give me hours, or minutes, or seconds" in a form Anthropic's API refuses to accept, and it refuses the whole request rather than the one command, so any turn that happened to offer Claude one of those two tools died with `input_schema does not support oneOf, allOf, or anyOf at the top level` and the user heard an error. The requirement is now restated in the tool's own description before the request is sent, exactly as is already done for OpenAI and Gemini, so Claude still knows a duration is needed. **If you excluded the `Hass*` tools to work around this, you can restore them.** Reported by [@a4bell64](https://github.com/a4bell64) ([#585](https://github.com/goruck/home-generative-agent/issues/585)).
+- **One tool a provider refuses to accept no longer takes the whole reply down with it.** Providers validate every tool before reading the conversation, so a single schema they dislike fails the turn. When that happens the offending tool is now dropped and the turn is retried without it — a lost tool instead of a lost answer.
+- **The log now names the tool a provider rejected.** Providers identify it only by its position in the request ("tools.3"), and because the set of tools sent changes from turn to turn that position points at something different each time. The name is now resolved and written to the log, so the tool to exclude is stated outright instead of having to be deduced.
+
+## [3.33.1] - 2026-08-28
+
+### Changed
+
+- **New Gemini setups now default to `gemini-3.5-flash-lite`** for chat, image analysis and summarization, replacing `gemini-2.5-flash-lite`. Google has stopped handing out the 2.5 model to accounts that were not already using it, so a fresh Gemini install failed on its first message with `404 ... This model models/gemini-2.5-flash-lite is no longer available to new users`, and Google's own advice in that message is to move to `gemini-3.5-flash-lite`. Reported by [@Xornop](https://github.com/Xornop) ([#575](https://github.com/goruck/home-generative-agent/issues/575)).
+- **Nothing changes for an install that is already running.** The model you picked is stored with the feature that uses it and is not rewritten, and every 2.5 model stays on the list for accounts that still have access to them. If your install is one of the ones seeing the 404, open the affected feature — Chat, Image analysis or Summarization — and choose `gemini-3.5-flash-lite` yourself; nothing else needs to change.
+
+Note on temperature: Google recommends running the Gemini 3 family at its default temperature of `1.0` and warns that lower values can cause looping or weaker reasoning on harder questions. The integration still sends `0.2`, unchanged in this release. If a Gemini 3 model starts repeating itself or reasoning poorly, raise the temperature to `1.0` in that feature's settings.
+
 ## [3.33.0] - 2026-08-27
 
 ### Fixed
