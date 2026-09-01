@@ -995,6 +995,18 @@ AUTOMATION_TOOL_BLUEPRINT_NAME = "goruck/hga_scene_analysis.yaml"
 # ---------------- Dynamic model + provider registry ----------------
 # This is a dynamic registry of model categories, providers, and models.
 # It allows for easy addition of new models and providers without changing the code.
+# Human-readable provider-type names. Single source of truth: both the model
+# provider picker and the "which providers can serve this feature" notice read
+# it, so a type added to MODEL_CATEGORY_SPECS cannot render its raw key
+# ("openai_compatible") inside a user-facing sentence.
+PROVIDER_TYPE_LABELS: dict[str, str] = {
+    "ollama": "Ollama",
+    "openai_compatible": "OpenAI Compatible",
+    "openai": "OpenAI",
+    "gemini": "Gemini",
+    "anthropic": "Anthropic",
+}
+
 MODEL_CATEGORY_SPECS: dict[str, dict[str, Any]] = {
     "chat": {
         "provider_key": CONF_CHAT_MODEL_PROVIDER,
@@ -1147,6 +1159,27 @@ RECOMMENDED_TOOL_RELEVANCE_THRESHOLD = 0.15
 # with an empty map would create a second one. See ``filter_excluded_tools`` in
 # agent/helpers.py for the enforcement point.
 CONF_TOOL_EXCLUSIONS = "tool_exclusions"
+
+# Per-tool inclusions ("always-included tools"), same ``{api_id: [tool_name]}``
+# shape as CONF_TOOL_EXCLUSIONS. Additive counterpart to the exclusions:
+# every listed tool is appended to the model's tool list after vector-based
+# retrieval, outside the retrieval limit, so general-purpose tools (a web
+# search MCP tool, say) stay available on queries whose embedding never ranks
+# them (issue #579). Absent key = include nothing extra, which is the
+# pre-feature behavior; no RECOMMENDED_ default for the same single-spelling
+# reason as the exclusions. An exclusion always beats an inclusion — the
+# exclusion is a security control and must fail closed. Enforcement point:
+# the always-included step in ``_retrieve_tools`` (agent/graph.py).
+CONF_TOOL_INCLUSIONS = "tool_inclusions"
+
+# Hard per-turn cap on honoured inclusions. The form naturally keeps the list
+# short, but options can be written programmatically (bypassing the picker),
+# and each inclusion costs a sequential store lookup plus its schema's prompt
+# tokens on EVERY turn — an uncapped degenerate map turns each conversation
+# turn into thousands of DB round-trips and an oversized tool list the
+# provider rejects outright. Sixteen is far above any sane configuration
+# (the docs recommend one or two) while keeping the worst case harmless.
+TOOL_INCLUSIONS_MAX_PER_TURN = 16
 
 # Actuation Safety Net: Keywords that trigger force-attachment of control tools.
 # Derivatives that must stay in sync when verbs are added here:
