@@ -2,6 +2,18 @@
 
 ## Agent
 
+### Tool routing is by bare name, so a second server's same-named tool can capture calls
+
+**What:** `_format_and_dedupe_tools` (agent/graph.py) routes model tool calls through `routing_map[name] = api_id`, first seen wins. Tool names are remote data — each MCP server chooses its own — so when two selected servers advertise the same name, whichever candidate lands in the list first receives every call to that name, including arguments meant for the other server's tool. The v3.34.0 always-included-tools feature warns when this shadows a configured inclusion (`_append_included_tools` logs the cross-API collision), but the underlying surface predates it and covers ordinary RAG selections too, silently.
+
+**Why:** Converged on independently by three pre-landing review passes of the #579 branch (Claude adversarial, testing specialist, Codex adversarial retry — Codex also confirmed it empirically with a scripted probe). Out of scope for #579 because the fix is architectural: routing identity would need to become `(api_id, name)` end to end — the routing map, dispatch (`_call_tools`), the dedupe, and the name the model sees — and the model-visible name is the collision point, so composite identity likely means disambiguating advertised names (e.g. suffixing the API) rather than just the map key. Note dispatch for local tools additionally lowercases (`langchain_tools[tool_name.lower()]`, graph.py `_run_langchain_tool`), so case-variant names are a second, smaller collision class.
+
+**How to apply:** Decide the product shape first: either (a) disambiguate duplicate names at bind time (rename the later tool's advertised name, keep a reverse map for dispatch), or (b) refuse to bind a second same-named tool from a different API and warn — extending the inclusion-shadow warning to all candidates. (b) is a small deterministic change that keeps today's behavior for the non-colliding majority; (a) preserves both tools. Either way, add a regression test with two APIs advertising one name and assert where the call lands.
+
+**Effort:** M
+**Priority:** P2
+
+
 ### Gemini 3 models are sent temperature 0.2, which Google advises against
 
 **What:** Every Gemini call site in `__init__.py` (chat ~2394, VLM ~2463, summarization ~2539) binds `"temperature": <feature temp>` and `"top_p": 1.0` through `configurable_fields`. The feature default is `RECOMMENDED_*_TEMPERATURE = 0.2`. Google's Gemini 3 guide says "For all Gemini 3 models, we strongly recommend keeping the temperature parameter at its default value of `1.0`", and that lower values "may cause looping or degraded performance, particularly in complex mathematical or reasoning tasks". As of v3.33.1 the Gemini defaults are `gemini-3.5-flash-lite`, so the out-of-the-box configuration now hits that advice on every turn.
@@ -1446,6 +1458,60 @@ window-scoped check could suppress.
 **Why:** Surfaced by both adversarial passes on the #556 ship (2026-08-16). Cosmetic — CLOSE is the last event before process exit, so it is not reachable in a normal supervised run. Recorded because "is the cached client still usable?" is the obvious question a reader of the new cache will ask, and because the obvious fix is a placebo: rebuilding on a closed client changes nothing, since `get_async_client` hands back the identical closed object.
 
 **How to apply:** Catch that specific `RuntimeError` in `async_process_audio_stream` and log it at warning level with a "Home Assistant is shutting down" message, instead of letting it reach `LOGGER.exception`.
+
+**Effort:** S
+**Priority:** P3
+
+---
+
+## Model Providers
+
+### An unset embedding provider still means "use Ollama" downstream
+
+**What:** `resolve_runtime_options` (`core/subentry_resolver.py`) leaves `CONF_EMBEDDING_MODEL_PROVIDER` unset when no configured provider can serve embeddings. The consumer disagrees about what that means: `__init__.py:2143` reads it as `options.get(CONF_EMBEDDING_MODEL_PROVIDER, RECOMMENDED_EMBEDDING_MODEL_PROVIDER)` with `RECOMMENDED_EMBEDDING_MODEL_PROVIDER = "ollama"` (`const.py:668`), and the dispatch below it ends in a bare `else: embedding_model = ollama_embeddings`. So "no capable provider" and "provider we do not recognise" both arrive at Ollama at `RECOMMENDED_OLLAMA_URL`.
+
+**Why:** Found by both adversarial review passes on [#593](https://github.com/goruck/home-generative-agent/issues/593). It is **not** a regression from that PR — the pre-existing `"anthropic"` value took the same `else` branch — which is why it was left out of v3.33.5 rather than fixed there. It survives only because `ollama_embeddings` is gated on `if ollama_health.get(ollama_embedding_url)` (`__init__.py:2073`): with nothing answering on `localhost:11434` the model is `None` and semantic memory is cleanly disabled. On a box where something *does* answer, an embedder is built with a model that was probably never pulled, `index_config` is built anyway, and every embed call 404s while setup reports healthy. Two contracts ("absent = none" vs "absent = ollama") that must be reconciled explicitly.
+
+**How to apply:** Give "no capable provider" its own value rather than absence — the resolver writes an explicit sentinel, and `__init__.py` turns the `else` catch-all into an explicit `elif embedding_provider == "ollama"` so an unrecognised value disables embeddings instead of silently selecting Ollama. Check `build_model_deployments` and `resolve_fallback_chains` for the same absent-means-default assumption before changing the sentinel.
+
+**Effort:** M
+**Priority:** P2
+
+---
+
+### Two providers of the same type share one global API-key slot
+
+**What:** `_apply_provider_to_category` (`core/subentry_resolver.py`) writes credentials to flat global option keys — `CONF_API_KEY`, `CONF_GEMINI_API_KEY`, `CONF_ANTHROPIC_API_KEY` — one per provider *type*, not per category. Each is overwritten once per category as `category_provider` is iterated. With Conversation pinned to a "Work OpenAI" provider and Camera Image Analysis pinned to a "Personal OpenAI" provider, both categories run on whichever key was written last; the adversarial pass reproduced `CONF_API_KEY = sk-WORK` serving both.
+
+**Why:** Surfaced by the adversarial review of [#593](https://github.com/goruck/home-generative-agent/issues/593). Keys never cross provider *types* (each type has its own const), only instances of the same type — but #593 is precisely a request to run several providers side by side, and two accounts of the same provider (work/personal, or separate billing per feature) is the natural next configuration. The user sees no error: the second provider's key is simply never used, and its billing never moves. The v3.33.5 guard changes which instances enter `category_provider` and in what order, so it also changes which key wins.
+
+**How to apply:** The option keys are consumed all over `__init__.py`, so this is not a rename. Either give the per-category model builders the resolved `ModelProviderConfig` (which already carries its own settings) instead of reading global option keys, or add per-category key overrides that fall back to the global. Until then, document in `docs/configuration.md` that two providers of the same type cannot hold different credentials.
+
+**Effort:** L
+**Priority:** P2
+
+---
+
+### A pinned provider bypasses the capability check its fallbacks must pass
+
+**What:** `_feature_chain` (`core/subentry_resolver.py`) filters the user's ranked fallbacks with `category in fb.capabilities` but applies no such test to the pin itself — the pin is checked only by `_provider_supports_category`, which reads the provider *type*, not the stored capabilities. So a provider subentry whose stored capabilities exclude a category still serves it when pinned, and the very same provider is dropped when it appears as a fallback.
+
+**Why:** Found by the re-verification pass on [#593](https://github.com/goruck/home-generative-agent/issues/593) and confirmed present at v3.33.4, so it predates that work and was deliberately left alone there: tightening the pin to also require `category in provider.capabilities` would regress legacy subentries stored before capabilities existed, whose caps are inferred as `{"chat"}` by `_provider_capabilities_from_settings` and would lose vlm, summarization and embedding at a stroke. The visible oddity is that the promotion promise fails for exactly that caps-less legacy population: their provider works as a pin and vanishes as a fallback.
+
+**How to apply:** Decide what an inferred capability set means. Either mark inferred sets so they can be distinguished from user-confirmed ones and skip the capability test for them in both positions, or backfill real capabilities onto caps-less subentries at migration time and then apply the same test to pin and fallback alike. Do not simply add the test to the pin.
+
+**Effort:** M
+**Priority:** P3
+
+---
+
+### ru.json has no `common` section at all
+
+**What:** `strings.json`, `translations/en.json` and `translations/cs.json` each carry every `common.*` key; `translations/ru.json` carries none — the two pre-existing overwrite warnings are missing as well as the three notice strings added in v3.33.5.
+
+**Why:** Noticed during the v3.33.5 review. Not a crash: `homeassistant/helpers/translation.py` merges English underneath any non-English locale, so Russian users see the English text. It is a completeness gap, not a defect, and `test_translations.py` enforces full parity only for `cs.json`.
+
+**How to apply:** Add a `common` block to `ru.json` with all five keys translated, or leave it and accept English fallback. Decide deliberately rather than by omission.
 
 **Effort:** S
 **Priority:** P3

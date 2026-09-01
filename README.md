@@ -88,7 +88,7 @@ Click the button below to add the repository, then install and configure the app
 
 **4. Add the integration:** Settings → Devices & Services → Add Integration → search **Home Generative Agent** → complete the initial instruction screen.
 
-**5. Add a Model Provider:** on the integration page click **+ Model Provider** and configure OpenAI, Ollama, Gemini, Anthropic, or any OpenAI-compatible endpoint. A provider must exist before you can run Setup.
+**5. Add a Model Provider:** on the integration page click **+ Model Provider**. The first step asks **Edge** or **Cloud** — that choice decides which provider types the next step offers (**Edge** → Ollama, OpenAI Compatible; **Cloud** → OpenAI, Gemini, Anthropic). A provider must exist before you can run Setup. Click **+ Model Provider** again for each additional provider you want — reconfiguring an existing one replaces it in place rather than adding another.
 
 **6. Open the integration page and click + Setup.** Choose a setup mode:
    - **Basic** — enables all features with recommended defaults and creates the database subentry automatically. No database prompt appears.
@@ -103,7 +103,7 @@ You can now open the HA Assist panel and start talking to your home.
 | Guide | Contents |
 | --- | --- |
 | [Installation](docs/installation.md) | HACS install, manual install, optional apps (Ollama, face recognition) |
-| [Configuration](docs/configuration.md) | Model providers, features, Tool Retrieval (RAG), per-tool exclusions, LLM API, STT, YAML mode, Critical Action PIN, camera description language & extra VLM instructions, UI languages (en/cs/ru/tr) |
+| [Configuration](docs/configuration.md) | Model providers, features, Tool Retrieval (RAG), per-tool exclusions & always-included tools, LLM API, STT, YAML mode, Critical Action PIN, camera description language & extra VLM instructions, UI languages (en/cs/ru/tr) |
 | [Sentinel](docs/sentinel.md) | Anomaly detection pipeline, built-in rules, triage, baseline, blueprints, notification quiet hours, services API, health sensor |
 | [Camera Entities](docs/camera-entities.md) | Image and sensor entities, dashboards, automations, proactive video analysis, face recognition |
 | [Architecture](docs/architecture.md) | LangGraph agent, model tiers, context management, streaming, latency, tools |
